@@ -1,0 +1,7 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Pro Wave developer tasks: `cargo xtask check`, `wasm-check`, `rt-check`, `bench`, `status`"
+license = "GPL-3.0-or-later"

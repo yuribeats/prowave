@@ -1,0 +1,67 @@
+[package]
+name = "prowave-engine"
+version = "0.1.0"
+edition = "2021"
+description = "ProWave Studio real-time engine: lock-free transport, voices and cpal output"
+license = "GPL-3.0-or-later"
+
+[features]
+# Optional on Windows: the ASIO SDK is required by cpal's ASIO backend.
+asio = ["cpal/asio"]
+
+[dependencies]
+symphonia = { version = "0.5", default-features = false, features = ["wav", "aiff", "pcm", "flac", "mp3", "caf", "ogg", "vorbis", "isomp4", "aac", "alac", "adpcm"] }
+cpal = "0.18.2"
+rtrb = "0.4.0"
+tracing = "0.1.44"
+assert_no_alloc = "1.1.2"
+# SoundFont (.sf2) instrument synthesis: pure Rust, MIT licensed.
+rustysynth = "1.3.8"
+
+# Memory-mapped PCM sources (not in the browser build).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2 = "0.9"
+# Time stretch (Signalsmith Stretch, MIT): the C++ library and its bindings.
+signalsmith-stretch = "0.1.3"
+
+[build-dependencies]
+# The WORLD vocoder's C++ (world/, see build.rs).
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+# The plug-in window example clicks a control through a synthesized mouse event.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext"] }
+
+# Linux: let cpal give the audio thread real-time priority (needs an rtprio limit or rtkit;
+# falls back to normal priority with a logged warning if the system refuses).
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["realtime"] }
+
+# macOS: our own Core Audio duplex IOProc (input and output in one callback).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-audio-toolbox = "0.3.2"
+objc2-core-audio = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSString", "NSURL", "NSGeometry", "NSThread", "NSObject", "NSDate", "NSRunLoop", "NSNotification", "NSOperation", "block2"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSScreen", "NSApplication", "NSRunningApplication", "NSColor"] }
+block2 = "0.6.2"
+# VST 3 hosting (src/vst3.rs): the COM interfaces generated from Steinberg's SDK headers
+# (coupler-rs/vst3-rs, MIT OR Apache-2.0). The SDK itself is MIT since 2025.
+vst3 = "0.3.0"
+
+# Windows: our own WASAPI stream (IAudioClient3) for the smallest shared-mode period.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+]

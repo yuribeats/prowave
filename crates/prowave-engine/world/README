@@ -1,0 +1,6 @@
+WORLD vocoder by Masanori Morise (modified BSD licence, see LICENSE.txt), from
+https://github.com/mmorise/World at commit c794856b537758a3d300757db2e5e31685a822c2.
+
+Only the analysis sources (Harvest, DIO, StoneMask, CheapTrick, D4C), the synthesis and
+their helpers are kept; nothing in them is changed. build.rs compiles them with the cc crate
+(not for wasm32). src/vocoder.rs is the Rust side.

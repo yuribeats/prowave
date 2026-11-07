@@ -1,0 +1,50 @@
+[package]
+name = "prowave-app"
+version = "0.1.0"
+edition = "2021"
+description = "Pro Wave desktop app (egui) - clean-room DAW UI inspired by Logic Pro"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "prowave"
+path = "src/main.rs"
+
+[dependencies]
+assert_no_alloc = "1.1.2"
+eframe = "0.37.0"
+egui = "0.37"
+human-panic = "2.0.8"
+prowave-engine = { version = "0.1.0", path = "../prowave-engine", default-features = false }
+prowave-project = { version = "0.1.0", path = "../prowave-project", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.17.2"
+rtrb = "0.4.0"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+midir = "0.11.1"
+# Update check and install (src/updater.rs): HTTPS to GitHub, the checksum, the release zip.
+ureq = { version = "3.4.2", default-features = false, features = ["rustls", "platform-verifier"] }
+sha2 = "0.10"
+serde_json = "1.0.154"
+base64 = "0.23"
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+rhai = { version = "1", features = ["no_module"] }
+
+# The menus in the macOS system menu bar (see src/native_menu.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+# MIDI out with time stamps (CoreMIDI schedules each message for its time).
+coremidi = "0.9"
+muda = { version = "=0.21.0", default-features = false }
+# Musical Typing keeps playing while a plug-in window has the keyboard (an app-wide key monitor).
+objc2 = "0.6.5"
+block2 = "0.6.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "block2"] }
+
+[build-dependencies]
+winresource = "0.1.34"
+
+[dev-dependencies]
+tempfile = "3.27.0"

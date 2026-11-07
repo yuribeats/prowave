@@ -1,0 +1,663 @@
+# Pro Wave — Complete Logic Pro Clone Roadmap
+**Codename: `prowave-studio` | Stack: Pure Rust + WebAssembly | Targets: macOS, Linux, Windows, Web**
+> Pro Wave is an independent, clean-room DAW inspired by Apple Logic Pro. Logic Pro is a trademark of Apple Inc. No Apple code, assets, samples, or UI assets are reused. This document is a functional specification for re-implementation.
+
+## 0. Goal
+
+Build a 1:1 functional clone of Logic Pro 11 (as of 2024-2025) in pure Rust + WASM. Every menu, editor, instrument, effect, and workflow must be accounted for so an AI coding agent (Claude) can implement without guessing.
+
+This roadmap is the single source of truth. If it's not in here, it doesn't get built.
+
+---
+
+## 1. Complete Logic Pro Feature Inventory — What We Must Clone
+
+This is exhaustive. Based on Logic Pro 10.7 / 11.
+
+### 1.1 Transport, Timeline & Project
+
+- **Transport:** Play, Stop, Record, Play from Selection, Play from Last Locate, Pause, Cycle/Loop, Count-in, Metronome (Klopfgeist with custom sounds), Varispeed (Speed Only, Varispeed + Pitch)
+- **Timeline:** Bars|Beats, Time (SMPTE, HMS, Samples), Tempo Track, Time Signature Track, Beat Mapping Track, Arrangement Track (Intro, Verse, Chorus markers with colors), Marker Track
+- **Smart Tempo:** Adapt Project Tempo to imported audio, Adapt Region Tempo, Keep Project Tempo, Automatic, Aligned. Smart Tempo Editor (edit downbeats, beats). Multitrack Smart Tempo analysis
+- **Project Management:** Alternatives (like git branches for arrangement), Backups, Project Clean Up, Consolidate, 1000 Audio Tracks, 1000 Software Instrument Tracks, 1000 Aux, 1000 External MIDI, Sample Rate 44.1-192kHz, 64-bit summing
+- **Tuning:** Equal Tempered, Hermode Tuning (HMT), User Tuning (Scala .tun), A=440-446 variable, per-project
+
+### 1.2 Track Types & Track Management
+
+- **Audio Track:** Mono, Stereo, Input Monitoring, Record Enable, Input/Output assignment, Freeze, Track Stacks (Folder Stack = grouping, Summing Stack = submix bus with aux), Track Alternatives (playlists), Groove Track (master timing reference), Track Icon, Track Color
+- **Software Instrument Track:** MIDI Channel, Layered, Multi-timbral (16 channels per instance)
+- **Drummer Track:** Virtual drummer with 28+ drummers (Rock, Hip-Hop, EDM, etc.), X/Y pad Complexity/Loudness, Fill knob, Kit piece mutes, Follow Track (groove), Drum Kit Designer integration, Convert to MIDI region
+- **External MIDI / Instrument Track:** Program Change, Bank, External synth routing
+- **Aux / Channel Strip / Bus / VCA / Master:** Aux as destination for sends/busses, VCA faders
+- **Folder Track:** Pack folders
+- **Track Inspector:** Region inspector (Quantize, Velocity, Transpose, Gain, Flex) + Track Inspector (Instrument, MIDI FX, Audio FX chain, Sends, EQ thumbnail)
+- **Library & Patches:** Patch = Channel Strip + MIDI FX + Instrument + FX. Full Library with categories (Synth, Piano, Guitar...). User patches
+
+### 1.3 Audio Recording, Editing & Comping
+
+- **Recording:** Punch-in/out, Autopunch, Replace mode, Take Folders (pack takes into folder), Quick Swipe Comping (swipe to select best parts of takes), Comp to new track, Crossfade Tool (equal power, equal gain, custom curve, S-curve), Fade Tool
+- **Audio Regions:** Gain tool (clip gain +6/-24dB), Flex Time on region, Gain envelope, Reverse, Trim, Split at Playhead / Silence / Transient
+- **Audio Editor:** Audio File Editor (destructive view of file), Audio Track Editor (non-destructive, Flex Time/Pitch), Transient Detection (Sensitivity slider), Strip Silence (threshold, min length)
+- **Marquee Tool:** Marquee selection, Marquee + Selection-based processing (Gain, Normalize, Reverse, Silence)
+- **File Management:** Project Audio Browser (all audio files), Audio File metadata, Convert sample rate, Copy/Convert to project, Optimize files
+
+### 1.4 Flex Time & Flex Pitch (Critical)
+
+- **Flex Time Modes:** Slicing (drums), Rhythmic, Monophonic (vocals/bass), Polyphonic (chords), Tempophone (creative), Speed (time stretch + pitch shift linked)
+- **Flex Time Editing:** Flex markers, Quantize audio (like MIDI), Groove extraction, Move transients, Time stretch region by dragging
+- **Flex Pitch:** Per-note pitch editing inside Audio Track Editor, like piano roll for audio. Pitch Drift, Fine Pitch, Gain per note, Vibrato, Formant shift. Scale quantize (snap to scale), Reference Tuning. Create MIDI from Flex Pitch
+
+### 1.5 MIDI Sequencing & Editors
+
+- **Piano Roll:** Quantize (with Swing, Strength, Q-Swing), Velocity tool, Brush tool (paint notes), Time Handles (stretch MIDI), Note Repeat, Humanize, Select Equal Positions/Color/Pitch, MIDI Draw (CC automation per region), Scale Quantize, Flam, Velocity Limiter, Note Color = Velocity/Pitch/Voice
+- **Score Editor:** Full notation, Staff Styles (Piano, Guitar Tab, Drum), Score Sets, Brackets, Lyrics, Chord Symbols, Time/Key Signatures per staff, MIDI Meaning -> Notation, Print
+- **Step Sequencer:** Pattern Regions, Step Sequencer Grid (like 808), per-step: Note, Velocity, Gate, Tie, Chance, Repeat, Loop direction (Forward, Backward, Ping-Pong, Random), Automation per row, Convert to MIDI region
+- **Event List:** Raw MIDI event editor, SysEx
+- **Step Editor (Hyper Editor):** Drum lane editor for CCs
+- **MIDI Transform:** Fixed transforms (Crescendo, Humanize, Quantize, Transpose, Double Speed, etc.) + Custom Transform with conditions (Select and Operate)
+- **MIDI FX Chain (pre-instrument, 4 slots):** Arpeggiator, Chord Trigger, Modulator (LFO/Env to MIDI CC), Note Repeater, Randomizer, Transposer, Scripter (JavaScript MIDI processing - we will use Rhai/WASM scripting in Rust), Velocity Processor
+- **MIDI 2.0 & MPE:** MPE editing (per-note Pitch Bend, Pressure, Timbre), MIDI 2.0 High Resolution CC, Per-Note controllers
+
+### 1.6 Instruments — Logic Pro has 40+ — We must clone all categories
+
+**Sampler Family:**
+- **Sampler (EXS24 successor):** Multisampled, Zones, Groups, Velocity layers, Round Robin, Filter, LFOs, ADSR, Mod Matrix (10 slots), Import EXS, SFZ, DLS. Visual mapping editor
+- **Quick Sampler:** Drag-drop audio -> auto-slice (Transient, Beat, Equal), One-Shot, Classic, Slice mode with 8 slices, Record directly, Trim, Loop, Flex Time integration
+- **Drum Machine Designer:** 16/24/48 pads, each pad = Quick Sampler + channel strip with inserts/sends. Pad mute/solo, Q-Sampler controls per pad
+- **Drum Kit Designer:** Acoustic kits (20 kits), Producer Kits (multi-mic with bleed control, overhead/room mics), Drum Replacement (replace kit piece)
+
+**Synths:**
+- **Alchemy (Flagship):** 4 sources (VA, Additive, Spectral, Granular, Sampler), 3000+ presets, Morph pad X/Y, 16 LFOs, 16 Env, MSEG, Arp, Effects, Granular engine. For v1.0 we will build simplified version: Alchemy-Lite (2 sources, VA + Sampler)
+- **ES2:** Vector synth, 3 oscillators, 1 filter, Vector Envelope, Planer Pad, Distortion, Modulation Router (10 slots) - Complex but must be cloned exactly
+- **ES1, EFM1 (FM), ES P, ES E, ES M (Monophonic)** — simpler analog/FM synths
+- **Vintage Series:** Vintage B3 Organ (drawbars, percussion, Leslie emulation), Vintage Clav (D6), Vintage Electric Piano (Rhodes/Wurli), Vintage Mellotron (Tape playback)
+- **Sculpture:** Physical modeling (string, nylon, steel, glass), Object + Material model, Morphing
+- **Retro Synth:** 4 engines in one: Analog, Sync, Wavetable, FM
+- **Ultrabeat:** 25 voices drum synth (VA, FM, Sample, Model), Step Sequencer built-in
+- **Vocal Synth (Vocal Transformer)**
+- **Studio Strings, Studio Horns:** Orchestral with Articulation ID (key switching)
+- **New Logic 11 Session Players:** Bass Player, Keyboard Player (like Drummer but for bass/keys)
+
+**Implementation Plan for Instruments:** Build trait `Instrument: DspNode` with `nih-plug` compatible. All instruments share common `ModMatrix`, `Lfo`, `Adsr`.
+
+### 1.7 Effects — Logic has 80+ effects — Clone by Category
+
+**Must clone all, with identical controls for preset compatibility:**
+
+**Dynamics:**
+- Compressor: Models Platinum Digital, Studio VCA, Studio FET, Vintage VCA, Vintage FET, Vintage Opto. Threshold, Ratio, Knee, Attack, Release, Auto Gain, Sidechain filter, Mix
+- Limiter, Adaptive Limiter, Multipressor (4-band compressor), Enveloper (transient shaper), Noise Gate, Expander, DeEsser 2, Surround Compressor
+
+**EQ:**
+- Channel EQ: 8-band parametric, Analyzer (FFT), Analyzer Pre/Post, Q-Couple, Gain-Q-Couple, 20Hz-20kHz, 4x oversampling
+- Linear Phase EQ (same as Channel EQ but linear phase)
+- Vintage EQs: Vintage Graphic EQ (API 560 style), Vintage Tube EQ (Pultec), Vintage Console EQ (Neve)
+- Single Band EQs, Match EQ (EQ matching)
+
+**Filter:**
+- AutoFilter: LFO, Env Follower, Distortion
+
+**Reverb & Space:**
+- Space Designer: Convolution reverb, IRs (1000+ IRs), Length, Filter, Envelope, Direct/Rev
+- ChromaVerb: Algorithmic reverb, 14 models (Hall, Room, Plate...), 3-band Decay EQ, Attack/Smooth/Spin
+- SilverVerb, PlatinumVerb, EnVerb, Early Reflections
+
+**Delay:**
+- Delay Designer: Tap Delay Designer (visual tap programming, 26 taps, pitch/filter per tap)
+- Tape Delay: Saturation, Flutter, LFO
+- Echo, Stereo Delay, Sample Delay (sample-accurate delay for phase correction)
+
+**Modulation:**
+- Chorus, Ensemble, Flanger, Phaser, Tremolo, Auto Pan, Spreader, Microphaser, Ringshifter (frequency shifter), Scanner Vibrato (Leslie vibrato)
+
+**Distortion & Overdrive:**
+- Overdrive, Distortion, Bitcrusher, Clip Distortion, Phase Distortion, Distortion II
+
+**Imaging & Panning:**
+- Direction Mixer, Stereo Spread, Binaural Post-Processing, Gain (utility), MultiMeter, Loudness Meter, Correlation Meter, Tuner, Test Oscillator
+
+**Pitch:**
+- Pitch Correction (auto-tune like), Pitch Shifter
+
+**Special / Utility:**
+- Exciter, SubBass (bass synth), Voice Transformer (formant), Limiter, Spectral Gate, EnVerb
+
+**Mastering:**
+- Mastering Assistant (AI in Logic 11): Analyze track, suggest EQ, Dynamics, Stereo Spread, Loudness. We will clone as rule-based + ML (ONNX in Rust via `ort`)
+- Stem Splitter (Logic 11): Split mix into Drums, Bass, Vocals, Other using ML (Demucs). We will use `tract` + Demucs model
+
+**MIDI FX (already listed) + Audio FX from Logic's Pedalboard:** 35 guitar pedals (Delay, Distortion, Modulation pedals). Amp Designer: Amp + Cab + Mic modeling (100+ amps/cabs)
+
+**Implementation:** All FX implement `DspNode` with latency reporting for PDC. Use `fundsp` + custom. Each FX must have preset serialization JSON compatible with Logic's .pst where possible.
+
+### 1.8 Mixing, Automation & Metering
+
+- **Mixer:** Tracks, Aux, Bus, Output, Master. Fader (0 to +6dB), Pan/Balance/Stereo Pan (with Stereo Pan for stereo tracks showing left/right position), Input, Sends (pre/post, 8 per channel), Inserts (15 per channel), EQ thumbnail (click to open Channel EQ), Sends on Fader, VCA assignment, Group (Mix groups with attributes: Volume, Pan, Mute, Solo, etc.), All Tracks vs Single Track view, Channel Strip Settings (Save/Load)
+- **Automation:** Track Automation vs Region Automation (MIDI Draw). Modes: Read, Touch, Latch, Write. Trim. Automation curves: Linear, Exponential, Bezier with 2 handles. Automation Select Tool, Automation Snap, Relative/Absolute, Automation for every plugin parameter (sample-accurate), Automation Event List
+- **Metering:** Pre/Post fader metering, Peak, RMS, Loudness (LUFS), True Peak, Clip Indicator, Peak Hold, Level Meter with scale (0dB = -12dBFS option)
+- **Latency Compensation:** Plugin Delay Compensation (PDC) full, Low Latency Mode (bypass high-latency plugins when recording), Plug-in Manager showing latency
+
+### 1.9 Browsing, Loops & Sound Library
+
+- **Loop Browser:** Apple Loops (.aiff/.caf with metadata: key, tempo, style, instrument, category), Audio Loops (blue), MIDI Loops (green), Pattern Loops (yellow), Drag-Drop with auto-adaptation to project tempo/key
+- **Sound Library:** Downloadable content (70GB), Relocate Sound Library, Logic Content (samples, IRs, Alchemy samples)
+- **All Files Browser:** Finder-like browser, Audio files, Movies
+
+### 1.10 Live Loops & Performance
+
+- **Live Loops Grid:** Cells (loops), Scenes (columns), Trigger modes (Start/Stop, One Shot), Quantize Start (1 bar, 2 beats, etc.), Play From Here, Live Loops for Drummer, Step Sequencer patterns inside Live Loops
+- **Performance Recording:** Record Live Loops performance into Tracks area (arrangement)
+- **Remix FX:** DJ-style effects (Gate, Bitcrusher, Filter, Gater, Repeater, Reverse) with X/Y pad, applied to master or bus
+
+### 1.11 Score, Video & Sync
+
+- **Score Editor:** As above, plus Drum Notation, Tablature, Chord Track -> Score, Export MusicXML, Print
+- **Video Track:** Movie Track, Show Movie (floating window), Filmstrip thumbnails, SMPTE Sync, Detect Cuts, Export Audio to Movie, Synchronization Settings (MTC, MMC)
+- **Tempo & Time Signature List Editor:** Edit tempo events
+
+### 1.12 Sharing, Bounce & Export
+
+- **Bounce:** Bounce Project/Region/Track in Place, Offline/Real-time, Include/Exclude Automation, Normalize On/Off/Overload Protection, MP3/AAC/WAV/AIFF, 16/24/32-bit, Dither (Apogee UV22HR)
+- **Export:** Export All Tracks as Audio Files, Export MIDI, Export Score, Export as AAF (for Pro Tools), Export as MusicXML
+- **Share to:** GarageBand, Voice Memos, SoundCloud (deprecated, but we will do generic upload), Dolby Atmos ADM BWF
+
+### 1.13 Control Surfaces & Hardware
+
+- **Smart Controls:** Auto-mapped knobs for each instrument/effect (8 knobs), Mapping editor (Map knob to multiple parameters with range), Smart Controls for whole Patch
+- **Controller Assignments:** Learn mode (MIDI Learn), Assignment for Fader, Pan, Plugin Params, Key Commands
+- **Control Surface Support:** Mackie Control, Logic Remote (iPad app) - we will build Web Remote instead via WASM/WebSocket
+- **Key Commands:** 1200+ key commands, Customizable, Presets (US, etc.), Search, Conflict detection
+
+---
+
+## 2. Technical Architecture for ProWave (Pure Rust + WASM)
+
+```
+[ UI Thread: egui ] --(rtrb SPSC: Command)--> [ Engine Thread: prowave-engine ]
+         ^                                          |
+         |----(rtrb SPSC: Metering/Events)----------|
+                                                    v
+                                           [ Audio Thread: 1-8ms deadline, no alloc ]
+                                                    |
+                                    cpal (native) / AudioWorklet (web)
+```
+
+**Workspace Structure:**
+```
+/crates
+  /prowave-engine    # lock-free audio graph, transport, PDC
+  /prowave-dsp       # all FX: Eq, Comp, Reverb, etc. trait DspNode
+  /prowave-instruments # all instruments: Sampler, Quick Sampler, ES2, Sculpture, Vintage...
+  /prowave-mixer     # summing, busses, VCA, groups
+  /prowave-midi      # piano roll logic, score data, step seq, MPE, MIDI 2.0, MIDI FX
+  /prowave-plugin-host # CLAP primary, VST3, AU, sandboxed process
+  /prowave-project   # .prowave file (zip: project.json + media/ + irs/ + sampler instruments)
+  /prowave-ui        # egui widgets: Tracks, Mixer, Piano Roll, Score, Loop Browser, Library
+  /prowave-wasm      # wasm-bindgen glue + AudioWorklet entry + OPFS + Web Remote
+/xtask
+```
+
+**Critical Rust Rules (for Claude):**
+- Audio thread: `#![forbid(alloc)]` in process() path, use `assert_no_alloc`. No mutex, no `println!`, no `Vec::new()`
+- All params: `AtomicF32` + 1-pole smoother (`ParamSmoother { target, current, coeff }`)
+- Graph: Petgraph-like `AudioGraph { nodes: Vec<Node>, edges: Vec<Edge> }` sorted topologically each time graph changes (on engine thread, not audio thread)
+- PDC: Each node reports `latency_samples()`. Engine computes max latency, adds delay compensation to other paths using `rubato` + delay lines
+- State: Triple-buffer for UI->Engine. `Command` enum is only way UI mutates engine
+
+---
+
+## 3. Phased Roadmap — Implementation Order for Claude
+
+### Current work split (updated 2026-10-20)
+
+**Claude owns every crate** (`prowave-engine`, `prowave-app`, `prowave-project`, `xtask`,
+workflows, docs): all feature work and all engine work. **ChatGPT 6 does small, separate
+checks only** and never edits a crate's feature code. Each check ends in a short report and,
+where something is wrong, a minimal fix with a test, in its own commit.
+
+#### ChatGPT 6: small tasks (bug and exploit checks)
+
+1. **Hostile project files.** Try to break `.prowave` opening (`prowave-project`,
+   `project_io.rs`): zip bombs and huge declared sizes, `../` and absolute paths in media
+   names, duplicate and very long names, NaN/inf/huge numbers in `project.json`, deeply nested
+   folders, thousands of tracks/regions/notes. Expected: a clear error or clamped values, never
+   a crash, a hang, a file written outside the project's media folder, or unbounded memory.
+2. **Hostile audio files.** The same for `AudioFile::open` / streaming (`disk.rs`): truncated
+   and zero-length files, header lying about its length, absurd sample rates and channel
+   counts, 8/16/24/32-bit and float variants, AIFF and FLAC edge cases.
+3. **Panic hunt.** Grep non-test code for `unwrap`, `expect`, `[..]` indexing, `as` casts and
+   integer arithmetic that can panic or overflow on input from files or the UI; list each with
+   the input that triggers it.
+4. **`unsafe` and dependencies.** List every `unsafe` block with its safety argument, run
+   `cargo deny` / `cargo audit`, and note new advisories.
+5. **Translation files.** Read `crates/prowave-app/locales/*.txt` for wrong or unnatural
+   wording (they were written by an AI); fix a line only with a reason, keep `{}` placeholders.
+
+Rules: small diffs, `cargo xtask check` green, one commit per finding.
+
+#### Claude: everything else, in this order
+
+1. ✅ Tempo track, Marker track, Region gain / fades / reverse / normalize, compact menus,
+   17 languages (see the changelog).
+   ✅ 0.1.8: MIDI keyboard recording (with the sustain pedal), take folders from Cycle
+   recording, the Event list (List Editors), updates from GitHub (check and install for each
+   kind of install), Logic-accurate colours (regions, playhead, Piano Roll, sliders).
+2. Engine leftovers (Phase 0): ✅ triple buffer, ✅ Windows latency 32 -> 12 ms (IAudioClient3).
+   Left: try ASIO on real hardware, `basedrop` or a documented reason to keep the garbage queue
+   (kept for now), PipeWire/JACK.
+3. ✅ (2026-10-21) Signature track, Fade tool, crossfades, VCA, External MIDI, MP3/CAF, 1000
+   tracks. Tempo curves, SMPTE and MTC, Pattern and Drummer regions, memory-mapped streaming: ✅ (2026-10-21, see below).
+   ✅ 0.1.9 (2026-10-21): all of the above plus MIDI Transform, Modulator, Scripter, sustain pedal
+   and controllers to External MIDI, and the Score with clefs, key signatures, rests and ties.
+   Also: Check for Updates retries on slow connections (3 tries of 30 s).
+   Also: File > Close Project, and the Flatpak can reach the network (Check for Updates failed
+   there with a name-resolution error).
+   ⚠️ CI: `xtask check` fails on Ubuntu and macOS since the 0.1.9 commit (Windows passes); cause
+   not found yet, the job logs need a GitHub login to read.
+4. Flex / Smart Tempo (Phases 2-3), real effects, buses and automation (Phase 4), all started or done; next: Flex markers by mouse, per-note Flex Pitch, the Sampler (Phase 5).
+   ✅ 2026-10-24 (second part): Smart Tempo Editor, tempo changes inside a recording (beat tracking
+   by dynamic programming), multitrack analysis, Flex Time (6 modes, WSOLA, quantize audio,
+   follow the project tempo), Flex Pitch (YIN, correct to key, MIDI from audio) and Groove Track
+   (MIDI followers). Not done: Flex markers by mouse, per-note Flex Pitch editing, audio followers.
+   ✅ Hardening of that work (2026-10-24): the Flex sounds live in the user's config folder, are
+   cleared after 14 days and keyed by the recording's size and date; a project file cannot ask
+   for more than 4096 Flex markers or pitch moves; at most 4 Flex sounds are made at once; a file
+   used in many regions is analysed once; the Flex result is capped at 10 minutes.
+   ✅ Mixer, effects, buses and automation (2026-10-24): 8 real effects in the Audio FX slots
+   (Channel EQ, Compressor, Space D reverb, Tape Delay, Chorus, Phaser, Overdrive, Filter;
+   `fx.rs`, up to 8 per strip, made off the audio thread, no allocation while they play);
+   the slot menu adds, replaces, moves, bypasses and removes them and double-click opens the
+   effect's window (sliders, EQ curve, compressor gain reduction). Sends (4 per strip, pre or
+   post fader, knob level) copy a strip to Bus 1-8; Aux strips listen to the bus of their number
+   (`routing.rs`, `EngineCore::mix_strips`); Sends on Faders; the Gain Reduction meter and the
+   EQ thumbnail are real. Automation of the fader and pan (Off, Read, Touch, Latch, Write): the
+   engine plays the lanes (read every 32 samples, VCA level added), the Mixer writes them while
+   playing, the Automation editor window adds, moves and deletes points. Copy/Paste Channel
+   Strip, New Aux and New VCA from the Mixer's menus. Saved in `.prowave` (older files load).
+   ✅ Mixer, second part (2026-10-24): the strips and buses are summed in 64 bits (a 1000 and a
+   -1000 cancel and the quiet signal between them stays); Noise Gate, Limiter (2 ms look-ahead
+   that never passes its ceiling) and a 6-band Multi-Band EQ (low shelf, four bells, high
+   shelf; 16 settings, drawn curve in the window and the strip's thumbnail); delay compensation
+   (PDC: an effect with a look-ahead delays every other strip so all stay in time, also the
+   signal sent to buses and Aux strips; bypassing it takes the delay away); automation of
+   every effect setting (a slider moved while playing writes its lane, in Read mode it moves by
+   itself; lanes follow effects that move or go); curved stretches in every lane (a handle in
+   the middle of each stretch bends it, double-click straightens it); Mix Groups (Group slot:
+   new group, pick one, settings for Volume, Pan, Mute and Solo, delete; moving one fader or
+   pan moves the group by the same amount, Mute and Solo follow from anywhere). Saved in
+   `.prowave`. Tests: engine 123, app 321 (new ones for every item above).
+   Not done: Bezier curves with two handles, automation of sends and of the Output slot, the
+   Output slot, a multi-band compressor, linear-phase EQ, CLAP / VST3 / AU plug-ins (a hosting
+   task of its own: loading the library, its parameters and its window).
+   ⚠️ Started 2026-10-24: onset detection and tempo estimation of audio files in the engine
+   (`analysis.rs`: log energy of the first difference in 2.5 ms blocks, peaks over a moving
+   threshold; tempo from the onset strength's autocorrelation, 60-200 BPM, with a check for
+   the double tempo), and Detect Tempo / Adapt Project Tempo to Region on audio regions.
+   Done since: Smart Tempo Editor, tempo maps from audio. Next: Flex markers by mouse.
+
+Engine items already done by ChatGPT 6 and reviewed on 2026-10-20: region gain, fades and
+reverse (`ClipEdit`), `peak_of`, tempo ramps, SMPTE, optional `asio` feature, the 24-track
+streaming check, input hardening. Review fixes: SMPTE labels one frame early at frame-exact
+positions (fixed, tested), prefetch size now follows the number of clips.
+
+✅ Done 2026-11-06 (in three PRs, see the changelog): Edit > Cut, Copy, Paste and Split at Playhead
+   on the selected region (`region_edit.rs`; the menu bar and the Tracks area's Edit menu). Paste puts
+   a copy on the selected track at the playhead (audio regions only on audio tracks); Split cuts a MIDI
+   region at the playhead and shortens a note that crosses the cut. Not done: splitting audio, Pattern
+   and Drummer regions. Select All and Join were added in 2026-11-06 (see below).
+✅ Done 2026-11-06: Project Settings window (`project_settings.rs`; File > Project Settings, one tab
+   per group, saved in `.prowave`): General (project name), Synchronization (frame rate, start time,
+   MIDI Time Code ports), Metronome (click volume and accent; engine `SetClick`), Recording (1-4 bars
+   of count-in), Tuning (A4 427-453 Hz for software instruments; engine `SetTuning`), Audio (output
+   device and sample rate, read only), MIDI (which input plays live notes). Not done: choosing the
+   audio output device and buffer size, MIDI output ports, tuning for audio regions, Logic's other
+   General options.
+
+✅ Done 2026-11-06: Track menu. Rename Track, Assign Track Color (16 swatches), Assign Track Icon (15
+   icons or Automatic), and Configure Track Header (hide the number, icon, name, M S R I buttons,
+   volume slider or pan knob), all in `track_dialogs.rs`; Show Master Track adds a Master strip under
+   the tracks with the master fader (no automation lane yet). Icons, colours, names, the master strip
+   and hidden header parts are saved in `.prowave`. Not done: Show Chord Track and Show Arrangement
+   Track (new data models).
+
+✅ Done 2026-11-06: multi-region selection. Edit > Select All selects every region; Shift or Command
+   click adds or removes a region; dragging a selected region moves the whole selection; Delete, Copy,
+   Cut, Paste, Repeat, Split and Set Locators by Regions act on all of it. Join (menu bar and Tracks
+   area) merges the selected MIDI regions of one track into one region, keeping every note where it
+   was. `region_edit.rs`, `tracks_area.rs` (`TracksView::extra`). Not done: Join or Split on audio,
+   Pattern, Drummer and take-folder regions; Bounce and Join.
+
+✅ Done 2026-11-06: Tracks area Functions menu. Move to Playhead (the earliest selected region goes to
+   the playhead, the others keep their distances), Quantize (the notes of selected MIDI regions go to
+   the region's Quantize grid, 1/16 when Off; destructive), and Folder (the selected track goes into a
+   track stack, as Track > Create Track Stack; this is our reading of Logic's "Folder"). Not done:
+   Bounce in Place (needs offline rendering) and Convert to New Sampler Track (needs a sampler track).
+
+✅ Done 2026-11-06: MIDI outputs. The sender (`midi_out.rs`) now works on a `Sink` trait, so its logic is tested with recording ports and a real ALSA virtual port (midir creates it; the notes and the clock arrive). Fixes: a note that was sounding when its track was moved to another port or channel is now released on the port it started on (before, it stayed on). New: each external track sends a Bank Select and a Program Change when it is routed (Inspector: MIDI Program and MIDI Bank, Off at the top of each range); MIDI Clock (Timing Clock 24 per beat, Start, Continue, Stop, Song Position) to the port chosen under Synchronization > Send MIDI Clock, made on the audio clock (`clock.rs`, the engine); Project Settings > MIDI > Send MIDI Panic (All Sound Off and All Notes Off on all 16 channels of every output in use). Saved in `.prowave` (`midi_program`, `midi_bank`, `midi_clock_out`). Not done (the last two were done later, see the next entries): pitch bend, channel aftertouch and SysEx; following MIDI clock from an input; a seek while stopped sends nothing, and a seek while playing sends a Song Position; no test on a real hardware synth.
+
+✅ Done 2026-11-06: pitch bend, channel pressure and SysEx in regions. A region's events
+   (`Control`, value now 0-16383) take reserved kinds above 127: PITCH_BEND (128), CHANNEL_PRESSURE
+   (129) and SYSEX_BYTE (130; one event per byte of a message, from F0 to F7, all at one start).
+   Played live: pitch bend and channel pressure are recorded (the recorder and Capture Recording);
+   MIDI files: they are imported and exported, and SysEx is read and written (a message the file
+   leaves without F7 is completed; SysEx is kept with the first track of its MIDI track that has
+   notes). External MIDI tracks send all three (`midi_out.rs`: 14-bit bend, a whole SysEx message at
+   its F7). Tests: MIDI file round trips, live parsing, the sender with recording ports, engine
+   events on time, and bytes through a real ALSA virtual port. Not done: entering SysEx by hand (only
+   files and the live input supply it), SysEx and bend on the internal instruments, and poly
+   aftertouch (not parsed).
+
+✅ Done 2026-11-06: following MIDI clock from an input. Synchronization > Follow MIDI Clock picks an input
+   port (`clock_in.rs`, midir). `clock_follow.rs` reads the Timing Clock (the tempo is the average of
+   the last two beats, reported every quarter note and rounded to a tenth), Start (play from the
+   beginning), Continue, Stop, and Song Position (the playhead jumps). The app applies them every frame.
+   Saved in `.prowave` (`midi_clock_in`). Tests: the follower with exact timings (120 BPM comes back as
+   120), the mapping to the project, and clock bytes read through a real ALSA virtual port. Not done:
+   the tempo does not follow a clock that is not steady (it averages, so a sudden change takes two
+   beats); the transport's own Play and Stop buttons still work next to it; a clock output on the same
+   device would echo back; and testing with a real hardware clock source (not possible in this sandbox).
+
+✅ Done 2026-11-06: event list fixes and SysEx entry. The list shows pitch bend with its full 14-bit
+   value, channel pressure as Aftertouch, and each System Exclusive message as one row with its
+   bytes in hex (it used to show a bend clamped to one byte and every SysEx byte as its own row).
+   Event list > SysEx… types a message in hex (`sysex.rs`) and puts it in the selected MIDI region at
+   the playhead (or the region under the playhead). Fixes: a followed clock port that is missing is
+   looked for every three seconds, not on every frame; and clearing the followed port no longer keeps
+   its name for the next choice. Not done: SysEx for audio, Pattern and Drummer regions; the list's
+   other columns for SysEx (the Length column is empty).
+
+## Status at release 0.2.2 (2026-11-06)
+
+The items below marked done are in 0.2.2 (see CHANGELOG.md for the full list, and its known
+limitations at the end of the section). Still open, in the order the work would take them:
+
+- Plug-in hosting (CLAP first, then VST3 and AU), with a sandboxed process per plug-in. Not started.
+- Audio output device and I/O buffer size in Project Settings > Audio (needs an engine stream restart).
+- Bounce in Place and Bounce and Join (offline rendering in the engine).
+- Convert to New Sampler Track (needs a sampler instrument).
+- Show Chord Track and Show Arrangement Track (new data models).
+- Split and Join on audio, Pattern and Drummer regions (audio needs a start offset into the file).
+- Hardware tests of MIDI output, MIDI clock and SysEx; native-speaker review of the translations.
+- Release 0.2.2 was tested on Ubuntu 26.04.1 LTS only; Windows and macOS builds are not tested for it.
+
+### Phase 0: Foundation (Weeks 1-4)
+- [x] `cargo xtask` setup, CI for mac/win/linux + wasm
+  - Done: `cargo xtask check|wasm-check|rt-check` (fmt, clippy -D warnings, tests, no-alloc, cargo-deny, wasm32) passes on Windows.
+  - CI: `.github/workflows/ci.yml` runs `cargo xtask check` on Ubuntu, Windows and macOS (plus the
+    cross-target builds) on every push to `main`. Checked 2026-10-31: green on all three systems.
+  - Linux: x86_64 release binary cross-builds from Windows (Zig + `cargo-zigbuild`, glibc 2.31+) and is packaged in `dist/prowave-linux-x86_64.tar.gz` with a full user README; audio thread asks for real-time priority (cpal `realtime`); window class set for desktop integration. Audio start falls back across devices/sample formats; the unsaved-changes prompt is in-app (no zenity); clippy `-D warnings` + test compilation pass for the Linux target; real DT_NEEDED is only libasound + libc. The release workflow ran on GitHub (v0.1.1) and the packaged binary stays up for 15 s under a virtual X display with software OpenGL (tarball and AppImage), but it has not been run on real Linux hardware: no audio device or GPU has been tried.
+  - macOS: cannot be built on Windows (needs Apple's SDK). `.github/workflows/release.yml` builds a universal ad-hoc-signed `.app` on GitHub's macOS runner (built successfully for v0.1.1; never launched on a Mac).
+  - Release packages (v0.1.1, all built and install-checked on GitHub): Linux tarball, `.deb` (installed and removed on Ubuntu), `.rpm` (installed and removed in a Fedora 41 container), AppImage, Flatpak bundle, macOS `.app`. They are workflow artifacts, not yet published as a GitHub Release.
+  - Pending: a Windows build in the release workflow; publishing a GitHub Release page; macOS and real-Linux-hardware runs; native PipeWire/JACK back-ends.
+- [x] Lock-free primitives: `rtrb` SPSC queue, triple-buffer (`basedrop` not used: the garbage queue is kept, see below)
+  - Done: `rtrb` command queue + garbage queue (old songs freed off the audio thread); `assert_no_alloc` guard on `process()` in debug builds and tests.
+  - Done (2026-10-21): triple buffer (`triple.rs`) for the engine -> UI state: playhead, transport, master and track meters, block size and output delay are published together after every audio block (`EngineState`, read with `Engine::state()`), so the UI never mixes two blocks. Tested for torn reads across threads and under miri (`cargo xtask check` now runs miri; CI installs nightly + miri).
+  - `basedrop`: not used on purpose. The garbage queue returns old songs/notes/tempo maps to the UI thread to be freed, with a credit system so the queue can never overflow; it is tested in `state_reclamation` and `queue_tests`.
+  - Checked 2026-10-21: Windows (`cargo xtask check`, all 7 steps; app start and 24-track bench); Linux x86_64 compiles (engine clippy `-D warnings`, whole app via `cargo zigbuild`) but tests/audio not run there; macOS only in CI.
+- [x] Logging `tracing`, crash handler `human-panic`, `metrics` for DSP load
+  - Done: `tracing` in the engine; `tracing-subscriber` in the app (`RUST_LOG`, default `warn,prowave=info`); `human-panic` crash reports (release builds).
+  - DSP load: each audio callback is timed against its real-time budget and the peak is published through a lock-free atomic (`Shared::take_dsp_load`); the LCD CPU meter shows it (red at >=90%, % on hover). Atomics are used instead of the `metrics` crate (no exporter needed yet).
+- [x] Basic `cpal` playback: sine wave, measure output latency. `prowave-engine` example `beep` (true round-trip latency still needs a loopback cable)
+  - Done: `beep` plays 440 Hz through the engine and reports device output latency (output side only; true RTL needs a loopback).
+- **DoD:** `cargo run -p prowave-engine --example beep` plays 440Hz <20ms on all OSes (Windows met; macOS and Linux not measured yet)
+  - Status (2026-10-21): MET on Windows with the new low-latency path. Pro Wave opens its own WASAPI shared-mode stream through `IAudioClient3` (`wasapi.rs`, the smallest period the audio engine allows, MMCSS "Pro Audio" thread) and falls back to cpal if the device cannot do it (`PROWAVE_NO_LOW_LATENCY=1` forces cpal). On the development PC: 32 ms -> 12 ms reported output latency, 0 xruns (the driver's smallest period there is 480 frames, so a driver that supports 128 or less will do better). ASIO is still built but untested: no ASIO driver or SDK on the development PC. macOS/Linux not measured yet (Linux/ALSA should reach 128-frame buffers with real-time priority).
+
+### Phase 1: Audio Engine Core + Track System (Weeks 5-10)
+- [x] Transport: sample-accurate clock, tempo map (tempo + time signature automation), SMPTE sync
+  - Done (engine): `prowave-engine/src/tempo_map.rs` — tempo events (5-990 BPM, quarter-note tempo like Logic) and signature events, beat<->seconds, bars/beats; the transport advances through tempo changes per sample, audio clips are positioned by real time, the metronome follows the signature (accent on bar 1). Sent with `Command::SetTempoMap` (old map freed off the audio thread).
+  - App: the project has one tempo and one time signature, both saved in `.prowave`. The LCD edits them (drag the tempo, or the signature's numerator and denominator); bar/beat display, region placement, grid lines and snapping follow the signature in quarter notes, so 6/8 and 7/8 line up with the engine.
+  - Tempo track (2026-10-20): Track > Show Tempo Track shows a global Tempo track above the tracks. Double-click adds a tempo change (snapped to the grid), drag a point to change its tempo or move it, double-click or right-click > Delete Tempo Change removes it. Saved in `.prowave` (`tempo_changes`, older files open with none), undoable, sent to the engine as a `TempoMap`; the LCD shows and edits the tempo at the playhead; imported audio gets its length from the tempo map.
+  - Marker track (2026-10-20): Track > Show Marker Track; double-click to add, click to jump, drag to move, double-click to rename, right-click for colour and Delete. Navigate > Create Marker (at the nearest bar), Delete Marker, Go to Next / Previous Marker. Saved in `.prowave` (`markers`).
+  - Signature track (2026-10-21): Track > Show Signature Track. Double-click adds a change at the nearest bar (with the signature in force there), double-click a block or right-click > Edit Signature… sets numerator and denominator, drag moves it to another bar, right-click > Delete Signature Change. The LCD shows and edits the signature at the playhead. Regions sit on bars and follow the changes (`Project::bar_to_beats` / `beats_to_bar`, tested against the engine's `TempoMap` for mixed signatures); the ruler, grids, Piano Roll bar lines, Event list positions, Go to Next Bar and recording follow them too. Saved in `.prowave` (`sig_changes`, older files open with none), undoable.
+  - Tempo curves (2026-10-21): right-click a tempo point > Ramp to Next Tempo Change (or Hold Tempo Until Next Change); the line between the two points is straight and the engine integrates it (`TempoCurve::Linear`). A change added inside a curve continues it; the control bar's tempo shows the value at the playhead. Saved in `.prowave` (`ramp`, `tempo_ramp`).
+  - SMPTE (2026-10-21): the control bar's time follows the whole tempo map (changes and curves), a frame rate (24, 25, 29.97, 29.97 drop frame, 30) and a start time (right-click the time). MIDI Time Code out: quarter frames from the audio clock plus a full frame when the playhead jumps, to a chosen MIDI port. Follow MIDI Time Code: the transport starts, jumps (full frame, or more than 0.06 s off) and stops with the time code arriving on a chosen input port ("chase": it is not sample-locked or resampled). Tested with generator-to-decoder round trips; not tried with real hardware. Not done: MIDI Machine Control, MTC with 29.97 non-drop labelled as such (it goes out as 30).
+- [x] Pattern and Drummer regions (2026-10-21): Track > New Pattern Region / New Drummer Region, or double-click an empty stretch of a Drummer track. A Pattern region loops a grid of steps (1-64 steps, 1/4 to 1/32 and triplets, swing, gate, up to 16 rows, velocity per step) edited in the bottom panel's Step Sequencer tab. A Drummer region plays Rock, Pop, Funk, Jazz, Hip Hop or Electronic with a Complexity/Loudness pad, swing, fills, kit pieces on or off and variations; it follows any signature. Both make ordinary notes (the same settings give the same notes), remade when the region's length or the bars under it change; Convert to MIDI Region makes them editable in the Piano Roll. Not done: per-step Chance, Tie, Repeat and loop direction, the Drummer following a Groove Track, and per-bar Drummer edits. The Drummer is algorithmic and was judged by its printed grids and tests, not by ear.
+- [x] Track types: Audio, Instrument, Aux, Master, VCA, Folder/Summing Stacks, External MIDI
+  - VCA (2026-10-21): Track > New VCA Track. A VCA track is a fader with Mute and Solo (purple strip in the Mixer, filter Master/VCA); a track's Group slot picks the VCA that moves it. The engine gets each track's level plus its VCA's, and Mute/Solo from the track or its VCA (`Project::track_mix_of`). Assignments follow tracks that are inserted or deleted; saved in `.prowave` (`vca`).
+  - External MIDI (2026-10-21): Track > New External MIDI Track. The track's regions send Note On/Off to a MIDI output port and channel chosen in the Inspector (`midir`, own sending thread, `MidiOutEvent` queue from the audio thread); the engine makes no sound for it, stopping or seeking releases held notes, and live keyboard notes go out too. Saved in `.prowave` (`midi_port`, `midi_channel`). Notes are sent when the thread sees them (about 1 ms after the audio block), not at their exact sample. Not tried with a real synthesizer yet. Controllers from the regions (the sustain pedal included) are sent; program and bank: see the MIDI outputs entry below.
+- [x] Region system: Audio regions (backed by `symphonia` decoder wav/aiff/caf/mp3/flac), MIDI regions, Pattern regions, Drummer regions
+  - Done (2026-10-21): MP3 and CAF decode like the other formats (an MP3 without a length in its header is measured by decoding it once); drag them onto the window. Tests use small files in `crates/prowave-engine/tests/fixtures`. Pattern and Drummer regions: see below.
+- [x] Non-destructive editing: clip gain, fade in/out with curves (equal-power, linear, S-curve), crossfade, Reverse, Normalize (non-destructive)
+  - Done (engine, 2026-10-20): clip gain, beat-based fades, and reverse playback via `Engine::stream_clip_with`; `peak_of` for Normalize.
+  - Region end timing is cached between song/map/transport changes; completed fades skip
+    curve evaluation. Tests verify fade output after tempo and song changes without allocation.
+  - Done (app, 2026-10-20): Region Inspector Gain, Fade In/Out (1/16-note steps, shown in ms), Curve, Reverse; right-click Normalize Region Gain (non-destructive, peak to 0 dBFS) and Reverse Region; waveform drawn with gain, reversed, fades shaded; saved in `.prowave`. Pending: none from this group (see below).
+  - Done (2026-10-21): Fade tool (Tracks area tool menu): drag the left half of an audio region for a fade in, the right half for a fade out, in 1/16 notes. Crossfades: Drag: X-Fade (or the Inspector's X-Fade box): a region dropped on an earlier audio region fades in over the overlap while the earlier one fades out, with the region's curve (`Project::effective_fades`; the engine just plays the longer fades); drawn as fades on both regions; saved in `.prowave` (`crossfade`).
+- [x] Disk streaming: memory-mapped + prefetch thread, 1000 tracks streaming test
+  - Done (engine): one background decoder/prefetch thread and per-clip lock-free rings; ring
+    capacity reduced to about 64 KiB (170 ms at 48 kHz) per clip, down from about 512 KiB.
+  - Reverse streaming reuses decoded windows with 8,192 extra source frames of look-behind,
+    avoiding decoder seeks on every output block; verified across cache boundaries and seeks
+    at matching, higher, and lower output sample rates.
+  - Disk registration work is limited to eight requests per worker pass so active streams
+    get refills during import bursts; canceled requests are discarded before opening files.
+  - Done (2026-10-21): `MAX_TRACKS = 1024` (track numbers are `u16`, per-track state on the heap). `cargo test --release -p prowave-engine --test thousand_tracks -- --ignored --nocapture`: 1000 stereo streams for 20 s on the development PC, 0 underruns, 37% render load (worst callback 3.6 ms of 5.3 ms); the app builds its interface for 1000 tracks in about 1.9 ms per frame (`PROWAVE_BENCH_TRACKS=1000 prowave --bench file`).
+  - Memory-mapped PCM (2026-10-21): WAV and AIFF/AIFF-C with 16/24/32-bit integer or 32/64-bit float samples are read straight from a memory map (`mapped.rs`); everything else, and any file with an unusual or unfinished header, goes through the decoder. The samples are bit-identical to the decoder's (tested for every format). Measured on the development PC: no speed gain (10 minutes of 24-bit stereo read in 245 ms either way, random seeks 32 µs against 22 µs), but 1000 streaming tracks use 144 MB of private memory instead of 182 MB (the Windows working set also counts the mapped file pages, 3.8 GB for the test's files, which the system can drop). A clip with nothing to read lets go of its map after 1 s, so Windows lets other programs overwrite the file; a file that shrinks while mapped (a crash on Unix) is noticed within 250 ms and read by the decoder instead. `PROWAVE_NO_MMAP=1` turns it off. The 24-track/60-second stream check passes.
+- [x] Project file `.prowave`: zip with `project.json`, `media/` (JSON instead of rkyv, so older
+  files keep opening; no `bounces/` until Bounce exists). Open, Save, Save As, Save A Copy As and
+  Revert to Saved work
+- [~] Audio recording (2026-10-30; a failing input device marks the take as lost, 2026-10-31): input device and channel per track (mono or stereo pair, the
+  mixer's Input slot), R arms and the meter shows the input, several tracks at once, red region
+  while recording, files saved in the project, lined up by the delay the system reports. Input
+  capture is `capture.rs`: lock-free ring, writer thread, 32-bit float WAV that stays readable
+  after a crash.
+  Tested on Windows with a real microphone (`cargo test -p prowave-app records_from_the_real_input
+  -- --ignored`, and `cargo run -p prowave-engine --example record`). The I button hears the input
+  through the track's strip (`monitor.rs`, resampled, a backlog is dropped); Count-in clicks one
+  bar before recording; tracks can play into a bus (Output slot); Capture Recording makes a region
+  of what was played on a MIDI keyboard. Not done: Linux and macOS runs, cycle takes, punch in/out,
+  more channels than the device's default format, measuring the alignment with a loopback cable
+  and the monitoring delay
+- **DoD:** Import 24 tracks 48k/24-bit, play without dropouts
+
+### Phase 2: MIDI & Sequencer (Weeks 11-18)
+- [~] MIDI 1.0/2.0 parser, MPE, Articulation ID, SysEx
+  - Standard MIDI Files (2026-10-21): File > Import > MIDI File… (or drop a `.mid` on the window) makes a track for each track and channel (channel 10 becomes a Drummer track) with one region of its notes and the sustain pedal, and takes the file's tempo and signature changes when the project has no regions yet. File > Export > Selection as MIDI File… writes the selected region, or all MIDI, as format 1: a tempo track (tempo curves as a step for each quarter note, signatures) and a track for each MIDI track, with what plays (region transpose, quantize, mute, MIDI FX). Reading and writing round-trip in tests, damaged files are refused without panicking. Not done: SMPTE-timed files, program changes, other controllers, pitch bend, lyrics and markers, MPE, SysEx, MIDI 2.0.
+- [ ] Piano Roll: full Logic parity (Quantize, Velocity, Brush, Time Handles, MIDI Draw for CC, Scale Quantize, Humanize, Flam, Note Color)
+- [ ] Score Editor v0: render notes with `staff` crate, basic printing, MusicXML export
+  - Score v0 (2026-10-21): the editor's Score tab shows an ordinary MIDI region as notation on a grand staff (treble from middle C up, bass below), in C major with sharps, each note as the nearest plain or dotted note value with stem, flag, ledger lines and dots; click to add a quarter note at the nearest eighth, right-click a note to delete it. The clefs are the letters G and F, not the clef shapes (the bundled fonts have no music symbols). Upgraded the same day: drawn clefs, the key signature (a key picker, 30 keys), the time signature, accidentals that carry through a bar, rests, and ties for notes that cross a bar line or are not one note value long. Not done: beams, chords' stem sharing, voices, printing, MusicXML, and editing notes' lengths.
+- [x] Hardening pass (2026-10-21) of the newest features: MIDI file import is bounded (128 MB, 4096 tempo and 1024 signature changes, tracks up to the engine's 1024, regions inside bar 9999, note pairing in linear time), pattern regions stop at 250 000 notes and a MIDI FX chain at 1 000 000, MTC positions cannot overflow, the MIDI and MTC input queues are bounded, and generated regions are only compared with their bars when the region or the song changed. Tests: headless pointer tests for the Pattern grid, Drummer pad, Score and MIDI FX window (`ui_test.rs`), a hostile-file test, and Linux and macOS compile checks (the tests themselves run on Windows here and on all three in CI).
+- [x] Step Sequencer: Pattern region with rows, per-step Chance, Repeat, Tie, Gate, Loop Direction
+  - Done (2026-10-21): Pattern regions with rows, steps, rate, swing, gate and per-step velocity, Chance (percent, the same every time for a seed; New Variation changes it), Repeat (1-4 notes in a step, click to count up) and Tie (carries on the note before it, also over the loop), and a play direction (Forward, Backward, Ping-Pong, Random). The Edit box above the grid picks what a click sets. Pending: automation per row, per-row gate.
+- [~] Event List, Step Editor, MIDI Transform (conditions + operations), MIDI FX chain (Arp, Chord Trigger, Scripter via Rhai)
+  - MIDI FX (2026-10-21): Track > MIDI FX… opens a chain of up to 8 effects for the selected track: Transposer, Velocity Processor, Scale Quantizer, Chord Trigger (8 chords), Note Repeater, Arpeggiator (Up, Down, Up and Down, Random, As Played; 1-4 octaves; gate) and Randomizer (pitch, velocity, timing; the same every time). Each can be switched off, moved and removed; they change the notes the engine plays (and what Export MIDI writes) and leave the regions as recorded. Saved in `.prowave`. Added later the same day: Modulator (sine, triangle, saw or square to a MIDI controller or pitch bend of an External MIDI track) and Scripter (Rhai script, sandboxed, with an operation limit). The sustain pedal and the controllers now go out to External MIDI tracks. Not done: the MIDI FX slot in the channel strip, and showing the changed notes in the Piano Roll.
+  - MIDI Transform (2026-10-21): Piano Roll > Functions > MIDI Transform… selects notes by pitch, velocity, position or length and operates on them (transpose, velocity, position, length, scale, randomize), with presets (Transpose, Fixed Velocity, Legato, Humanize, ...). Not done: conditions on other regions' notes and saving your own presets.
+- [ ] Drummer Track v0: 2 drummers, Complexity/Loudness X/Y, Follow Track, Convert to MIDI
+- **DoD:** Create Drummer + Bass (MIDI) + Keys, quantize, bounce
+
+### Phase 3: Flex & Smart Tempo (Weeks 19-24) — Logic's secret sauce
+- [ ] Smart Tempo Editor: detect tempo from audio (✅ one region, steady tempo), edit downbeats, multitrack analysis
+- [ ] Flex Time: Implement 5 modes - Slicing (use `aubio` onset detection), Rhythmic, Monophonic (use `rubberband` or `signalsmith`), Polyphonic (Elastique-like via `rubberband`), Tempophone, Speed
+- [ ] Flex Pitch: Pitch detection (YIN via `aubio` or `pitch-detection` crate), per-note editing, Gain, Drift, Vibrato, Formant
+- [ ] Groove Track: master track that other tracks follow (extract groove, apply)
+- [ ] Audio Track Editor integration
+- **DoD:** Import vocal, Flex Pitch correct to scale, Flex Time quantize to groove
+
+### Phase 4: Mixer & Channel Strip (Weeks 25-30)
+- [~] Mixer UI: faders, pan, inserts (8 slots, done), sends (4 slots, pre/post, done), VCA, Sends on Fader and Groups (done); stereo pan puck, 15 inserts and 8 sends to do
+- [~] DSP (basic versions done: 3-band Channel EQ, 6-band Multi-Band EQ, Compressor, Noise Gate, Limiter, Overdrive): Channel EQ (8-band with FFT analyzer - use `rustfft` + `egui` plot), Compressor (6 models: Platinum, VCA, FET, Vintage VCA/FET/Opto with sidechain), Gate, Limiter, Overdrive
+- [~] Automation (fader, pan and every effect setting with Read/Touch/Latch/Write, curved stretches: done): Track vs Region, Trim, two-handle Bezier curves, Automation Quick Access, Sample-accurate parameter automation
+- [~] Bus summing: 64-bit double (done), PDC (done for the effects' look-ahead; plug-in and instrument latency to do), Low Latency Mode
+- **DoD:** Mix 24 tracks with EQ/Comp on each, automation, PDC verified null test
+
+### Phase 5: Instruments - Part 1 (Weeks 31-40)
+- [ ] Sampler (EXS24 clone): Zone/Group editor UI, Velocity layers, Round Robin, Mod Matrix 10 slots, Filter (LP/HP/BP), LFOs, Import SFZ/EXS
+- [ ] Quick Sampler: drag-drop, Slice/One-Shot/Classic, auto-slice by transient/beat, Record, Trim
+- [ ] Drum Machine Designer: 48 pads, each pad = Quick Sampler + strip
+- [ ] Drum Kit Designer: acoustic kits with multi-mic (Close, Overhead, Room, Bleed controls)
+- [ ] ES2: Vector synth clone - 3 osc (Saw, Pulse, Sine with FM), Filter, Distortion, Vector Envelope, Router 10 slots. Must match Logic presets byte-for-byte parameter wise
+- [ ] Vintage Series: B3 Organ (drawbars 9 + percussion + Leslie with Horn/Rotor speed, distortion), Vintage Clav (D6 pickup), Vintage E-Piano
+- [ ] Retro Synth: 4 engines Analog/Sync/Wavetable/FM in one UI
+- **DoD:** Load Sampler instrument, play with MIDI, patch saving
+
+### Phase 6: Instruments - Part 2 & FX Suite (Weeks 41-50)
+- [ ] Sculpture: physical modeling (string model with Object, Material, Pick, etc.)
+- [ ] Alchemy-Lite: 2 sources (VA + Sampler), Morph pad, MSEG, Arp, Granular basic (for v1.0)
+- [ ] Ultrabeat: 25 voices drum synth, built-in step sequencer
+- [ ] Studio Strings/Horns: Articulation ID system (key switch, channel, velocity)
+- [x] Guitar and bass amp emulation (tester request, 2026-10-30; done 2026-11-03): *Amp Designer* in the Audio FX slots. Five amplifier models (Clean Combo, Tweed, British Crunch, Plexi Lead, Bass Amp), four valve stages with asymmetric soft clipping at twice the sample rate, a tone stack (Gain, Bass, Mid, Treble, Presence, Master), three speaker cabinets (1x12 Combo, 4x12 British, 4x10 Bass) or none, and a microphone position from the edge of the cone to its centre. Every setting is automatable; a *Guitar Amp* set of Library patches loads it. Pending: a pedal board, impulse-response cabinets, and listening on real guitar recordings.
+- [~] FX full suite: Space Designer (convolution reverb with IR loading, envelope, filter, length), ChromaVerb (14 models), Delay Designer (visual tap editor, 26 taps, pitch/filter per tap), Tape Delay, Echo, Chorus, Ensemble, Flanger, Phaser, Tremolo, AutoFilter, Ringshifter, Distortion II, Bitcrusher, Overdrive, Pedalboard (35 pedals), Amp Designer (amps + cabs + mics), Match EQ, Multipressor, Exciter, SubBass, Voice Transformer, etc.
+- [ ] Mastering Assistant: rule-based chain (EQ -> Comp -> Limiter) + LUFS targeting -14 LUFS, analyze using `ebur128` crate
+- **DoD:** A/B test Channel EQ curve vs Logic (within 0.5dB), Space Designer IR load
+
+### Phase 7: Plugin Hosting & Sandboxing (Weeks 51-56)
+- [ ] CLAP host full (note, params, latency, state), VST3 host via `vst3-sys`, AU host on macOS via `coreaudio-sys`
+- [ ] Out-of-process sandbox: separate process, SHM ring buffer (1ms latency overhead max), seccomp (Linux), seatbelt (macOS), AppContainer (Win). Heartbeat, crash isolation, auto-restart
+- [ ] Plugin scanner with quarantine, timeout 5s per plugin, blacklist
+- [ ] Plug-in Manager UI showing latency, type, manufacturer
+- **DoD:** Load Vital, Serum, Kontakt without crashing main DAW if plugin crashes
+
+### Phase 8: UI - The Logic Look + Live Loops (Weeks 57-66)
+- [~] Main window: Tracks area (with Track Headers, Track Inspector left, Library right), Mixer (separate window or bottom), Editors (Piano Roll bottom, Score, Audio Editor)
+- [ ] Library: Patches (Channel Strip + Instrument + FX), save/load, search
+- [ ] Smart Controls: 8 knobs per patch, mapping editor (map knob to multiple params with range scaling), Learn
+- [ ] Key Commands: 1200+ commands, searchable, customizable, Presets, Conflict detection
+- [ ] Live Loops: Grid (Cells, Scenes, Trigger modes, Quantize Start), Record Live Loops performance to Tracks, Remix FX (X/Y pad with Gate, Filter, Repeater, Reverse)
+- [~] Loop Browser: Apple Loops metadata parsing (key, tempo, style), drag-drop with auto tempo/key adaptation, All Files Browser
+  - Started (2026-10-30): Loop Browser and All Files panes list a folder and add a file on
+    double-click. No Apple Loops tags or tempo matching yet.
+  - Done (2026-11-05): the Loop Browser reads the tags of CAF Apple Loops (category, genre, key,
+    beat count, tempo from the beat count and duration) in the background, shows them under the
+    file name and searches them. Tested with files built to match the format notes, not with real
+    Apple Loops. Still missing: AIFF-based loops, drag-drop with auto tempo/key adaptation.
+  - Done (2026-10-31): ALAC and AAC decoding are enabled (with Ogg Vorbis, M4A/MP4 and ADPCM),
+    so the audio inside Apple Loops should open. Tried only with test files, not with real
+    Apple Loops.
+- [ ] Video Track: Movie Track with filmstrip, SMPTE, Detect Cuts, Export Audio to Movie
+- **DoD:** 5 Logic users can do basic tracking/mixing without manual
+
+### Phase 9: WASM, Collaboration & Polish (Weeks 67-74)
+- [ ] Compile `prowave-engine` to WASM + AudioWorklet (128-sample blocks, SharedArrayBuffer + Atomics)
+- [ ] `prowave-wasm`: OPFS for project storage, Web UI via `egui_web` (same egui code), Web Remote (like Logic Remote but via browser/WebSocket)
+- [ ] Collaboration: Project file with Ed25519 signing, simple CRDT for arrangement (optional)
+- [ ] Export: Bounce Project/Region/Track in Place (offline/real-time, normalize, dither Apogee UV22HR via `r8brain`), Export All Tracks as Audio, Export MIDI, MusicXML, AAF, ADM BWF (Atmos)
+- [ ] Performance: SIMD (`wide`, `std::simd`), benchmarks vs Logic/Reaper
+- **DoD:** Open in Chrome/Firefox, play 16-track project <30ms latency, bounce to WAV
+
+### Platform: Linux
+- [x] Release build in CI (x86_64)
+- [x] Packages: tarball, `.deb`, `.rpm`, AppImage and Flatpak, install-checked in the release workflow
+- [x] Starts under a virtual display with software OpenGL in the release workflow
+- [x] Audio thread asks for real-time priority
+- [~] Runs on real machines: testers use it on Ubuntu. The graphics fallbacks for NVIDIA (Vulkan, then X11 under Wayland, then software OpenGL) are written but not confirmed by the tester who reported the crash
+- [x] Wayland: the window's app id matches the menu entry (`prowave-studio`, the Flatpak id in a Flatpak)
+- [x] Opens Ogg Vorbis, M4A/MP4 (AAC, ALAC) and ADPCM files besides WAV, AIFF, FLAC, MP3 and CAF
+- [x] `cargo xtask check` passes in CI (checked 2026-10-31)
+- [ ] Sound and audio recording confirmed on real hardware
+- [ ] Output latency measured against the roadmap target
+- [ ] Native PipeWire and JACK back-ends
+
+### Platform: macOS
+- [x] Universal `.app` release build in CI (Apple Silicon and Intel), ad-hoc signed
+- [x] Microphone permission text in the app bundle
+- [~] Menus in the system menu bar: written, never tried on a Mac
+- [x] `cargo xtask check` passes in CI (checked 2026-10-31)
+- [ ] Launched on a real Mac
+- [ ] Sound and audio recording confirmed through CoreAudio
+- [ ] Output latency measured against the roadmap target
+- [ ] Signed with a Developer ID and notarized
+
+---
+
+## 3b. Controls that do nothing yet (checked 2026-10-30)
+
+Everything here can be seen in the app but has no effect. All of it is greyed or dimmed, so a
+click never silently does nothing. The controls that looked active and did nothing were built
+on 2026-10-30: Count-in, Capture Recording, Quick Help, Toolbar, Note Pad, Loop Browser, All
+Files, R on instrument tracks, I on audio tracks, and the mixer's Setting and Output slots.
+
+- File: Close, Save as Template, Alternatives, Project Management, Page Setup,
+  Print, Movie, Import Audio File and Other Projects (dragging audio in works), Export of audio
+  and MusicXML (Selection as MIDI File works), Bounce, Share, Show in File Manager, Open in
+  Sound Library Manager, Project Alternatives
+- Edit: Undo History, Paste Replace, Bounce and Join
+- Track: Show Chord / Arrangement Track (both need new data: chord events and sections)
+- Navigate: Go to Position
+- Record: Record / Record Repeat, Record Toggle, Record Enable, New Take,
+  Delete Take, Bounce In Place, Record Project Settings, Project Settings
+- Mix: Show / Create / Convert / Delete Automation, Group, Edit Groups, Pre-Fader Metering,
+  Mastering, Create Mastering Track, Stem Splitter
+- View: all automation entries, Advanced Tools, Smart Controls, Score Editor, Step Sequencer,
+  Session Player, Flex Editor, Performers, Movie, Customize Toolbar, Track Header, Ruler, Global
+  Tracks, Colors, Markers, Grid, Smart Tempo, Enter Full Screen
+- Window: Minimize, Zoom, Score Editor, Step Sequencer, Smart Tempo, Plugin Manager, Video,
+  Bring All to Front
+- Help: Key Commands, About Pro Wave
+- Tracks area: Edit (Bounce and Join is not done), Functions (Bounce in Place, Convert to New
+  Sampler Track), View (Show Global Tracks,
+  every tool except Pointer and Fade, waveform zoom buttons
+- Piano Roll: Note Repeat, Note Colors; tabs Step Sequencer, Drummer Editor, Smart Tempo
+- Mixer: Select Audio Channel Strips, Create New Output Channel Strip, Show Signal Flow
+- Inspector: Channel, Freeze Mode, Q-Reference, Flex Mode, MIDI In Port and Channel, and the
+  rows under More (Dynamics, Gate Time, Clip Length, Score, Q-Velocity, Q-Length, Q-Flam,
+  Q-Range, Q-Strength)
+- Library: Delete, Save
+
+---
+
+## 4. Future Options / v2.0+ (Not in v1.0 but architect for it)
+
+- **Dolby Atmos / Spatial Audio:** 7.1.4 beds, 128 objects, ADM BWF export, Binaural monitoring, 3D panner UI (like Logic's Atmos panner)
+- **AI Session Players v2:** Bass Player, Keyboard Player, Drummer with style transfer (train small ONNX models in Rust via `burn` or `ort`)
+- **Stem Splitter:** Demucs model via `tract` (separate Drums/Bass/Vocals/Other) — Logic 11 feature
+- **AI Mastering Assistant v2:** Full AI chain with reference track matching
+- **Cloud Collaboration:** Real-time collab with CRDT (y-crdt in Rust), comments, version history
+- **Notation Pro:** Full engraving (like Dorico), MusicXML import/export advanced, tablature editor
+- **MPE / MIDI 2.0 Full:** Per-note expression editing in Piano Roll, MIDI 2.0 Property Exchange
+- **Modular Environment (Logic's Environment):** Visual patching environment for MIDI routing (like Max) — rebuild as node graph with `egui_nodes`
+- **MainStage Integration:** Perform mode, Patch switching without glitch
+- **Mobile / iPad:** iOS build via `winit` + Metal, touch-optimized UI, Apple Pencil for automation
+- **Marketplace:** User patches, instruments, IRs sharing, with Rust-based package manager
+- **Scripting:** User scripting via Rhai or WASM (like Scripter MIDI FX but for whole DAW)
+- **ARA2 Support:** Celemony Melodyne-style integration for Flex Pitch
+
+---
+
+## 5. Acceptance Criteria for Claude
+
+For each feature, Claude must produce:
+
+1.  **Trait Impl:** `struct ChannelEq { ... } impl DspNode { fn process(&mut self, ...) { ... } fn latency(&self) -> usize { ... } }`
+2.  **Param Layout:** Exactly match Logic's parameter names and ranges (e.g., Compressor Threshold -50 to 0 dB, Ratio 1:1 to 20:1). Use `nih-plug` params for compatibility
+3.  **Preset Test:** Load Logic preset JSON (we will provide `logic-presets/` corpus) and verify output within 0.5dB or 1 cent pitch
+4.  **No Alloc Test:** `#[test] fn no_alloc() { assert_no_alloc::assert_no_alloc(|| { let mut node = ChannelEq::new(); node.process(&inputs, &mut outputs); }); }`
+5.  **WASM Build:** `cargo check -p prowave-dsp --target wasm32-unknown-unknown` must pass
+
+---
+
+## 6. Performance Targets
+
+| Metric | Target |
+|---|---|
+| RTL @ 128 samples / 48kHz | macOS <8ms, Win ASIO <10ms, Linux JACK <8ms |
+| 100 tracks + 200 plugins | CPU <70% on M1 Pro / i7-12700 |
+| WASM | 32 tracks stereo in Chrome with Worklet |
+| Engine alloc on audio thread | 0 per callback |
+| PDC accuracy | Sample-accurate, null test -90dB |
+
+---
+
+Next step for Claude: Start Phase 0. `cargo new --lib crates/prowave-engine && cargo xtask init`
+Then implement transport clock with `Transport { sample_rate: f64, tempo_map: TempoMap, position: SamplePosition }`
+
+
+---
+
+## 10. Official Logic Pro .logicx Support (New Requirement)
+
+ProWave MUST open and save official Apple Logic Pro .logicx projects on Linux and macOS, while being super lightweight in pure Rust.
+
+See `LOGICX_FORMAT_SPEC.md` for full byte-level spec for Claude.
+
+**Summary:**
+- .logicx is a macOS bundle (directory) with `Alternatives/000/ProjectData` binary blob (magic 23 47 C0 AB, reversed FourCC chunks like karT, gRuA, qeSM, GAME anchor for stock plugins, embedded JSON for Drummer)
+- Parse via linear scan, no central header table, guard against false positives (printable ASCII, length caps)
+- 5 record shapes: AU triple (3x FourCC), GAME (stock plugins), JSON (Drummer/Bass Player), Channel-strip records (16-byte name + 8-byte descriptor), Region records (0x61 0xFF + 24 NULs + u16 LE len)
+- Write via seed synthesis method (from LogicProFormatWriter): embed 62KB donor seeds (audio_base.seed, mixed_base.seed, infra.json.gz), clone and patch records, don't hand-craft
+- Linux: No AU, map Alchemy -> ProWave Alchemy-lite, Channel EQ -> ProWave EQ, etc. Show "replaced" UI
+- macOS: AU hosting via coreaudio-sys, CoreAudio backend, Metal via wgpu
+- Lightweight: <50MB binary, <150MB RAM idle, <400ms cold start vs Logic 1.2GB/1.5GB/3-4s, achieved via mimalloc + LTO + strip + lazy loading + rkyv zero-copy + memmap disk streaming
+
+**Crate:** `crates/prowave-logicx-import` with public API `open_logicx(path) -> ProWaveProject` and `save_logicx(project, path)`
+
+**Tests:** Empty project, Drummer project, audio+MIDI project, round-trip, fuzz

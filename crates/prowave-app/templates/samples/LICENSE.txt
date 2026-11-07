@@ -1,0 +1,2 @@
+These one-shots are synthesized by tools/templates/drum_samples.py (sine and square waves, filtered seeded noise); no recording is used.
+Dedicated to the public domain: CC0 1.0 Universal, https://creativecommons.org/publicdomain/zero/1.0/

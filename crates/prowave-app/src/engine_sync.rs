@@ -1,0 +1,2277 @@
+//! Bridges the UI project model to `prowave-engine` using only `Command`s (never direct mutation).
+use crate::model::{Insert, Project, Region, SoundFontUse, TempoPoint, Track};
+use crate::model::{TrackKind, CHANNEL_PRESSURE, PITCH_BEND, SYSEX_BYTE};
+use crate::patches::synth_patch;
+use prowave_engine::{
+    AutoLane, AutoTarget, Chain, Command, ControlEvent, Engine, Fx, InputSource, MonitorTrack,
+    NoteEvent, Pdc, Route, SendSpec, SfPlayer, Song, SynthPatch, TrackMix, MAX_MONITORS,
+    MAX_TRACKS,
+};
+
+/// The player for a track's SoundFont preset. The file's first preset plays if it has none
+/// with the saved bank and program.
+fn soundfont_player(sf: &SoundFontUse, sample_rate: f32) -> Result<Box<SfPlayer>, String> {
+    let bank = crate::soundfonts::load(&sf.path)?;
+    let preset = bank
+        .presets()
+        .iter()
+        .find(|p| p.bank == sf.bank && p.program == sf.program)
+        .or(bank.presets().first())
+        .cloned()
+        .ok_or_else(|| format!("{}: the SoundFont has no presets", sf.path))?;
+    SfPlayer::new(&bank, &preset, sample_rate).map(Box::new)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct Mix {
+    gain_db: f32,
+    mute: bool,
+    solo: bool,
+    pan: f32,
+}
+
+/// Mirrors what the engine has accepted. Each field changes only when `Engine::send`
+/// returns `true`, so a command rejected because the queue was full is retried on the next
+/// `sync`. `None` means nothing has been accepted yet.
+pub struct EngineSync {
+    pub engine: Engine,
+    /// Record > Software Monitoring: off, monitored tracks are heard on the audio interface
+    /// itself (its direct monitoring) and the program sends none of their input out.
+    pub software_monitoring: bool,
+    /// Record > Low Latency Mode (see [`LOW_LATENCY_LIMIT_S`]).
+    pub low_latency: bool,
+    /// Record > I/O Buffer Size wanted, in frames, and what was last asked of the engine.
+    pub io_buffer: u32,
+    buffer_asked: u32,
+    /// Each track's plug-ins as (has an instrument, has effects, their own delay in samples),
+    /// from the plug-in host; the block delay of running them is added here.
+    pub plugin_shape: Vec<(bool, bool, usize)>,
+    /// Record > Process Buffer wanted, in frames (0: every plug-in in the I/O callback), and
+    /// what the engine was last told.
+    pub process_buffer: u32,
+    process_sent: Option<u32>,
+    /// The tracks the engine was told are live (see [`live_set`]).
+    lives: Vec<bool>,
+    /// Content delays and output delay last sent.
+    contents: Vec<u32>,
+    output_delay: Option<(u32, u32)>,
+    playing: bool,
+    /// The tracks that hear their input, as last sent.
+    monitors: Vec<MonitorTrack>,
+    /// Tempo, tempo changes and signature last sent.
+    tempo: Option<TempoKey>,
+    metronome: bool,
+    /// The click level in dB and accent, and the reference pitch, as last sent.
+    click: Option<(f32, bool)>,
+    tuning: Option<f32>,
+    cycle: (bool, f64, f64),
+    master: Option<f32>,
+    position: Option<f64>,
+    mixes: Vec<Mix>,
+    /// Last synth patch sent for each track (the silent patch, see `patches`).
+    patches: Vec<SynthPatch>,
+    /// The SoundFont each track was last given (`None`: its synth patch), by track.
+    soundfonts: Vec<Option<SoundFontUse>>,
+    /// Which tracks the engine was told are external, by track.
+    externals: Vec<bool>,
+    /// The controller changes the engine has.
+    controls: Vec<ControlEvent>,
+    /// MIDI Time Code as the engine was last told: on, frame rate, project start in frames.
+    mtc: Option<(bool, prowave_engine::SmpteRate, i64)>,
+    song_rev: Option<u64>,
+    /// Audio layout of the song last sent with `SetSong`.
+    layout: Option<AudioLayout>,
+    /// The effects, routes and automation the engine has, by track.
+    fx: Vec<Vec<Insert>>,
+    /// The effects the engine has on the master bus.
+    master_fx: Vec<Insert>,
+    /// Space Designer responses being made off the UI thread, by track and slot.
+    irs: std::collections::HashMap<(usize, usize), IrJob>,
+    routes: Vec<Route>,
+    /// The compensation delays the engine has, by track.
+    pdc: Vec<(usize, usize)>,
+    automation: Vec<AutoLane>,
+    /// A command was rejected during the last `sync`.
+    retry: bool,
+}
+
+/// The settings that change the impulse response of a Space Designer (not Predelay, Dry, Wet,
+/// Input or Output EQ, which the audio thread applies as they move).
+fn ir_key(params: &[f32; prowave_engine::MAX_FX_PARAMS]) -> Vec<u32> {
+    prowave_engine::IR_PARAMS
+        .iter()
+        .map(|&i| params[i].to_bits())
+        .collect()
+}
+
+/// The key of the master bus in the Space Designer jobs (no track has this number).
+const MASTER_KEY: usize = usize::MAX;
+
+/// A Space Designer response being made on a background thread. Settings that change while it
+/// runs wait in `next`; only the newest is made after it, so dragging a control does not queue
+/// up work.
+struct IrJob {
+    running: Option<std::sync::mpsc::Receiver<Box<prowave_engine::Convolver>>>,
+    next: Option<[f32; prowave_engine::MAX_FX_PARAMS]>,
+    /// A finished response the engine did not take yet.
+    ready: Option<Box<prowave_engine::Convolver>>,
+}
+
+/// Play, or with Record and Count-in on, the bars of clicks set in Project Settings >
+/// Recording first.
+fn start_command(p: &Project) -> Command {
+    if !(p.recording && p.count_in) {
+        return Command::Play;
+    }
+    let bar = p.beats_to_bar(p.position_beats).floor().max(0.0) as u32;
+    let (clicks, unit) = p.signature_of_bar(bar);
+    Command::CountIn {
+        clicks: clicks.saturating_mul(p.count_in_bars.clamp(1, 4)),
+        beats_per_click: 4.0 / f64::from(unit.max(1)),
+    }
+}
+
+/// The audio tracks whose I button is on.
+fn monitors_of(p: &Project) -> Vec<MonitorTrack> {
+    p.tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.kind == TrackKind::Audio && t.monitor)
+        .take(MAX_MONITORS)
+        .map(|(i, t)| {
+            let (channel, stereo) = match t.input {
+                InputSource::Mono(c) => (c, false),
+                InputSource::Stereo(c) => (c, true),
+            };
+            MonitorTrack {
+                track: i.min(usize::from(u16::MAX)) as u16,
+                channel,
+                stereo,
+            }
+        })
+        .collect()
+}
+
+/// Where track `i`'s signal goes: its sends, and for an Aux strip the bus it listens to.
+fn route_of(p: &Project, i: usize) -> Route {
+    let Some(t) = p.tracks.get(i) else {
+        return Route::default();
+    };
+    let mut route = Route {
+        bus_in: p.aux_bus_of(i),
+        output: t.output,
+        ..Route::default()
+    };
+    // An Aux strip does not send (a loop through the buses would never end).
+    if t.kind != TrackKind::Aux {
+        for (slot, s) in route.sends.iter_mut().zip(&t.sends) {
+            if let Some(bus) = s.bus {
+                *slot = SendSpec {
+                    bus,
+                    level: s.level,
+                    pre: s.pre,
+                };
+            }
+        }
+    }
+    route.sanitized()
+}
+
+/// The effects as a chain the audio thread can run (made here, off that thread).
+fn chain_of(inserts: &[Insert], sample_rate: f32) -> Box<Chain> {
+    Box::new(Chain::new(
+        inserts
+            .iter()
+            .map(|i| Fx::new(i.kind, i.params, i.bypass, sample_rate))
+            .collect(),
+    ))
+}
+
+/// How much of a lane's value is the VCA's: only a fader lane adds the VCA's level.
+fn lane_offset(p: &Project, i: usize, target: AutoTarget) -> f32 {
+    match target {
+        AutoTarget::Volume => p.vca_of(i).map_or(0.0, |v| v.volume_db),
+        _ => 0.0,
+    }
+}
+
+/// A lane as the engine plays it, before its points are copied: the strip (a track's index or
+/// `MASTER_TRACK`), what it moves (a plug-in by its place among the running ones), whether
+/// its envelope rules, the VCA offset, its points and a plug-in parameter's range.
+struct LaneSpec<'a> {
+    track: u16,
+    target: AutoTarget,
+    follow: bool,
+    offset_db: f32,
+    points: &'a [prowave_engine::AutoPoint],
+    lo: f32,
+    hi: f32,
+    stepped: bool,
+}
+
+/// Every lane with breakpoints that the engine can play, in a fixed order (Ableton: every
+/// envelope plays unless it is overridden).
+fn lane_specs(p: &Project) -> Vec<LaneSpec<'_>> {
+    let mut out = Vec::new();
+    for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
+        for (target, points) in t.auto.lanes() {
+            if points.is_empty() {
+                continue;
+            }
+            let follow = t.auto.follows(target);
+            let (engine_target, lo, hi, stepped) = match target {
+                AutoTarget::Plugin { slot, param } => {
+                    let Some(lane) = t
+                        .auto
+                        .plugins
+                        .iter()
+                        .find(|l| l.slot == slot && l.param == param)
+                    else {
+                        continue;
+                    };
+                    // A lane whose plug-in is gone, replaced or bypassed is not played.
+                    let Some(running) = crate::automation::engine_plugin_slot(t, lane) else {
+                        continue;
+                    };
+                    let target = AutoTarget::Plugin {
+                        slot: running,
+                        param,
+                    };
+                    (target, lane.lo, lane.hi, lane.stepped)
+                }
+                // A send lane plays only while its send is there.
+                AutoTarget::Send { slot } if t.sends.get(usize::from(slot)).is_none() => continue,
+                x => (x, 0.0, 1.0, x == AutoTarget::Mute),
+            };
+            out.push(LaneSpec {
+                track: i as u16,
+                target: engine_target,
+                follow,
+                offset_db: lane_offset(p, i, target),
+                points,
+                lo,
+                hi,
+                stepped,
+            });
+        }
+    }
+    let m = &p.master_auto;
+    for (target, points) in m.lanes() {
+        if points.is_empty() {
+            continue;
+        }
+        let (engine_target, lo, hi, stepped) = match target {
+            AutoTarget::Volume | AutoTarget::Fx { .. } => (target, 0.0, 1.0, false),
+            // The Stereo Out's plug-ins, by their place among the running ones, as a track's.
+            AutoTarget::Plugin { slot, param } => {
+                let Some(lane) = m
+                    .plugins
+                    .iter()
+                    .find(|l| l.slot == slot && l.param == param)
+                else {
+                    continue;
+                };
+                let Some(running) = crate::automation::engine_master_plugin_slot(p, lane) else {
+                    continue;
+                };
+                let target = AutoTarget::Plugin {
+                    slot: running,
+                    param,
+                };
+                (target, lane.lo, lane.hi, lane.stepped)
+            }
+            _ => continue,
+        };
+        out.push(LaneSpec {
+            track: prowave_engine::MASTER_TRACK,
+            target: engine_target,
+            follow: m.follows(target),
+            offset_db: 0.0,
+            points,
+            lo,
+            hi,
+            stepped,
+        });
+    }
+    out.truncate(prowave_engine::MAX_AUTO_LANES);
+    out
+}
+
+/// The lanes the engine should have for the project's automation.
+fn automation_lanes(p: &Project) -> Vec<AutoLane> {
+    lane_specs(p)
+        .into_iter()
+        .map(|s| {
+            AutoLane {
+                follow: s.follow,
+                offset_db: s.offset_db,
+                lo: s.lo,
+                hi: s.hi,
+                stepped: s.stepped,
+                ..AutoLane::new(s.track, s.target, s.points.to_vec())
+            }
+            .sanitized()
+        })
+        .collect()
+}
+
+/// Whether `sent` is what [`automation_lanes`] would make, without copying the points (it
+/// runs every frame, and a long recording has many points).
+fn automation_unchanged(p: &Project, sent: &[AutoLane]) -> bool {
+    let specs = lane_specs(p);
+    specs.len() == sent.len()
+        && specs.iter().zip(sent).all(|(s, lane)| {
+            let (lo, hi) = s.target.range();
+            lane.track == s.track
+                && lane.target == s.target
+                && lane.follow == s.follow
+                && lane.offset_db == s.offset_db
+                && (lane.lo, lane.hi, lane.stepped) == (s.lo, s.hi, s.stepped)
+                && lane.points.len() == s.points.len().min(prowave_engine::MAX_AUTO_POINTS)
+                && lane.points.iter().zip(s.points).all(|(a, b)| {
+                    a.beat == b.beat && a.value == b.value.clamp(lo, hi) && a.curve == b.curve
+                })
+        })
+}
+
+/// The delay every effect of the strip puts on the sound, in samples.
+fn latency_of(t: &Track, sample_rate: f32) -> usize {
+    t.inserts
+        .iter()
+        .filter(|i| !i.bypass)
+        .map(|i| i.kind.latency_samples(sample_rate))
+        .sum()
+}
+
+/// Record > Low Latency Mode: on the tracks being played live, and the buses they feed,
+/// effects that delay the sound more than this are bypassed.
+pub const LOW_LATENCY_LIMIT_S: f32 = 0.001;
+
+/// The tracks played live (record-enabled or monitoring their input).
+fn live_tracks(p: &Project) -> Vec<bool> {
+    p.tracks.iter().map(|t| t.rec || t.monitor).collect()
+}
+
+/// Low Latency Mode: the live tracks and every Aux strip their sound reaches.
+fn live_paths(p: &Project) -> Vec<bool> {
+    close_over_aux(p, live_tracks(p))
+}
+
+/// The tracks whose plug-ins run live, in the I/O callback (Logic's Process Buffer Range):
+/// record-enabled or monitoring tracks, the selected instrument track (Logic's live mode: it
+/// is the one being played), and every Aux strip their sound reaches.
+pub(crate) fn live_set(p: &Project) -> Vec<bool> {
+    let start: Vec<bool> = p
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            t.rec || t.monitor || (i == p.selected_track && t.kind == TrackKind::Instrument)
+        })
+        .collect();
+    close_over_aux(p, start)
+}
+
+/// `on` and every Aux strip the sound of a marked track reaches, through any number of buses.
+fn close_over_aux(p: &Project, mut on: Vec<bool>) -> Vec<bool> {
+    loop {
+        let mut grew = false;
+        for j in 0..p.tracks.len() {
+            let bus = p.aux_bus_of(j);
+            if on[j] || bus == 0 {
+                continue;
+            }
+            let fed = (0..p.tracks.len()).any(|i| {
+                on[i] && {
+                    let r = route_of(p, i);
+                    r.output == bus || r.sends.iter().any(|s| s.bus == bus)
+                }
+            });
+            if fed {
+                on[j] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            return on;
+        }
+    }
+}
+
+/// The effects of track `i` as the engine gets them: in Low Latency Mode the ones over
+/// the limit are bypassed on a live path.
+fn inserts_for(t: &Track, live: bool, sample_rate: f32) -> Vec<Insert> {
+    low_latency_inserts(&t.inserts, live, sample_rate)
+}
+
+/// `inserts`, with those over the Low Latency Mode limit bypassed when `live`.
+fn low_latency_inserts(inserts: &[Insert], live: bool, sample_rate: f32) -> Vec<Insert> {
+    let limit = (LOW_LATENCY_LIMIT_S * sample_rate) as usize;
+    inserts
+        .iter()
+        .map(|i| {
+            let mut i = *i;
+            if live && i.kind.latency_samples(sample_rate) > limit {
+                i.bypass = true;
+            }
+            i
+        })
+        .collect()
+}
+
+/// Delay compensation for every track: (before the fader and sends, after them), in samples.
+/// Strips whose effects look ahead delay the sound; the others wait for them so everything
+/// stays in time. The signal sent to a bus is aligned too, and an Aux strip's own effects
+/// are made up for after the fader.
+#[cfg(test)]
+fn pdc_plan(p: &Project, sample_rate: f32) -> Vec<(usize, usize)> {
+    pdc_plan_with(p, sample_rate, &[], &[], &[])
+}
+
+/// [`pdc_plan`] in Low Latency Mode: `live` marks the live tracks, which are not delayed to
+/// wait for the others (nor the others for them); on `paths` the effects over the limit are
+/// bypassed and add no delay.
+#[cfg(test)]
+fn pdc_plan_with(
+    p: &Project,
+    sample_rate: f32,
+    live: &[bool],
+    paths: &[bool],
+    plugin_delay: &[usize],
+) -> Vec<(usize, usize)> {
+    pdc_plan_full(
+        p,
+        sample_rate,
+        &PlanInput {
+            llm_live: live,
+            paths,
+            basis_delay: plugin_delay,
+            actual_delay: plugin_delay,
+            live: &[],
+            low_latency: !live.is_empty(),
+        },
+    )
+    .pdc
+}
+
+/// What the delay compensation is planned from.
+struct PlanInput<'a> {
+    /// Low Latency Mode's live tracks (record-enabled or monitoring): they neither wait for
+    /// the others nor are waited for.
+    llm_live: &'a [bool],
+    /// Low Latency Mode's live paths: effects over the limit are bypassed there.
+    paths: &'a [bool],
+    /// Each track's plug-in delay as if it were pre-rendered (the compensation levels are
+    /// taken from these, so a track going live or not never moves the other tracks).
+    basis_delay: &'a [usize],
+    /// Each track's plug-in delay where it really runs.
+    actual_delay: &'a [usize],
+    /// The tracks whose plug-ins run live (see [`live_set`]).
+    live: &'a [bool],
+    low_latency: bool,
+}
+
+/// The delay compensation of every track and what follows from it.
+#[derive(Debug, PartialEq)]
+struct Plan {
+    /// (before the fader and sends, after them), in samples, by track.
+    pdc: Vec<(usize, usize)>,
+    /// How late each live track's regions are played (its input and live notes are not).
+    content: Vec<usize>,
+    /// The compensation every plain strip is brought to before its fader, and the whole delay
+    /// up to the Stereo Out (see `Command::SetOutputDelay`).
+    strips: usize,
+    master: usize,
+}
+
+/// Delay compensation for every track. The levels (how late every plain strip and every Aux
+/// strip is) come from the latest strip, with every plug-in track counted as pre-rendered;
+/// each strip then waits for the difference to its own actual delay. A live track does not
+/// wait before its fader (its input is heard at once): its regions are delayed instead.
+fn pdc_plan_full(p: &Project, sample_rate: f32, input: &PlanInput) -> Plan {
+    let sounds = |t: &Track| !matches!(t.kind, TrackKind::Vca | TrackKind::Folder);
+    let flag = |v: &[bool], i: usize| v.get(i).copied().unwrap_or(false);
+    let own: Vec<usize> = p
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if flag(input.paths, i) {
+                let fx = inserts_for(t, true, sample_rate);
+                fx.iter()
+                    .filter(|i| !i.bypass)
+                    .map(|i| i.kind.latency_samples(sample_rate))
+                    .sum()
+            } else {
+                latency_of(t, sample_rate)
+            }
+        })
+        .collect();
+    let at = |v: &[usize], i: usize| v.get(i).copied().unwrap_or(0);
+    let basis: Vec<usize> = (0..own.len())
+        .map(|i| own[i] + at(input.basis_delay, i))
+        .collect();
+    let actual: Vec<usize> = (0..own.len())
+        .map(|i| own[i] + at(input.actual_delay, i))
+        .collect();
+    let (mut plain, mut aux) = (0, 0);
+    for (i, _) in p
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| sounds(t) && !flag(input.llm_live, *i))
+    {
+        if p.aux_bus_of(i) > 0 {
+            aux = aux.max(basis[i]);
+        } else {
+            plain = plain.max(basis[i]);
+        }
+    }
+    let mut content = vec![0; p.tracks.len()];
+    let pdc = p
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let is_aux = p.aux_bus_of(i) > 0;
+            if !sounds(t) {
+                (0, 0)
+            } else if is_aux {
+                (0, aux.saturating_sub(actual[i]))
+            } else if flag(input.llm_live, i) {
+                content[i] = plain.saturating_sub(actual[i]);
+                (0, 0)
+            } else if flag(input.live, i) {
+                content[i] = plain.saturating_sub(actual[i]);
+                (0, if input.low_latency { 0 } else { aux })
+            } else {
+                (plain.saturating_sub(actual[i]), aux)
+            }
+        })
+        .collect();
+    Plan {
+        pdc,
+        content,
+        strips: plain,
+        master: plain + aux,
+    }
+}
+
+/// Engine track number for UI track `i`. Tracks past the engine's `MAX_TRACKS` have none:
+/// they are left out of the song (silent) instead of being folded onto the last track.
+fn track_index(i: usize) -> Option<u16> {
+    (i < MAX_TRACKS).then_some(i as u16)
+}
+
+/// The mix the engine plays track `i` with: its fader and its VCA's, Mute and Solo from the
+/// track or its VCA.
+fn mix_of(p: &Project, i: usize) -> Mix {
+    let (gain_db, mute, solo) = p.track_mix_of(i);
+    Mix {
+        gain_db,
+        mute,
+        solo,
+        pan: p.tracks[i].pan,
+    }
+}
+
+/// Every track's mix as an engine song carries it.
+fn track_mixes(p: &Project) -> Vec<TrackMix> {
+    mixes(p)
+        .into_iter()
+        .map(|m| TrackMix {
+            gain_db: m.gain_db,
+            mute: m.mute,
+            solo: m.solo,
+            pan: m.pan,
+        })
+        .collect()
+}
+
+fn mixes(p: &Project) -> Vec<Mix> {
+    (0..p.tracks.len().min(MAX_TRACKS))
+        .map(|i| mix_of(p, i))
+        .collect()
+}
+
+/// Notes of one MIDI region as the engine should play them, with the Region Inspector
+/// (quantize, transpose, velocity) and Track Inspector (transpose, velocity, key and
+/// velocity limits) applied non-destructively, as Logic does on playback.
+pub(crate) fn region_notes(t: &Track, r: &Region, origin: f64, track: u16) -> Vec<NoteEvent> {
+    let (rp, tp) = (r.params, t.params);
+    r.notes
+        .iter()
+        // Muted notes (Piano Roll: Mute tool) are not played.
+        .filter(|n| !n.mute)
+        .filter_map(|n| {
+            let start = match rp.quantize {
+                Some(q) if q > 0.0 => (n.start / q).round() * q,
+                _ => n.start,
+            };
+            let pitch = n.pitch as i32 + rp.transpose as i32 + tp.transpose as i32;
+            let vel = (n.vel as i32 + rp.velocity as i32 + tp.velocity as i32).clamp(1, 127);
+            let in_keys = (tp.key_limit.0 as i32..=tp.key_limit.1 as i32).contains(&pitch);
+            let in_vels = (tp.vel_limit.0 as i32..=tp.vel_limit.1 as i32).contains(&vel);
+            (in_keys && in_vels && (0..=127).contains(&pitch)).then_some(NoteEvent {
+                start_beat: origin + start as f64,
+                end_beat: origin + (start + n.len) as f64,
+                pitch: pitch as u8,
+                vel: vel as u8,
+                track,
+            })
+        })
+        .collect()
+}
+
+/// Every unmuted region on an engine track, with its engine track number and start beat
+/// (quarter notes, as the engine counts them).
+fn playing_regions(p: &Project) -> impl Iterator<Item = (u16, &Track, &Region, f64)> {
+    p.tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| Some((track_index(ti)?, t)))
+        .flat_map(move |(track, t)| {
+            t.regions
+                .iter()
+                .filter(|r| !r.params.mute)
+                .map(move |r| (track, t, r, p.region_start_beats(r)))
+        })
+}
+
+/// The controller changes external instruments get: those recorded in the regions of External
+/// MIDI tracks (the sustain pedal among them), at their place on the timeline.
+fn song_controls(p: &Project) -> Vec<ControlEvent> {
+    p.tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| Some((track_index(ti)?, t)))
+        .filter(|(_, t)| t.kind.has_regions() && t.kind != TrackKind::Audio)
+        .flat_map(|(track, t)| {
+            let mut out = Vec::new();
+            let (mut from, mut to) = (f64::MAX, 0.0f64);
+            // Only an external instrument gets System Exclusive.
+            let sysex = t.kind == TrackKind::ExternalMidi;
+            for r in t.regions.iter().filter(|r| !r.params.mute) {
+                let origin = p.region_start_beats(r);
+                from = from.min(origin);
+                to = to.max(p.region_end_beats(r));
+                out.extend(
+                    r.controls
+                        .iter()
+                        .filter(|c| sysex || c.num != SYSEX_BYTE)
+                        .filter_map(|c| {
+                            // Controllers and pressure are 7 bits, pitch bend 14, SysEx bytes 8.
+                            let max = match c.num {
+                                0..=127 | CHANNEL_PRESSURE => 127,
+                                PITCH_BEND => 16383,
+                                SYSEX_BYTE => 255,
+                                _ => return None,
+                            };
+                            Some(ControlEvent {
+                                beat: origin + f64::from(c.start),
+                                track,
+                                number: c.num,
+                                value: c.val.min(max),
+                            })
+                        }),
+                );
+            }
+            // A Modulator on the track sends its controller along all the regions.
+            out.extend(
+                crate::midi_fx::controls(&t.midi_fx, from, to)
+                    .into_iter()
+                    .map(|m| ControlEvent {
+                        beat: m.beat,
+                        track,
+                        number: m.number,
+                        value: u16::from(m.value),
+                    }),
+            );
+            out
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn song_notes_for_test(p: &Project) -> Vec<NoteEvent> {
+    song_notes(p)
+}
+
+fn song_notes(p: &Project) -> Vec<NoteEvent> {
+    // The Groove Track's timing, for the tracks that follow it.
+    let groove = p
+        .tracks
+        .iter()
+        .any(|t| t.params.follow_groove)
+        .then(|| crate::groove::template(p))
+        .flatten();
+    p.tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| Some((track_index(ti)?, t)))
+        .flat_map(|(track, t)| {
+            let mut notes: Vec<NoteEvent> = t
+                .regions
+                .iter()
+                .filter(|r| !r.params.mute)
+                .flat_map(|r| region_notes(t, r, p.region_start_beats(r), track))
+                .collect();
+            if let Some(g) = groove
+                .as_ref()
+                .filter(|_| t.params.follow_groove && !t.params.groove)
+            {
+                crate::groove::apply(&mut notes, g);
+            }
+            // The track's MIDI FX change what it plays.
+            if t.midi_fx.iter().any(|s| s.on) {
+                crate::midi_fx::apply(&t.midi_fx, notes)
+            } else {
+                notes
+            }
+        })
+        .collect()
+}
+
+/// What the engine's streamed audio depends on: the track count and each playing audio
+/// region's file, track and start. When an edit leaves it unchanged (MIDI edits, mixer
+/// changes), only the notes are swapped and the audio streams keep running.
+#[derive(PartialEq, Default, Debug)]
+struct AudioLayout {
+    tracks: usize,
+    clips: Vec<(std::path::PathBuf, u16, u64, String)>,
+}
+
+/// The edits of region `r` of track `t`: its own gain, fades and reverse, with the fades
+/// lengthened where it crossfades with another region.
+fn clip_edit(p: &Project, t: &Track, r: &Region) -> prowave_engine::ClipEdit {
+    let ti = p.tracks.iter().position(|x| std::ptr::eq(x, t));
+    let ri = t.regions.iter().position(|x| std::ptr::eq(x, r));
+    match (ti, ri) {
+        (Some(ti), Some(ri)) => p.clip_edit_of(ti, ri),
+        _ => r.params.clip_edit(),
+    }
+}
+
+fn audio_layout(p: &Project) -> AudioLayout {
+    AudioLayout {
+        tracks: p.tracks.len(),
+        clips: playing_regions(p)
+            .filter_map(|(track, t, r, origin)| {
+                let a = r.audio.as_ref()?;
+                // Gain, fades and reverse are set when a clip starts streaming.
+                let edit = format!("{:?}", clip_edit(p, t, r));
+                Some((a.file.path.clone(), track, origin.to_bits(), edit))
+            })
+            .collect(),
+    }
+}
+
+fn build_song(engine: &Engine, p: &Project) -> Song {
+    // Every clip reads ahead as much as the whole song's prefetch memory allows.
+    let streamed = playing_regions(p)
+        .filter(|(_, _, r, _)| r.audio.is_some())
+        .count();
+    let clips = playing_regions(p)
+        .filter_map(|(track, t, r, origin)| {
+            let a = r.audio.as_ref()?;
+            Some(engine.stream_clip_in(&a.file, track, origin, clip_edit(p, t, r), streamed))
+        })
+        .collect();
+    let notes = song_notes(p);
+    let tracks = track_mixes(p);
+    Song::new(notes, tracks).with_clips(clips)
+}
+
+/// The project's MIDI as an engine song, without audio regions (which need a running
+/// `Engine` to stream). Used by the offline benchmark.
+pub fn offline_song(p: &Project) -> Song {
+    Song::new(song_notes(p), track_mixes(p))
+}
+
+/// The project's Tempo track and time signature as an engine tempo map.
+fn tempo_map(p: &Project) -> Command {
+    Command::SetTempoMap(Box::new(p.tempo_map()))
+}
+
+/// What the engine's tempo map depends on: the start tempo, the tempo changes, the first
+/// signature and the signature changes.
+type TempoKey = (f32, Vec<TempoPoint>, (u8, u8), Vec<crate::model::SigChange>);
+
+fn tempo_key(p: &Project) -> TempoKey {
+    (p.tempo, p.tempo_points(), p.sig, p.sig_changes.clone())
+}
+
+impl EngineSync {
+    /// The output the engine plays on: the device's name and the sample rate.
+    pub fn audio_info(&self) -> (String, u32) {
+        (
+            self.engine.device_name().to_string(),
+            self.engine.sample_rate(),
+        )
+    }
+
+    pub fn new(engine: Engine, p: &Project) -> Self {
+        let mut sync = Self {
+            engine,
+            software_monitoring: true,
+            low_latency: false,
+            io_buffer: 0,
+            buffer_asked: 0,
+            plugin_shape: Vec::new(),
+            process_buffer: 0,
+            process_sent: None,
+            lives: Vec::new(),
+            contents: Vec::new(),
+            output_delay: None,
+            playing: false,
+            monitors: Vec::new(),
+            tempo: None,
+            metronome: false,
+            click: None,
+            tuning: None,
+            cycle: (false, 0.0, 0.0),
+            master: None,
+            position: None,
+            mixes: Vec::new(),
+            patches: Vec::new(),
+            soundfonts: Vec::new(),
+            externals: Vec::new(),
+            controls: Vec::new(),
+            mtc: None,
+            song_rev: None,
+            layout: None,
+            fx: Vec::new(),
+            master_fx: Vec::new(),
+            irs: std::collections::HashMap::new(),
+            routes: Vec::new(),
+            pdc: Vec::new(),
+            automation: Vec::new(),
+            retry: false,
+        };
+        sync.push(p);
+        sync
+    }
+
+    /// Call once per frame: push UI-side changes to the engine, then pull the playhead back.
+    pub fn sync(&mut self, p: &mut Project) {
+        if self.io_buffer > 0 && self.io_buffer != self.buffer_asked {
+            self.buffer_asked = self.io_buffer;
+            match self.engine.set_buffer_frames(self.io_buffer) {
+                Some(got) => tracing::info!("I/O buffer {got} frames"),
+                None => tracing::info!("the I/O buffer size cannot be changed on this system"),
+            }
+        }
+        let counted = !self.playing && p.playing && p.recording && p.count_in;
+        let seek_done = self.push(p);
+        if counted && self.playing {
+            p.counting_in = true;
+        } else if p.counting_in && (!p.playing || self.engine.state().playing) {
+            p.counting_in = false;
+        }
+        // Engine owns time while playing, unless a seek is still waiting to be accepted
+        // (then the UI keeps the requested position and `push` retries it).
+        if seek_done {
+            if p.playing {
+                p.position_beats = self.engine.state().position_beats;
+            }
+            self.position = Some(p.position_beats);
+        }
+    }
+
+    /// Sends every change the engine has not accepted yet. Returns `false` while a playhead
+    /// move is still pending.
+    fn push(&mut self, p: &Project) -> bool {
+        self.retry = false;
+        // Tracks or regions changed. Re-streaming audio reopens every file and briefly drops
+        // it out, so swap only the notes unless the audio layout itself changed.
+        if self.song_rev != Some(p.song_rev) {
+            let layout = audio_layout(p);
+            let sent = if self.layout.as_ref() == Some(&layout) {
+                self.send(Command::set_notes(song_notes(p)))
+            } else {
+                let song = build_song(&self.engine, p);
+                let sent = self.send(Command::SetSong(Box::new(song)));
+                if sent {
+                    self.mixes = mixes(p);
+                    self.layout = Some(layout);
+                    // The new song has no controllers yet: they follow below.
+                    self.controls.clear();
+                }
+                sent
+            };
+            if sent {
+                self.song_rev = Some(p.song_rev);
+            }
+        }
+        let controls = song_controls(p);
+        if self.song_rev == Some(p.song_rev)
+            && controls != self.controls
+            && self.send(Command::set_controls(controls.clone()))
+        {
+            self.controls = controls;
+        }
+        // The user moved the playhead (ruler drag, rewind buttons, menu).
+        let seek_done = match self.position {
+            Some(q) if (p.position_beats - q).abs() <= 1e-9 => true,
+            _ => self.send(Command::SetPosition {
+                beat: p.position_beats,
+            }),
+        };
+        let monitors = if self.software_monitoring {
+            monitors_of(p)
+        } else {
+            Vec::new()
+        };
+        if monitors != self.monitors {
+            let mut tracks = [MonitorTrack::default(); MAX_MONITORS];
+            tracks[..monitors.len()].copy_from_slice(&monitors);
+            let count = monitors.len() as u8;
+            if self.send(Command::SetMonitors { tracks, count }) {
+                self.monitors = monitors;
+            }
+        }
+        if p.playing != self.playing
+            && self.send(if p.playing {
+                start_command(p)
+            } else {
+                Command::Pause
+            })
+        {
+            self.playing = p.playing;
+        }
+        let key = tempo_key(p);
+        if self.tempo.as_ref() != Some(&key) && self.send(tempo_map(p)) {
+            self.tempo = Some(key);
+        }
+        let mtc = (p.mtc_out.is_some(), p.smpte_rate, p.smpte_offset_frames());
+        if self.mtc != Some(mtc)
+            && self.send(Command::SetMtc {
+                on: mtc.0,
+                rate: mtc.1,
+                offset_frames: mtc.2,
+            })
+        {
+            self.mtc = Some(mtc);
+        }
+        if p.metronome != self.metronome && self.send(Command::SetMetronome { on: p.metronome }) {
+            self.metronome = p.metronome;
+        }
+        let click = (p.click_volume_db, p.click_accent);
+        if self.click != Some(click)
+            && self.send(Command::SetClick {
+                gain_db: click.0,
+                accent: click.1,
+            })
+        {
+            self.click = Some(click);
+        }
+        if self.tuning != Some(p.tuning_hz) && self.send(Command::SetTuning { a4_hz: p.tuning_hz })
+        {
+            self.tuning = Some(p.tuning_hz);
+        }
+        let cycle = (p.cycle, p.cycle_start, p.cycle_end);
+        if cycle != self.cycle
+            && self.send(Command::SetCycle {
+                on: p.cycle,
+                start_beat: p.cycle_start,
+                end_beat: p.cycle_end,
+            })
+        {
+            self.cycle = cycle;
+        }
+        if self.master != Some(p.master_vol)
+            && self.send(Command::SetMasterGain {
+                linear: p.master_vol,
+            })
+        {
+            self.master = Some(p.master_vol);
+        }
+        // Built-in synth patches (silent, see `patches`): send each track's whenever it
+        // changes. Stop at the
+        // first rejection so `patches` stays indexed by track; the rest go next frame.
+        for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
+            let patch = synth_patch(t);
+            if self.patches.get(i) == Some(&patch) {
+                continue;
+            }
+            let track = i as u16;
+            if !self.send(Command::SetTrackPatch { track, patch }) {
+                break;
+            }
+            if i < self.patches.len() {
+                self.patches[i] = patch;
+            } else {
+                self.patches.push(patch);
+            }
+        }
+        // SoundFont instruments: a track's player is made again whenever its file or preset
+        // changes. A file that cannot be played is logged and the track plays its synth patch.
+        let sample_rate = self.engine.sample_rate() as f32;
+        for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
+            let want = if t.kind == TrackKind::ExternalMidi {
+                None
+            } else {
+                t.soundfont.as_ref()
+            };
+            let unchanged = match self.soundfonts.get(i) {
+                Some(sent) => sent.as_ref() == want,
+                None => want.is_none(),
+            };
+            if unchanged {
+                continue;
+            }
+            let player = match want {
+                Some(sf) => match soundfont_player(sf, sample_rate) {
+                    Ok(player) => Some(player),
+                    Err(e) => {
+                        tracing::warn!("SoundFont of track {}: {e}", t.name);
+                        None
+                    }
+                },
+                None => None,
+            };
+            if !self.send(Command::SetTrackSoundFont {
+                track: i as u16,
+                player,
+            }) {
+                break;
+            }
+            if self.soundfonts.len() <= i {
+                self.soundfonts.resize(i + 1, None);
+            }
+            self.soundfonts[i] = want.cloned();
+        }
+        // External MIDI tracks: their notes go out as MIDI instead of sounding here.
+        for (i, t) in p.tracks.iter().enumerate().take(MAX_TRACKS) {
+            let external = t.kind == TrackKind::ExternalMidi;
+            if self.externals.get(i).copied().unwrap_or(false) == external {
+                continue;
+            }
+            if !self.send(Command::SetTrackExternal {
+                track: i as u16,
+                external,
+            }) {
+                break;
+            }
+            self.externals
+                .resize(self.externals.len().max(i + 1), false);
+            self.externals[i] = external;
+        }
+        self.sync_strips(p);
+        // Mixer moves. Until a song is accepted, its `SetSong` carries the mix instead.
+        if self.layout.is_some() {
+            for i in 0..p.tracks.len().min(MAX_TRACKS) {
+                let m = mix_of(p, i);
+                if self.mixes.get(i) == Some(&m) {
+                    continue;
+                }
+                let mix = TrackMix {
+                    gain_db: m.gain_db,
+                    mute: m.mute,
+                    solo: m.solo,
+                    pan: m.pan,
+                };
+                if !self.send(Command::SetTrackMix {
+                    track: i as u16,
+                    mix,
+                }) {
+                    break;
+                }
+                if let Some(slot) = self.mixes.get_mut(i) {
+                    *slot = m;
+                }
+            }
+        }
+        seek_done
+    }
+
+    /// Effects, sends and automation. Each is sent only when it differs from what the engine
+    /// has; a rejected command is tried again next frame.
+    fn sync_strips(&mut self, p: &Project) {
+        let sr = self.engine.sample_rate() as f32;
+        let n = p.tracks.len().min(MAX_TRACKS).max(self.fx.len());
+        self.fx.resize_with(n, Vec::new);
+        self.routes.resize(n, Route::default());
+        let paths = if self.low_latency {
+            live_paths(p)
+        } else {
+            Vec::new()
+        };
+        // Every live sound reaches the Stereo Out, so its effects follow Low Latency Mode too.
+        let master_live = paths.iter().any(|&l| l);
+        if !self.sync_master_fx(p, sr, master_live) {
+            return;
+        }
+        for i in 0..n {
+            let live = paths.get(i).copied().unwrap_or(false);
+            let want: Vec<Insert> = p
+                .tracks
+                .get(i)
+                .filter(|_| i < MAX_TRACKS)
+                .map_or_else(Vec::new, |t| inserts_for(t, live, sr));
+            let want = want.as_slice();
+            let same_kinds = self.fx[i].len() == want.len()
+                && self.fx[i].iter().zip(want).all(|(a, b)| a.kind == b.kind);
+            if !same_kinds {
+                let chain = chain_of(want, sr);
+                if !self.send(Command::SetInserts {
+                    track: i as u16,
+                    chain,
+                }) {
+                    return;
+                }
+                self.fx[i] = want.to_vec();
+                self.irs.retain(|(t, _), _| *t != i);
+            } else {
+                for (slot, (have, w)) in self.fx[i].iter_mut().zip(want).enumerate() {
+                    if have == w {
+                        continue;
+                    }
+                    let cmd = Command::SetFx {
+                        track: i as u16,
+                        slot: slot as u8,
+                        params: w.params,
+                        bypass: w.bypass,
+                    };
+                    if !self.engine.send(cmd) {
+                        self.retry = true;
+                        return;
+                    }
+                    if w.kind == prowave_engine::FxKind::Reverb
+                        && ir_key(&have.params) != ir_key(&w.params)
+                    {
+                        let job = self.irs.entry((i, slot)).or_insert(IrJob {
+                            running: None,
+                            next: None,
+                            ready: None,
+                        });
+                        job.next = Some(w.params);
+                    }
+                    *have = *w;
+                }
+            }
+            let route = route_of(p, i);
+            if self.routes[i] != route {
+                if !self.send(Command::SetRoute {
+                    track: i as u16,
+                    route,
+                }) {
+                    return;
+                }
+                self.routes[i] = route;
+            }
+        }
+        // Process Buffer Range: the size, and which tracks run live.
+        if self.process_sent != Some(self.process_buffer) {
+            if !self.send(Command::SetProcessBuffer {
+                frames: self.process_buffer,
+            }) {
+                return;
+            }
+            self.process_sent = Some(self.process_buffer);
+        }
+        let live = live_set(p);
+        self.lives.resize(n, false);
+        for i in 0..n {
+            let want = live.get(i).copied().unwrap_or(false);
+            if self.lives[i] != want {
+                if !self.send(Command::SetTrackLive {
+                    track: i as u16,
+                    live: want,
+                }) {
+                    return;
+                }
+                self.lives[i] = want;
+            }
+        }
+        // Delay compensation follows the effects (a limiter looks ahead) and where each
+        // track's plug-ins run.
+        let (basis, actual) = self.plugin_delays(&live);
+        let llm_live = if self.low_latency {
+            live_tracks(p)
+        } else {
+            Vec::new()
+        };
+        let full = pdc_plan_full(
+            p,
+            sr,
+            &PlanInput {
+                llm_live: &llm_live,
+                paths: &paths,
+                basis_delay: &basis,
+                actual_delay: &actual,
+                live: &live,
+                low_latency: self.low_latency,
+            },
+        );
+        let plan = &full.pdc;
+        self.pdc.resize(n, (0, 0));
+        for (i, want) in plan.iter().copied().enumerate().take(n) {
+            if self.pdc[i] != want {
+                let cmd = Command::SetPdc {
+                    track: i as u16,
+                    pdc: Box::new(Pdc::new(want.0, want.1)),
+                };
+                if !self.send(cmd) {
+                    return;
+                }
+                self.pdc[i] = want;
+            }
+        }
+        // Tracks that are gone have no compensation either.
+        for i in plan.len()..n {
+            if self.pdc[i] != (0, 0) {
+                let cmd = Command::SetPdc {
+                    track: i as u16,
+                    pdc: Box::new(Pdc::default()),
+                };
+                if !self.send(cmd) {
+                    return;
+                }
+                self.pdc[i] = (0, 0);
+            }
+        }
+        self.contents.resize(n, 0);
+        for i in 0..n {
+            let want = full.content.get(i).copied().unwrap_or(0) as u32;
+            if self.contents[i] != want {
+                if !self.send(Command::SetContentDelay {
+                    track: i as u16,
+                    frames: want,
+                }) {
+                    return;
+                }
+                self.contents[i] = want;
+            }
+        }
+        let delay = (full.strips as u32, full.master as u32);
+        if self.output_delay != Some(delay)
+            && self.send(Command::SetOutputDelay {
+                strips: delay.0,
+                master: delay.1,
+            })
+        {
+            self.output_delay = Some(delay);
+        }
+        self.run_ir_jobs(sr);
+        if !automation_unchanged(p, &self.automation) {
+            let lanes = automation_lanes(p);
+            if self.send(Command::SetAutomation(lanes.clone())) {
+                self.automation = lanes;
+            }
+        }
+    }
+
+    /// Each track's plug-in delay in samples, (as if pre-rendered, where it runs): their own
+    /// latency and the blocks of running them (see `prowave_engine::plugin_host_delay`).
+    fn plugin_delays(&self, live: &[bool]) -> (Vec<usize>, Vec<usize>) {
+        let io = self.engine.buffer_frames().max(1);
+        let pb = self.process_buffer;
+        let delay = |i: usize, is_live: bool| {
+            let (inst, fx, own) = self.plugin_shape.get(i).copied().unwrap_or_default();
+            if !inst && !fx {
+                return 0;
+            }
+            own + prowave_engine::plugin_host_delay(inst, fx, is_live, pb, io)
+        };
+        let n = self.plugin_shape.len();
+        (
+            (0..n).map(|i| delay(i, false)).collect(),
+            (0..n)
+                .map(|i| delay(i, live.get(i).copied().unwrap_or(false)))
+                .collect(),
+        )
+    }
+
+    /// Frames the whole mix is heard after the transport renders it (the compensation up to
+    /// the Stereo Out), as last sent; recording makes up for it.
+    pub fn output_delay_frames(&self) -> u32 {
+        self.output_delay.map_or(0, |d| d.1)
+    }
+
+    /// The effects of the Stereo Out strip, sent like a track's: a new chain when the kinds
+    /// change, else the changed settings. Returns false when the engine's queue was full.
+    fn sync_master_fx(&mut self, p: &Project, sr: f32, live: bool) -> bool {
+        let want = &low_latency_inserts(&p.master_inserts, live, sr);
+        let same_kinds = self.master_fx.len() == want.len()
+            && self
+                .master_fx
+                .iter()
+                .zip(want)
+                .all(|(a, b)| a.kind == b.kind);
+        if !same_kinds {
+            if !self.send(Command::SetMasterInserts(chain_of(want, sr))) {
+                return false;
+            }
+            self.master_fx = want.to_vec();
+            self.irs.retain(|(t, _), _| *t != MASTER_KEY);
+            return true;
+        }
+        for (slot, (have, w)) in self.master_fx.iter_mut().zip(want).enumerate() {
+            if have == w {
+                continue;
+            }
+            let cmd = Command::SetFx {
+                track: prowave_engine::MASTER_TRACK,
+                slot: slot as u8,
+                params: w.params,
+                bypass: w.bypass,
+            };
+            if !self.engine.send(cmd) {
+                self.retry = true;
+                return false;
+            }
+            if w.kind == prowave_engine::FxKind::Reverb && ir_key(&have.params) != ir_key(&w.params)
+            {
+                let job = self.irs.entry((MASTER_KEY, slot)).or_insert(IrJob {
+                    running: None,
+                    next: None,
+                    ready: None,
+                });
+                job.next = Some(w.params);
+            }
+            *have = *w;
+        }
+        true
+    }
+
+    /// Starts the response for the newest Space Designer settings, hands finished ones to the
+    /// engine, and keeps the screen redrawing while any is being made.
+    fn run_ir_jobs(&mut self, sr: f32) {
+        let keys: Vec<(usize, usize)> = self.irs.keys().copied().collect();
+        for key in keys {
+            let strip = if key.0 == MASTER_KEY {
+                Some(&self.master_fx)
+            } else {
+                self.fx.get(key.0)
+            };
+            let still_there = strip
+                .and_then(|f| f.get(key.1))
+                .is_some_and(|i| i.kind == prowave_engine::FxKind::Reverb);
+            let Some(job) = self.irs.get_mut(&key) else {
+                continue;
+            };
+            if !still_there {
+                self.irs.remove(&key);
+                continue;
+            }
+            if let Some(rx) = &job.running {
+                match rx.try_recv() {
+                    Ok(conv) => {
+                        job.running = None;
+                        job.ready = Some(conv);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => job.running = None,
+                }
+            }
+            if let Some(conv) = job.ready.take() {
+                let cmd = Command::SetConvolver {
+                    track: if key.0 == MASTER_KEY {
+                        prowave_engine::MASTER_TRACK
+                    } else {
+                        key.0 as u16
+                    },
+                    slot: key.1 as u8,
+                    conv,
+                };
+                // A rejected command is dropped with its response: the next one replaces it.
+                if !self.engine.send(cmd) {
+                    self.retry = true;
+                }
+            }
+            let Some(job) = self.irs.get_mut(&key) else {
+                continue;
+            };
+            if job.running.is_none() {
+                if let Some(params) = job.next.take() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let spawned = std::thread::Builder::new()
+                        .name("space-designer-ir".into())
+                        .spawn(move || {
+                            let _ = tx
+                                .send(Box::new(prowave_engine::Convolver::for_params(&params, sr)));
+                        });
+                    job.running = spawned.is_ok().then_some(rx);
+                }
+            }
+            if job.running.is_some() || job.next.is_some() {
+                self.retry = true;
+            }
+        }
+        self.irs
+            .retain(|_, j| j.running.is_some() || j.next.is_some() || j.ready.is_some());
+    }
+
+    /// Whether Low Latency Mode holds on the Stereo Out now: it is on and a track is played
+    /// live (every live sound reaches the Stereo Out).
+    pub fn master_live(&self, p: &Project) -> bool {
+        self.low_latency && live_paths(p).iter().any(|&l| l)
+    }
+
+    /// `Engine::send`, remembering a rejection so the caller keeps redrawing to retry.
+    fn send(&mut self, cmd: Command) -> bool {
+        let sent = self.engine.send(cmd);
+        self.retry |= !sent;
+        sent
+    }
+
+    /// The MIDI the engine sends to external instruments (once).
+    pub fn take_midi_out(&mut self) -> Option<rtrb::Consumer<prowave_engine::MidiOutEvent>> {
+        self.engine.take_midi_out()
+    }
+
+    /// The MIDI Time Code the engine sends (once).
+    pub fn take_mtc_out(&mut self) -> Option<rtrb::Consumer<prowave_engine::MtcMessage>> {
+        self.engine.take_mtc_out()
+    }
+
+    /// Whether a command was rejected (queue full) and is waiting to be retried.
+    pub fn needs_retry(&self) -> bool {
+        self.retry
+    }
+
+    pub fn underruns(&self) -> u32 {
+        self.engine
+            .shared()
+            .underruns
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Post-fader stereo peaks for the first `n` tracks (linear), for the mixer meters.
+    pub fn track_meters(&mut self, n: usize) -> Vec<(f32, f32)> {
+        let state = self.engine.state();
+        (0..n).map(|i| state.track_peaks(i)).collect()
+    }
+
+    /// Gain reduction in dB of the compressors of the first `n` tracks, for the mixer.
+    pub fn gain_reduction(&mut self, n: usize) -> Vec<f32> {
+        let state = self.engine.state();
+        (0..n).map(|i| state.gain_reduction(i)).collect()
+    }
+
+    /// The level going into the Space Designer of the first `n` tracks (linear), for its Input
+    /// meter.
+    pub fn fx_inputs(&mut self, n: usize) -> Vec<f32> {
+        let state = self.engine.state();
+        (0..n).map(|i| state.fx_input(i)).collect()
+    }
+
+    /// Gain reduction in dB and Space Designer input level (linear) of the master bus's effects.
+    pub fn master_fx_meters(&mut self) -> (f32, f32) {
+        let state = self.engine.state();
+        (state.master_reduction, state.master_fx_input)
+    }
+
+    /// Highest audio-callback DSP load since the last call (1.0 = full budget).
+    pub fn take_dsp_load(&self) -> f32 {
+        self.engine.shared().take_dsp_load()
+    }
+
+    /// The playback thread's highest load since the last call (1.0 = full budget).
+    pub fn take_worker_load(&self) -> f32 {
+        self.engine.shared().take_worker_load()
+    }
+
+    /// System overloads so far (Logic: System Overload).
+    pub fn overloads(&self) -> u32 {
+        self.engine.shared().overloads()
+    }
+
+    /// The heaviest plug-in since the last call: (track, slot, load).
+    pub fn take_heaviest_plugin(&self) -> Option<(u16, u8, f32)> {
+        self.engine.shared().take_heaviest_plugin()
+    }
+
+    /// The round trip of a monitored input in milliseconds, at the I/O buffer the engine has.
+    pub fn round_trip_ms(&self) -> f32 {
+        crate::engine_mode::round_trip_ms(
+            self.engine.device_latency_frames(),
+            self.engine.buffer_frames(),
+            self.engine.sample_rate(),
+        )
+    }
+
+    pub fn master_peaks(&mut self) -> (f32, f32) {
+        self.engine.state().peaks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Note, RegionParams, TrackKind, TrackParams};
+    use prowave_engine::TempoMap;
+
+    fn track(notes: Vec<Note>) -> Track {
+        Track {
+            name: "t".into(),
+            kind: TrackKind::Instrument,
+            color: egui::Color32::GREEN,
+            mute: false,
+            solo: false,
+            rec: false,
+            monitor: false,
+            input: prowave_engine::InputSource::Mono(0),
+            output: 0,
+            volume_db: 0.0,
+            pan: 0.0,
+            inserts: vec![],
+            regions: vec![Region {
+                name: "r".into(),
+                start_bar: 1.0,
+                len_bars: 1.0,
+                notes,
+                controls: Vec::new(),
+                folder: None,
+                generated: None,
+                audio: None,
+                params: RegionParams::default(),
+            }],
+            params: TrackParams::default(),
+            sends: Vec::new(),
+            auto: crate::model::Automation::default(),
+            group: None,
+            height: 1.0,
+            indent: 0,
+            folded: false,
+            icon: None,
+            vca: None,
+            midi_port: None,
+            soundfont: None,
+            au_instrument: None,
+            au_effects: Vec::new(),
+            midi_channel: 1,
+            midi_program: None,
+            midi_bank: None,
+            midi_fx: Vec::new(),
+        }
+    }
+
+    fn note(start: f32, pitch: u8, vel: u8) -> Note {
+        Note {
+            lyric: crate::lyrics::Lyric::NONE,
+            mute: false,
+            start,
+            len: 0.5,
+            pitch,
+            vel,
+        }
+    }
+
+    #[test]
+    fn sends_aux_buses_and_automation_reach_the_engine_as_the_project_says() {
+        use crate::model::{AutoTarget, SendSlot};
+        let mut p = Project::demo();
+        let a1 = p.add_track(TrackKind::Aux);
+        let a2 = p.add_track(TrackKind::Aux);
+        p.tracks[0].sends = vec![
+            SendSlot {
+                bus: Some(2),
+                level: 0.5,
+                pre: true,
+            },
+            SendSlot {
+                bus: None,
+                level: 0.9,
+                pre: false,
+            },
+        ];
+        // Aux strips take Bus 1, Bus 2... in order, and do not send themselves.
+        p.tracks[a1].sends = p.tracks[0].sends.clone();
+        assert_eq!(
+            (p.aux_bus_of(a1), p.aux_bus_of(a2), p.aux_bus_of(0)),
+            (1, 2, 0)
+        );
+        assert_eq!(route_of(&p, a2).bus_in, 2);
+        assert!(!route_of(&p, a1).has_sends());
+        let r = route_of(&p, 0);
+        assert_eq!((r.bus_in, r.sends[0].bus, r.sends[0].pre), (0, 2, true));
+        assert_eq!(r.sends[1].bus, 0, "an empty slot sends nothing");
+        // More than eight Aux strips: the ninth hears no bus.
+        for _ in 0..8 {
+            p.add_track(TrackKind::Aux);
+        }
+        assert_eq!(p.aux_bus_of(p.tracks.len() - 1), 0);
+
+        // Automation: the lanes sent are what the project has, and the comparison knows it.
+        assert!(automation_unchanged(&p, &[]));
+        p.tracks[1].auto.set_point(AutoTarget::Volume, 2.0, -9.0);
+        p.tracks[1].auto.set_point(AutoTarget::Pan, 1.0, 0.25);
+        let lanes = automation_lanes(&p);
+        assert_eq!(lanes.len(), 2);
+        assert!(lanes.iter().all(|l| l.track == 1 && l.follow));
+        assert!(automation_unchanged(&p, &lanes));
+        p.tracks[1].auto.set_point(AutoTarget::Volume, 3.0, -9.0);
+        assert!(!automation_unchanged(&p, &lanes));
+        let lanes = automation_lanes(&p);
+        // Overridden by hand: the fader's lane is no longer played, the pan's still is.
+        p.tracks[1].auto.overridden.push(AutoTarget::Volume);
+        assert!(!automation_unchanged(&p, &lanes), "no longer played");
+        let now = automation_lanes(&p);
+        assert!(now
+            .iter()
+            .any(|l| l.target == AutoTarget::Volume && !l.follow));
+        assert!(now.iter().any(|l| l.target == AutoTarget::Pan && l.follow));
+        // Mute, sends (only while the send is there), the Stereo Out and plug-ins.
+        p.tracks[1].auto.set_point(AutoTarget::Mute, 0.0, 1.0);
+        p.tracks[1]
+            .auto
+            .set_point(AutoTarget::Send { slot: 3 }, 0.0, 0.5);
+        p.master_auto.set_point(AutoTarget::Volume, 0.0, -6.0);
+        let info = &prowave_engine::native_effects()[0];
+        p.tracks[1].au_effects = vec![crate::native_fx_ui::new_slot(info)];
+        let desc = crate::automation::describe(
+            &p,
+            crate::automation::Strip::Track(1),
+            AutoTarget::Plugin { slot: 1, param: 0 },
+            &Default::default(),
+        )
+        .unwrap_or_else(|| panic!("a native effect's parameter"));
+        p.tracks[1].auto.plugin_lane(&desc, info.id);
+        p.tracks[1].auto.set_point(desc.target, 0.0, 0.5);
+        let lanes = automation_lanes(&p);
+        assert!(lanes
+            .iter()
+            .any(|l| l.target == AutoTarget::Mute && l.stepped));
+        assert!(!lanes
+            .iter()
+            .any(|l| matches!(l.target, AutoTarget::Send { .. })));
+        assert!(lanes
+            .iter()
+            .any(|l| l.track == prowave_engine::MASTER_TRACK && l.target == AutoTarget::Volume));
+        let plug = lanes
+            .iter()
+            .find(|l| matches!(l.target, AutoTarget::Plugin { slot: 1, param: 0 }))
+            .unwrap_or_else(|| panic!("the plug-in lane"));
+        assert_eq!((plug.lo, plug.hi), (desc.lo, desc.hi));
+        assert!(automation_unchanged(&p, &lanes));
+        // Bypassed, the plug-in is not running: its lane is not played.
+        p.tracks[1].au_effects[0].bypass = true;
+        assert!(!automation_lanes(&p)
+            .iter()
+            .any(|l| matches!(l.target, AutoTarget::Plugin { .. })));
+        p.tracks[1].au_effects.clear();
+        p.tracks[1].auto.plugins.clear();
+        p.tracks[1].auto.mute.clear();
+        p.master_auto.volume.clear();
+        // A VCA's level is added to the lane.
+        let lanes = automation_lanes(&p);
+        let vca = p.add_track(TrackKind::Vca);
+        p.tracks[vca].volume_db = -4.0;
+        p.assign_vca(1, Some(vca));
+        assert!(!automation_unchanged(&p, &lanes));
+        assert_eq!(automation_lanes(&p)[0].offset_db, -4.0);
+        // The effects as the audio thread gets them.
+        let chain = chain_of(&p.tracks[0].inserts, 48_000.0);
+        assert_eq!(chain.fx.len(), p.tracks[0].inserts.len());
+    }
+
+    #[test]
+    fn a_look_ahead_effect_delays_the_other_strips_so_everything_stays_in_time() {
+        use crate::model::Insert;
+        use prowave_engine::FxKind;
+        let sr = 48_000.0;
+        let mut p = Project::empty();
+        let a = p.add_track(TrackKind::Audio);
+        let b = p.add_track(TrackKind::Audio);
+        let aux = p.add_track(TrackKind::Aux);
+        let vca = p.add_track(TrackKind::Vca);
+        // Nothing looks ahead: nothing is delayed.
+        assert!(pdc_plan(&p, sr).iter().all(|d| *d == (0, 0)));
+        let look = FxKind::Limiter.latency_samples(sr);
+        assert!(look > 0);
+        p.tracks[a].inserts = vec![Insert::new(FxKind::Limiter)];
+        let plan = pdc_plan(&p, sr);
+        assert_eq!(latency_of(&p.tracks[a], sr), look);
+        // The limiter's own strip is the latest: the others wait for it before their sends
+        // and faders; none of them needs more after.
+        assert_eq!(plan[a], (0, 0));
+        assert_eq!(plan[b], (look, 0));
+        assert_eq!(plan[0], (look, 0));
+        assert_eq!(plan[vca], (0, 0), "a VCA has no sound");
+        // A bypassed limiter delays nothing.
+        p.tracks[a].inserts[0].bypass = true;
+        assert!(pdc_plan(&p, sr).iter().all(|d| *d == (0, 0)));
+        p.tracks[a].inserts[0].bypass = false;
+        // A limiter on an Aux strip: every other strip is delayed after its fader, by as much
+        // as the Aux strip is late; the Aux strip itself needs nothing.
+        p.tracks[aux].inserts = vec![Insert::new(FxKind::Limiter)];
+        let plan = pdc_plan(&p, sr);
+        assert_eq!(plan[aux], (0, 0));
+        assert_eq!(plan[b], (look, look));
+        assert_eq!(plan[a], (0, look));
+        // Two limiters in a row add up.
+        p.tracks[b].inserts = vec![Insert::new(FxKind::Limiter), Insert::new(FxKind::Limiter)];
+        assert_eq!(latency_of(&p.tracks[b], sr), 2 * look);
+        assert_eq!(pdc_plan(&p, sr)[a].0, look);
+    }
+
+    #[test]
+    fn live_tracks_are_the_armed_monitored_and_selected_instrument_and_their_buses() {
+        use crate::model::SendSlot;
+        let mut p = Project::empty();
+        p.tracks.clear();
+        let inst = p.add_track(TrackKind::Instrument);
+        let audio = p.add_track(TrackKind::Audio);
+        let other = p.add_track(TrackKind::Instrument);
+        let aux = p.add_track(TrackKind::Aux);
+        p.selected_track = audio;
+        // An audio track that is only selected is not live; nothing else is either.
+        assert_eq!(live_set(&p), vec![false; 4]);
+        // The selected instrument is the one being played (Logic's live mode).
+        p.selected_track = inst;
+        assert_eq!(live_set(&p), [true, false, false, false]);
+        // Armed or monitoring tracks are live, and an Aux strip their sound reaches.
+        p.tracks[audio].monitor = true;
+        p.tracks[audio].sends = vec![SendSlot {
+            bus: Some(p.aux_bus_of(aux)),
+            level: 0.5,
+            pre: false,
+        }];
+        assert_eq!(live_set(&p), [true, true, false, true]);
+        p.tracks[audio].monitor = false;
+        p.tracks[other].rec = true;
+        assert_eq!(live_set(&p), [true, false, true, false]);
+    }
+
+    #[test]
+    fn going_live_moves_only_that_track_and_keeps_its_regions_in_time() {
+        let sr = 48_000.0;
+        let mut p = Project::empty();
+        p.tracks.clear();
+        let a = p.add_track(TrackKind::Audio);
+        let b = p.add_track(TrackKind::Instrument);
+        let c = p.add_track(TrackKind::Audio);
+        let (pb, io) = (512, 64);
+        // a: Audio FX; b: an instrument and Audio FX; c: no plug-ins.
+        let shape = [(false, true), (true, true), (false, false)];
+        let delay = |live: &[bool]| -> Vec<usize> {
+            shape
+                .iter()
+                .enumerate()
+                .map(|(i, &(inst, fx))| {
+                    prowave_engine::plugin_host_delay(inst, fx, live[i], pb, io)
+                })
+                .collect()
+        };
+        let none = [false; 3];
+        let basis = delay(&none);
+        let plan = |live: &[bool]| {
+            pdc_plan_full(
+                &p,
+                sr,
+                &PlanInput {
+                    llm_live: &[],
+                    paths: &[],
+                    basis_delay: &basis,
+                    actual_delay: &delay(live),
+                    live,
+                    low_latency: false,
+                },
+            )
+        };
+        let before = plan(&none);
+        let d = prowave_engine::prerender_delay(pb, io) as usize;
+        assert_eq!(
+            before.strips,
+            2 * d,
+            "an instrument and effects are two hops"
+        );
+        assert_eq!(before.pdc[b], (0, 0));
+        assert_eq!(before.pdc[a], (d, 0));
+        assert_eq!(before.pdc[c], (2 * d, 0));
+        assert_eq!(before.content, [0, 0, 0]);
+        // b goes live: the others do not move; b waits for nothing before its fader (its
+        // input and live notes are heard at once) and plays its regions late instead.
+        let mut live = none;
+        live[b] = true;
+        let after = plan(&live);
+        assert_eq!(after.pdc[a], before.pdc[a]);
+        assert_eq!(after.pdc[c], before.pdc[c]);
+        assert_eq!(after.pdc[b], (0, 0));
+        assert_eq!(after.content[b], 2 * d - 2 * io as usize);
+        assert_eq!((after.strips, after.master), (before.strips, before.master));
+        let _ = (a, c);
+    }
+
+    #[test]
+    fn low_latency_mode_keeps_live_tracks_out_of_the_delay() {
+        use crate::model::Insert;
+        use prowave_engine::FxKind;
+        let sr = 48_000.0;
+        let mut p = Project::empty();
+        let a = p.add_track(TrackKind::Audio);
+        let live = p.add_track(TrackKind::Audio);
+        p.tracks[live].monitor = true;
+        let look = FxKind::Limiter.latency_samples(sr);
+        p.tracks[a].inserts = vec![Insert::new(FxKind::Limiter)];
+        // Normally the monitored track waits for the limiter on the other one.
+        assert_eq!(pdc_plan(&p, sr)[live], (look, 0));
+        let (on, paths) = (live_tracks(&p), live_paths(&p));
+        assert!(paths[live] && !paths[a]);
+        assert_eq!(pdc_plan_with(&p, sr, &on, &paths, &[])[live], (0, 0));
+        // A limiter on the live track is bypassed; an amp (well under 1 ms) is kept.
+        p.tracks[live].inserts = vec![Insert::new(FxKind::Limiter), Insert::new(FxKind::Amp)];
+        let sent = inserts_for(&p.tracks[live], true, sr);
+        assert!(sent[0].bypass && !sent[1].bypass);
+        assert!(!inserts_for(&p.tracks[live], false, sr)[0].bypass);
+        // The others no longer wait for the live track's effects.
+        let plan = pdc_plan_with(&p, sr, &on, &paths, &[]);
+        assert_eq!(plan[a], (0, 0));
+        assert_eq!(plan[live], (0, 0));
+    }
+
+    #[test]
+    fn quantize_transpose_and_velocity_are_applied() {
+        let mut t = track(vec![note(0.9, 60, 100)]);
+        t.regions[0].params = RegionParams {
+            mute: false,
+            quantize: Some(0.25),
+            transpose: 12,
+            velocity: -10,
+            ..RegionParams::default()
+        };
+        t.params.transpose = -2;
+        let out = region_notes(&t, &t.regions[0], 4.0, 3);
+        assert_eq!(out.len(), 1);
+        assert!(
+            (out[0].start_beat - 5.0).abs() < 1e-6,
+            "{}",
+            out[0].start_beat
+        );
+        assert_eq!((out[0].pitch, out[0].vel, out[0].track), (70, 90, 3));
+    }
+
+    #[test]
+    fn key_and_velocity_limits_filter_notes() {
+        let mut t = track(vec![
+            note(0.0, 40, 100),
+            note(1.0, 60, 100),
+            note(2.0, 60, 20),
+        ]);
+        t.params.key_limit = (48, 72);
+        t.params.vel_limit = (30, 127);
+        let out = region_notes(&t, &t.regions[0], 0.0, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pitch, 60);
+        assert!((out[0].start_beat - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn velocity_is_clamped_and_out_of_range_pitch_dropped() {
+        let mut t = track(vec![note(0.0, 120, 120), note(1.0, 60, 120)]);
+        t.regions[0].params.transpose = 12;
+        t.regions[0].params.velocity = 50;
+        let out = region_notes(&t, &t.regions[0], 0.0, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].pitch, out[0].vel), (72, 127));
+    }
+
+    #[test]
+    fn regions_start_where_the_engine_puts_the_bar_in_any_signature() {
+        let mut p = Project::demo();
+        p.tracks.truncate(1);
+        p.tracks[0].regions.truncate(1);
+        p.tracks[0].regions[0].params.mute = false;
+        p.tracks[0].regions[0].start_bar = 3.0;
+        for (sig, quarters_per_bar) in [((4, 4), 4.0), ((6, 8), 3.0), ((7, 8), 3.5), ((2, 2), 4.0)]
+        {
+            p.sig = sig;
+            assert_eq!(p.bar_len(0), quarters_per_bar, "{sig:?}");
+            let (_, _, _, origin) = playing_regions(&p).next().unwrap();
+            // Bar 3 (1-based) is the engine's bar 2 (0-based).
+            let engine_beat = TempoMap::constant(p.tempo, sig).beat_of_bar(2);
+            assert!(
+                (origin - engine_beat).abs() < 1e-9,
+                "{sig:?}: {origin} vs {engine_beat}"
+            );
+        }
+    }
+
+    #[test]
+    fn region_controllers_go_to_external_and_internal_instruments() {
+        use crate::model::{Control, TrackKind};
+        let mut p = Project::demo();
+        let ext = p.add_track(TrackKind::ExternalMidi);
+        let plain = p.add_track(TrackKind::Instrument);
+        for t in [ext, plain] {
+            p.tracks[t].regions.push(crate::model::Region {
+                name: "r".into(),
+                start_bar: 3.0,
+                len_bars: 2.0,
+                notes: vec![],
+                controls: vec![
+                    Control {
+                        start: 1.0,
+                        num: 64,
+                        val: 127,
+                    },
+                    Control {
+                        start: 2.0,
+                        num: 64,
+                        val: 0,
+                    },
+                    Control {
+                        start: 0.5,
+                        num: 1,
+                        val: 200,
+                    },
+                    Control {
+                        start: 1.5,
+                        num: PITCH_BEND,
+                        val: 16383,
+                    },
+                    Control {
+                        start: 1.5,
+                        num: SYSEX_BYTE,
+                        val: 0xF0,
+                    },
+                ],
+                folder: None,
+                audio: None,
+                params: RegionParams::default(),
+                generated: None,
+            });
+        }
+        let c = song_controls(&p);
+        let of = |t: usize| -> Vec<ControlEvent> {
+            c.iter().copied().filter(|e| e.track == t as u16).collect()
+        };
+        // The external instrument gets everything, the engine's own instrument no SysEx.
+        assert_eq!(of(ext).len(), 5, "{c:?}");
+        assert_eq!(of(plain).len(), 4, "{c:?}");
+        assert!(of(plain).iter().all(|e| e.number != SYSEX_BYTE));
+        // Bar 3 starts at beat 8.
+        let mut beats: Vec<f64> = of(plain).iter().map(|e| e.beat).collect();
+        beats.sort_by(f64::total_cmp);
+        assert_eq!(beats, [8.5, 9.0, 9.5, 10.0]);
+        let bend = of(plain).into_iter().find(|e| e.number == PITCH_BEND);
+        assert_eq!(bend.map(|e| e.value), Some(16383), "14-bit bends pass");
+        assert!(
+            c.iter().filter(|e| e.number < 128).all(|e| e.value <= 127),
+            "wild values are repaired"
+        );
+        p.tracks[ext].regions[0].params.mute = true;
+        p.tracks[plain].regions[0].params.mute = true;
+        assert!(song_controls(&p).is_empty(), "a muted region sends nothing");
+    }
+
+    #[test]
+    fn a_tracks_midi_fx_change_the_notes_the_engine_gets() {
+        use crate::midi_fx::{FxSlot, MidiFx};
+        let mut p = Project::demo();
+        let plain = song_notes(&p);
+        p.tracks[0].midi_fx = vec![FxSlot {
+            fx: MidiFx::Transposer { semitones: 7 },
+            on: true,
+        }];
+        let fx = song_notes(&p);
+        assert_eq!(plain.len(), fx.len());
+        let first =
+            |notes: &[NoteEvent]| notes.iter().filter(|n| n.track == 0).map(|n| n.pitch).max();
+        assert_eq!(first(&fx), first(&plain).map(|x| x + 7));
+        // The other tracks are as they were.
+        let other = |notes: &[NoteEvent]| notes.iter().filter(|n| n.track == 1).count();
+        assert_eq!(other(&fx), other(&plain));
+        // Switched off, the notes are the original ones.
+        p.tracks[0].midi_fx[0].on = false;
+        assert_eq!(song_notes(&p).len(), plain.len());
+        assert_eq!(first(&song_notes(&p)), first(&plain));
+    }
+
+    #[test]
+    fn regions_and_the_engine_agree_on_bars_with_several_signatures() {
+        let mut p = Project::demo();
+        p.set_signature_from(3, (3, 4));
+        p.set_signature_from(5, (6, 8));
+        p.set_signature_from(7, (7, 8));
+        p.set_signature_from(10, (5, 4));
+        let map = p.tempo_map();
+        for bar in 0..14u32 {
+            let engine = map.beat_of_bar(bar);
+            let app = p.bar_to_beats(bar as f64);
+            assert!((engine - app).abs() < 1e-9, "bar {bar}: {engine} vs {app}");
+        }
+        for beats in [0.0, 3.9, 8.0, 12.5, 14.0, 20.0, 23.4, 30.0, 41.0] {
+            let pos = map.position(beats);
+            let bars = p.beats_to_bar(beats);
+            assert_eq!(pos.bar as f64, bars.floor(), "bar of {beats}");
+        }
+        // A change of signature is sent to the engine as a change of the tempo map.
+        let before = tempo_key(&p);
+        p.set_signature_from(12, (2, 4));
+        assert_ne!(tempo_key(&p), before);
+    }
+
+    #[test]
+    fn editing_the_signature_repositions_the_notes_sent_to_the_engine() {
+        let mut p = Project::demo();
+        p.tracks.truncate(1);
+        p.tracks[0].regions.truncate(1);
+        p.tracks[0].regions[0].params.mute = false;
+        p.tracks[0].regions[0].start_bar = 3.0;
+        let first = |p: &Project| {
+            song_notes(p)
+                .iter()
+                .map(|n| n.start_beat)
+                .fold(f64::MAX, f64::min)
+        };
+        let (before, rev) = (first(&p), p.song_rev);
+        // 4/4 -> 3/4: bar 3 starts at quarter note 6 instead of 8, so every note moves 2 earlier.
+        assert!(p.step_signature(crate::model::SigPart::Numerator, -1));
+        assert!(
+            (before - first(&p) - 2.0).abs() < 1e-9,
+            "{before} -> {}",
+            first(&p)
+        );
+        assert_ne!(p.song_rev, rev, "the engine is told to rebuild the song");
+    }
+
+    #[test]
+    fn bar_display_counts_signature_beats() {
+        let mut p = Project::demo();
+        // 4.75 quarter notes: bar 2 + 1.75 quarters.
+        assert_eq!(p.bbdt(4.75), (2, 1, 4, 1));
+        // In 6/8 a bar is 3 quarters: bar 2 + 1.75 quarters = 3.5 eighths -> beat 4, 16th 2.
+        p.sig = (6, 8);
+        assert_eq!(p.bbdt(4.75), (2, 4, 2, 1));
+        p.position_beats = 4.75;
+        assert_eq!(p.bar_beat_tick(), (2, 4, 480));
+    }
+
+    #[test]
+    fn tracks_past_the_engine_limit_are_left_out_not_aliased() {
+        let mut p = Project::demo();
+        p.tracks.truncate(1);
+        p.tracks[0].regions.truncate(1);
+        p.tracks[0].regions[0].params.mute = false;
+        p.tracks = vec![p.tracks[0].clone(); MAX_TRACKS + 3];
+        let notes = song_notes(&p);
+        let per_track = notes.iter().filter(|n| n.track == 0).count();
+        assert!(per_track > 0);
+        assert_eq!(notes.len(), per_track * MAX_TRACKS);
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| usize::from(n.track) == MAX_TRACKS - 1)
+                .count(),
+            per_track,
+            "the last engine track must not collect notes from later tracks"
+        );
+        assert_eq!(mixes(&p).len(), MAX_TRACKS);
+        assert_eq!(track_index(MAX_TRACKS - 1), Some((MAX_TRACKS - 1) as u16));
+        assert_eq!(track_index(MAX_TRACKS), None);
+    }
+
+    #[test]
+    fn only_audio_changes_need_a_full_song_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("loop.wav");
+        crate::project_io::tests::write_wav(&wav);
+        let ctx = egui::Context::default();
+        let mut p = Project::demo();
+        crate::import::import_audio(&mut p, &wav, &ctx).unwrap();
+        let before = audio_layout(&p);
+        assert_eq!(before.clips.len(), 1);
+
+        // MIDI edits and mixer moves keep the streamed audio.
+        p.tracks[0].regions[0].notes[0].pitch += 1;
+        p.tracks[0].regions[0].start_bar += 1.0;
+        p.tracks[1].volume_db = -12.0;
+        assert_eq!(audio_layout(&p), before);
+
+        // Moving or muting the audio region, or adding a track, does not.
+        let audio = p.tracks.len() - 1;
+        p.tracks[audio].regions[0].start_bar += 1.0;
+        assert_ne!(audio_layout(&p), before);
+        p.tracks[audio].regions[0].start_bar -= 1.0;
+        p.tracks[audio].regions[0].params.mute = true;
+        assert_ne!(audio_layout(&p), before);
+        p.tracks[audio].regions[0].params.mute = false;
+        // Nor do gain, fades or reverse, which a clip gets when it starts streaming.
+        for edit in [
+            |r: &mut RegionParams| r.gain_db = -6.0,
+            |r: &mut RegionParams| r.fade_out = 1.0,
+            |r: &mut RegionParams| r.reverse = true,
+        ] {
+            let mut q = Project::demo();
+            q.tracks = p.tracks.clone();
+            let before = audio_layout(&q);
+            edit(&mut q.tracks[audio].regions[0].params);
+            assert_ne!(audio_layout(&q), before);
+        }
+        p.tracks.push(p.tracks[0].clone());
+        assert_ne!(audio_layout(&p), before);
+    }
+
+    #[test]
+    fn record_with_count_in_clicks_one_bar_of_the_signature() {
+        let mut p = Project::empty();
+        assert!(matches!(start_command(&p), Command::Play), "not recording");
+        p.recording = true;
+        p.count_in = false;
+        assert!(matches!(start_command(&p), Command::Play), "count-in off");
+        p.count_in = true;
+        p.sig = (6, 8);
+        match start_command(&p) {
+            Command::CountIn {
+                clicks,
+                beats_per_click,
+            } => assert_eq!((clicks, beats_per_click), (6, 0.5)),
+            _ => panic!("no count-in"),
+        }
+        // Two bars of count-in: twice the clicks.
+        p.count_in_bars = 2;
+        match start_command(&p) {
+            Command::CountIn { clicks, .. } => assert_eq!(clicks, 12),
+            _ => panic!("no count-in"),
+        }
+    }
+
+    #[test]
+    fn the_i_button_makes_a_monitor_of_the_tracks_input() {
+        let mut p = Project::empty();
+        p.tracks.clear();
+        p.tracks.push(Track::new("Keys", TrackKind::Instrument));
+        p.tracks.push(Track::new("Vox", TrackKind::Audio));
+        p.tracks[0].monitor = true;
+        assert!(monitors_of(&p).is_empty(), "audio tracks only");
+        p.tracks[1].monitor = true;
+        p.tracks[1].input = InputSource::Stereo(2);
+        assert_eq!(
+            monitors_of(&p),
+            vec![MonitorTrack {
+                track: 1,
+                channel: 2,
+                stereo: true
+            }]
+        );
+    }
+
+    #[test]
+    fn a_track_can_play_into_a_bus_but_an_aux_cannot() {
+        let mut p = Project::empty();
+        p.tracks.clear();
+        p.tracks.push(Track::new("Vox", TrackKind::Audio));
+        p.tracks.push(Track::new("Aux 1", TrackKind::Aux));
+        p.tracks[0].output = 3;
+        p.tracks[1].output = 3;
+        assert_eq!(route_of(&p, 0).output, 3);
+        assert_eq!(route_of(&p, 1).output, 0);
+    }
+
+    /// Plays the demo song for 0.2 s through an offline engine, with every track's route as
+    /// the app sends it, and returns the loudest output sample.
+    fn render_peak(p: &Project) -> f32 {
+        use prowave_engine::{EngineCore, Shared};
+        let (mut tx, rx) = rtrb::RingBuffer::<Command>::new(1024);
+        let (trash_tx, _trash_rx) = rtrb::RingBuffer::new(64);
+        let mut core = EngineCore::new(48_000, rx, trash_tx, std::sync::Arc::new(Shared::new()));
+        assert!(tx.push(Command::SetSong(Box::new(offline_song(p)))).is_ok());
+        for i in 0..p.tracks.len() {
+            let route = route_of(p, i);
+            assert!(tx
+                .push(Command::SetRoute {
+                    track: i as u16,
+                    route
+                })
+                .is_ok());
+        }
+        assert!(tx.push(Command::SetPosition { beat: 0.0 }).is_ok());
+        assert!(tx.push(Command::Play).is_ok());
+        let mut peak = 0f32;
+        let mut buf = vec![0.0f32; 512];
+        for _ in 0..40 {
+            core.process(&mut buf);
+            peak = buf.iter().fold(peak, |m, x| m.max(x.abs()));
+        }
+        peak
+    }
+
+    #[test]
+    fn routing_a_track_to_bus_1_makes_the_aux_that_plays_it_and_it_is_heard() {
+        let mut p = Project::demo();
+        assert!(render_peak(&p) > 0.01, "the demo plays through Stereo Out");
+        assert_eq!(p.aux_for_bus(1), None);
+        // Output to Bus 1 with nothing listening: the bus goes nowhere.
+        for t in &mut p.tracks {
+            t.output = 1;
+        }
+        assert!(render_peak(&p) < 1e-6, "no Aux strip plays Bus 1");
+
+        // What the Output menu does: Bus 1 gets its Aux strip, and the song is heard again.
+        let aux = p.ensure_aux_for_bus(1).unwrap();
+        assert_eq!(p.tracks[aux].kind, TrackKind::Aux);
+        assert_eq!(p.aux_bus_of(aux), 1);
+        let (r0, ra) = (route_of(&p, 0), route_of(&p, aux));
+        assert_eq!((r0.output, r0.bus_in), (1, 0));
+        assert_eq!((ra.output, ra.bus_in), (0, 1));
+        assert!(render_peak(&p) > 0.01, "the Aux plays Bus 1 to Stereo Out");
+
+        // A send to Bus 3 makes Aux 2 and Aux 3 after it; Aux 1 keeps Bus 1.
+        p.tracks[0].sends = vec![crate::model::SendSlot {
+            bus: Some(3),
+            level: 0.5,
+            pre: false,
+        }];
+        let a3 = p.ensure_aux_for_bus(3).unwrap();
+        assert_eq!(route_of(&p, a3).bus_in, 3);
+        assert_eq!(route_of(&p, 0).sends[0].bus, 3);
+        assert_eq!(p.aux_bus_of(aux), 1);
+    }
+
+    #[test]
+    fn stereo_out_plugin_lanes_play_on_the_running_plugin() {
+        use crate::plugins::PluginSlot;
+        let mut p = Project::empty();
+        let info = &prowave_engine::native_effects()[0];
+        let mut off = PluginSlot::new("aufx:dely:appl", "Apple: AUDelay");
+        off.bypass = true;
+        p.master_au_effects = vec![off, crate::native_fx_ui::new_slot(info)];
+        let strip = crate::automation::Strip::Master;
+        let target = AutoTarget::Plugin { slot: 2, param: 0 };
+        let desc = crate::automation::describe(&p, strip, target, &Default::default())
+            .unwrap_or_else(|| panic!("the native effect's parameter on Stereo Out"));
+        p.master_auto.plugin_lane(&desc, info.id);
+        p.master_auto.set_point(target, 0.0, 0.5);
+        let lanes = automation_lanes(&p);
+        let lane = lanes
+            .iter()
+            .find(|l| l.track == prowave_engine::MASTER_TRACK)
+            .unwrap_or_else(|| panic!("the Stereo Out's plug-in lane"));
+        // The bypassed delay is not running: the native effect is the first running one.
+        assert_eq!(lane.target, AutoTarget::Plugin { slot: 1, param: 0 });
+        assert_eq!((lane.lo, lane.hi), (desc.lo, desc.hi));
+        assert!(automation_unchanged(&p, &lanes));
+        // Another plug-in in that slot: the lane is not played.
+        p.master_au_effects[1] = PluginSlot::new("aufx:lmtr:appl", "Apple: AUPeakLimiter");
+        assert!(!automation_lanes(&p)
+            .iter()
+            .any(|l| l.track == prowave_engine::MASTER_TRACK));
+    }
+
+    #[test]
+    fn a_soundfont_that_cannot_be_read_gives_no_player() {
+        let sf = SoundFontUse {
+            path: "/nonexistent/prowave-missing.sf2".into(),
+            bank: 0,
+            program: 0,
+        };
+        assert!(soundfont_player(&sf, 48_000.0).is_err());
+    }
+
+    /// The General MIDI SoundFont named by `PROWAVE_TEST_SF2`, if set (it is not in the repo).
+    #[test]
+    fn a_soundfont_file_gives_a_player_for_its_preset() {
+        let Ok(path) = std::env::var("PROWAVE_TEST_SF2") else {
+            return;
+        };
+        let sf = SoundFontUse {
+            path,
+            bank: 0,
+            program: 0,
+        };
+        assert!(soundfont_player(&sf, 48_000.0).is_ok());
+    }
+}
