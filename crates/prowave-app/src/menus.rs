@@ -338,7 +338,7 @@ const HELP: &[&str] = &[
     "Check for Updates…",
     "Check for Updates Automatically",
     "-",
-    "About Pro Wave Mac",
+    "About Pro Wave (Yuri's Version)",
 ];
 
 /// Help > Language: every language, each named in its own language.

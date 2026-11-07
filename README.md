@@ -1,8 +1,8 @@
-# Pro Wave Mac
+# Pro Wave (Yuri's Version)
 
-**Pro Wave Mac** is a free, open-source music production program (DAW) for macOS, written in
-Rust. Its look and workflow follow Apple's Logic Pro; it hosts your Audio Unit and VST3
-plug-ins and adds tools of its own. It is drawn with [egui](https://github.com/emilk/egui):
+**Pro Wave (Yuri's Version)** is a free, open-source music production program (DAW) for macOS,
+written in Rust. Its look and workflow follow Apple's Logic Pro; it hosts your Audio Unit and
+VST3 plug-ins and adds tools of its own. It is drawn with [egui](https://github.com/emilk/egui):
 no Electron, no JUCE.
 
 It is the public edition of a personal fork of [Pro Wave](https://github.com/fabox-os/Pro-Wave)
@@ -31,8 +31,6 @@ It is the public edition of a personal fork of [Pro Wave](https://github.com/fab
   Musical Typing (play with the computer keyboard).
 - **Audio engine:** a low-latency duplex Core Audio engine (input and output in one callback),
   record and mix modes, time stretch (Signalsmith Stretch).
-- **Templates:** 30 genre and artist templates made with the built-in instruments and free
-  plug-ins (see [`docs/templates/README.md`](docs/templates/README.md)).
 
 ## Status
 
@@ -52,8 +50,8 @@ to update this section.
 ## Download
 
 Get `ProWave-Mac.dmg` from the [Releases page](https://github.com/yuribeats/prowave/releases),
-open it and drag **Pro Wave Mac** to Applications. The app checks for updates itself (Help >
-Check for Updates…), using `prowave-macos-universal.zip` from the same page.
+open it and drag **Pro Wave (Yuri's Version)** to Applications. The app checks for updates
+itself (Help > Check for Updates…), using `prowave-macos-universal.zip` from the same page.
 
 The app is ad-hoc signed, not notarized by Apple: the first time, Control-click it in
 Applications, choose Open, then Open again.
@@ -66,7 +64,7 @@ Rust stable and Xcode's command line tools are needed.
 cargo run --release -p prowave-app                  # the app
 cargo run --release -p prowave-app -- song.prowave   # open a project
 cargo xtask check                                    # fmt, clippy -D warnings, tests, cargo-deny, wasm check
-bash dist/macos/release.sh                           # universal "Pro Wave Mac.app", the zip and the DMG
+bash dist/macos/release.sh                           # universal "Pro Wave (Yuri's Version).app", the zip and the DMG
 ```
 
 Settings are kept in `~/Library/Application Support/prowave-mac`.
@@ -84,20 +82,20 @@ Settings are kept in `~/Library/Application Support/prowave-mac`.
 
 Copyright (C) 2026 the ProWave contributors.
 
-Pro Wave Mac is free software: you can redistribute it and/or modify it under the terms of the
-[GNU General Public License](LICENSE) as published by the Free Software Foundation, either
-version 3 of the License, or (at your option) any later version (GPL-3.0-or-later). It is
+Pro Wave (Yuri's Version) is free software: you can redistribute it and/or modify it under the
+terms of the [GNU General Public License](LICENSE) as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version (GPL-3.0-or-later). It is
 distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
 implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
 Third-party code keeps its own license: the WORLD vocoder (modified BSD,
 [`crates/prowave-engine/world`](crates/prowave-engine/world)), Signalsmith Stretch (MIT) and the
-Rust crates listed in `Cargo.lock`. The template one-shots are CC0.
+Rust crates listed in `Cargo.lock`.
 
 ## Trademarks
 
-Pro Wave Mac is an independent project. It is not affiliated with, sponsored by or endorsed by
-any of the companies below, and contains none of their code, artwork or sounds.
+Pro Wave (Yuri's Version) is an independent project. It is not affiliated with, sponsored by or
+endorsed by any of the companies below, and contains none of their code, artwork or sounds.
 
 - Apple, Logic Pro, macOS and Audio Units are trademarks of Apple Inc.
 - FL Studio and Fruity are trademarks of Image-Line Software.
@@ -105,4 +103,4 @@ any of the companies below, and contains none of their code, artwork or sounds.
 - Roland, BOSS and Dr. Sample are trademarks of Roland Corporation.
 - VST is a trademark of Steinberg Media Technologies GmbH.
 
-The names are used only to describe the workflows Pro Wave Mac follows.
+The names are used only to describe the workflows Pro Wave (Yuri's Version) follows.

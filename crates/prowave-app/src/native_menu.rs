@@ -44,7 +44,7 @@ pub fn kind(label: &str) -> Kind {
         "Zoom" => return Kind::System(SystemItem::Zoom),
         "Enter Full Screen" => return Kind::System(SystemItem::FullScreen),
         "Bring All to Front" => return Kind::System(SystemItem::BringAllToFront),
-        "About Pro Wave Mac" => return Kind::Skip,
+        "About Pro Wave (Yuri's Version)" => return Kind::Skip,
         _ => {}
     }
     if crate::menus::is_checkable(label) {
@@ -208,13 +208,14 @@ mod mac {
             let app_menu = Submenu::new(crate::APP_NAME, true);
             let quit = MenuItem::with_id(
                 QUIT,
-                tr("Quit Pro Wave Mac"),
+                tr("Quit Pro Wave (Yuri's Version)"),
                 true,
                 Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
             );
-            let about = PredefinedMenuItem::about(Some(tr("About Pro Wave Mac")), Some(about));
+            let about =
+                PredefinedMenuItem::about(Some(tr("About Pro Wave (Yuri's Version)")), Some(about));
             let services = PredefinedMenuItem::services(Some(tr("Services")));
-            let hide = PredefinedMenuItem::hide(Some(tr("Hide Pro Wave Mac")));
+            let hide = PredefinedMenuItem::hide(Some(tr("Hide Pro Wave (Yuri's Version)")));
             let hide_others = PredefinedMenuItem::hide_others(Some(tr("Hide Others")));
             let show_all = PredefinedMenuItem::show_all(Some(tr("Show All")));
             let _ = app_menu.append_items(&[
@@ -233,10 +234,10 @@ mod mac {
             let mut checks = Vec::new();
             let mut plains = Vec::new();
             let mut labels = vec![
-                ("Quit Pro Wave Mac", Label::Item(quit.clone())),
-                ("About Pro Wave Mac", Label::System(about)),
+                ("Quit Pro Wave (Yuri's Version)", Label::Item(quit.clone())),
+                ("About Pro Wave (Yuri's Version)", Label::System(about)),
                 ("Services", Label::System(services)),
-                ("Hide Pro Wave Mac", Label::System(hide)),
+                ("Hide Pro Wave (Yuri's Version)", Label::System(hide)),
                 ("Hide Others", Label::System(hide_others)),
                 ("Show All", Label::System(show_all)),
             ];
@@ -387,7 +388,7 @@ mod tests {
             Kind::System(SystemItem::FullScreen)
         );
         assert_eq!(
-            kind("About Pro Wave Mac"),
+            kind("About Pro Wave (Yuri's Version)"),
             Kind::Skip,
             "it lives in the app menu"
         );

@@ -22,7 +22,6 @@ mod file_browser;
 mod file_commands;
 mod flex_edit;
 mod fx_ui;
-mod genre_templates;
 mod graphics;
 mod groove;
 mod groups;
@@ -96,7 +95,7 @@ mod widgets;
 mod window_chrome;
 
 /// The program's name (window, menus, About box, MIDI ports) and its settings folder's name.
-pub const APP_NAME: &str = "Pro Wave Mac";
+pub const APP_NAME: &str = "Pro Wave (Yuri's Version)";
 pub const SETTINGS_DIR: &str = "prowave-mac";
 
 use model::Project;

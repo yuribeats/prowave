@@ -1,9 +1,8 @@
 //! Project Chooser, shown by File > New from Template…: start an empty project, reopen a
-//! recent one or start from a template, as in Logic. Besides Logic's kind of templates there
-//! are genre templates and artist sounds (`genre_templates.rs`). Choosing queues a File
-//! command (`UiState::file_cmd`), so unsaved changes are asked about like everywhere else.
+//! recent one or start from a template, as in Logic.
+//! Choosing queues a File command (`UiState::file_cmd`), so unsaved changes are asked about
+//! like everywhere else.
 use crate::file_commands::FileCmd;
-use crate::genre_templates::{of_group, packs, Group};
 use crate::i18n::tr;
 use crate::model::{Project, Track, TrackKind};
 use crate::track_icons::{draw_icon, IconKind};
@@ -19,8 +18,6 @@ pub enum Template {
     Songwriter,
     Electronic,
     Podcast,
-    /// A genre or artist package: its index in `genre_templates::packs()`.
-    Pack(u16),
 }
 
 impl Template {
@@ -33,7 +30,6 @@ impl Template {
 
     pub fn name(self) -> &'static str {
         match self {
-            Template::Pack(i) => packs().get(usize::from(i)).map_or("", |p| p.name.as_str()),
             Template::Empty => "Empty Project",
             Template::Songwriter => "Songwriter",
             Template::Electronic => "Electronic",
@@ -43,7 +39,6 @@ impl Template {
 
     pub fn about(self) -> &'static str {
         match self {
-            Template::Pack(i) => packs().get(usize::from(i)).map_or("", |p| p.about.as_str()),
             Template::Empty => "One software instrument track.",
             Template::Songwriter => "Piano, drummer, bass and vocal tracks.",
             Template::Electronic => "Synths, drum machine and a reverb aux.",
@@ -53,9 +48,6 @@ impl Template {
 
     fn icon(self) -> IconKind {
         match self {
-            Template::Pack(i) => packs()
-                .get(usize::from(i))
-                .map_or(IconKind::Note, |p| p.icon),
             Template::Empty => IconKind::Note,
             Template::Songwriter => IconKind::Piano,
             Template::Electronic => IconKind::Synth,
@@ -70,11 +62,6 @@ impl Template {
         let mut p = Project::empty();
         match self {
             Template::Empty => return p,
-            Template::Pack(i) => {
-                return packs()
-                    .get(usize::from(i))
-                    .map_or_else(Project::empty, |pack| pack.project())
-            }
             Template::Songwriter => {
                 p.tracks = vec![
                     track("Piano", TrackKind::Instrument),
@@ -112,42 +99,24 @@ pub enum Section {
     NewProject,
     Recent,
     Templates,
-    Genres,
-    Artists,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [
-        Section::NewProject,
-        Section::Recent,
-        Section::Templates,
-        Section::Genres,
-        Section::Artists,
-    ];
+    const ALL: [Section; 3] = [Section::NewProject, Section::Recent, Section::Templates];
 
     fn label(self) -> &'static str {
         match self {
             Section::NewProject => tr("New Project"),
             Section::Recent => tr("Recent"),
             Section::Templates => tr("Project Templates"),
-            Section::Genres => tr("Genre Templates"),
-            Section::Artists => tr("Artist Sounds"),
         }
     }
 
     /// The templates the section shows as tiles (none for Recent).
     fn items(self) -> Vec<Template> {
-        let pack = |g| {
-            of_group(g)
-                .into_iter()
-                .map(|i| Template::Pack(i as u16))
-                .collect()
-        };
         match self {
             Section::NewProject => vec![Template::Empty],
             Section::Templates => Template::ALL.to_vec(),
-            Section::Genres => pack(Group::Genre),
-            Section::Artists => pack(Group::Artist),
             Section::Recent => Vec::new(),
         }
     }
@@ -175,13 +144,14 @@ impl Chooser {
 fn choice(c: &Chooser, recent: &[PathBuf]) -> Option<Choice> {
     match c.section {
         Section::NewProject => Some(Choice::Template(Template::Empty)),
-        Section::Templates | Section::Genres | Section::Artists => c
+        Section::Recent => recent.get(c.selected).cloned().map(Choice::Recent),
+        // The other sections choose their highlighted tile.
+        _ => c
             .section
             .items()
             .get(c.selected)
             .copied()
             .map(Choice::Template),
-        Section::Recent => recent.get(c.selected).cloned().map(Choice::Recent),
     }
 }
 
@@ -224,11 +194,7 @@ fn tile(ui: &egui::Ui, r: Rect, t: Template, selected: bool, key: usize) -> (boo
     }
     let icon = Rect::from_center_size(pos2(r.center().x, r.top() + 52.0), vec2(56.0, 56.0));
     draw_icon(g, icon, t.icon());
-    // Genre and artist names are names, not interface text: they are not translated.
-    let (name, about) = match t {
-        Template::Pack(_) => (t.name(), t.about()),
-        _ => (tr(t.name()), tr(t.about())),
-    };
+    let (name, about) = (tr(t.name()), tr(t.about()));
     g.text(
         pos2(r.center().x, r.bottom() - 40.0),
         Align2::CENTER_CENTER,
@@ -309,33 +275,6 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
     let recent: Vec<PathBuf> = s.recent.paths().to_vec();
     let mut chosen = None;
     match c.section {
-        Section::NewProject | Section::Templates | Section::Genres | Section::Artists => {
-            let items = c.section.items();
-            // The genre and artist sections hold many tiles: smaller ones, so they fit.
-            let (w, h, gap) = if matches!(c.section, Section::Genres | Section::Artists) {
-                (180.0, 150.0, 14.0)
-            } else {
-                (190.0, 170.0, 18.0)
-            };
-            let per_row = (((body.width() + gap) / (w + gap)).floor() as usize).max(1);
-            for (k, t) in items.iter().enumerate() {
-                let (row, col) = (k / per_row, k % per_row);
-                let r = Rect::from_min_size(
-                    pos2(
-                        body.left() + col as f32 * (w + gap),
-                        list_top + row as f32 * (h + gap),
-                    ),
-                    vec2(w, h),
-                );
-                let (clicked, double) = tile(ui, r, *t, c.selected == k, k);
-                if clicked {
-                    c.selected = k;
-                }
-                if double {
-                    chosen = Some(Choice::Template(*t));
-                }
-            }
-        }
         Section::Recent => {
             if recent.is_empty() {
                 ui.painter().text(
@@ -379,6 +318,29 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
                 }
                 if resp.double_clicked() {
                     chosen = Some(Choice::Recent(path.clone()));
+                }
+            }
+        }
+        // The sections of tiles.
+        _ => {
+            let items = c.section.items();
+            let (w, h, gap) = (190.0, 170.0, 18.0);
+            let per_row = (((body.width() + gap) / (w + gap)).floor() as usize).max(1);
+            for (k, t) in items.iter().enumerate() {
+                let (row, col) = (k / per_row, k % per_row);
+                let r = Rect::from_min_size(
+                    pos2(
+                        body.left() + col as f32 * (w + gap),
+                        list_top + row as f32 * (h + gap),
+                    ),
+                    vec2(w, h),
+                );
+                let (clicked, double) = tile(ui, r, *t, c.selected == k, k);
+                if clicked {
+                    c.selected = k;
+                }
+                if double {
+                    chosen = Some(Choice::Template(*t));
                 }
             }
         }
@@ -477,32 +439,5 @@ mod tests {
         c.section = Section::NewProject;
         choose(choice(&c, &[]).unwrap(), &mut s);
         assert_eq!(s.file_cmd, Some(FileCmd::NewFrom(Template::Empty)));
-    }
-
-    #[test]
-    fn genre_and_artist_sections_choose_their_packages() {
-        for (section, group) in [
-            (Section::Genres, crate::genre_templates::Group::Genre),
-            (Section::Artists, crate::genre_templates::Group::Artist),
-        ] {
-            let items = section.items();
-            assert!(items.len() >= 12, "{section:?}");
-            let c = Chooser {
-                section,
-                selected: 1,
-            };
-            let Some(Choice::Template(t @ Template::Pack(i))) = choice(&c, &[]) else {
-                panic!("{section:?}: no package chosen");
-            };
-            assert_eq!(packs()[usize::from(i)].group, group);
-            assert!(!t.name().is_empty() && !t.about().is_empty());
-            let p = t.project();
-            assert_eq!(p.name, "Untitled");
-            assert!(p.tracks.len() >= 5);
-            assert!(
-                !p.notes.is_empty(),
-                "the Note Pad holds the template's notes"
-            );
-        }
     }
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Builds a Pro Wave Mac release: a universal (Apple silicon + Intel) "Pro Wave Mac.app",
-# ad-hoc signed, then
+# Builds a Pro Wave (Yuri's Version) release: a universal (Apple silicon + Intel)
+# "Pro Wave (Yuri's Version).app", ad-hoc signed, then
 #   prowave-macos-universal.zip   the app, for the in-app updater (Help > Check for Updates…)
 #   ProWave-Mac.dmg               the download: the app and a link to Applications
 #   SHA256SUMS
@@ -11,7 +11,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$(mkdir -p "${1:-$ROOT/dist/macos/out}" && cd "${1:-$ROOT/dist/macos/out}" && pwd)"
-NAME="Pro Wave Mac"
+NAME="Pro Wave (Yuri's Version)"
 BUNDLE_ID="com.yuribeats.prowave-mac"
 TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
@@ -67,5 +67,5 @@ cp -R "$APP" "$DMG_DIR/"
 ln -s /Applications "$DMG_DIR/Applications"
 hdiutil create -quiet -volname "$NAME" -srcfolder "$DMG_DIR" -ov -format UDZO "$OUT/ProWave-Mac.dmg"
 (cd "$OUT" && shasum -a 256 prowave-macos-universal.zip ProWave-Mac.dmg > SHA256SUMS)
-echo "Pro Wave Mac $VERSION:"
+echo "$NAME $VERSION:"
 ls -l "$OUT"
