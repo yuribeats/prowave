@@ -122,6 +122,9 @@ pub struct RegionDoc {
     /// Crossfade with the audio region it overlaps (Drag: X-Fade): this region fades in over
     /// the overlap while the earlier one fades out.
     pub crossfade: bool,
+    /// Loop (Logic: dragging the upper right corner): how far the region repeats after its
+    /// end, in quarter notes; 0 = no loop (older files have none).
+    pub loop_beats: f32,
     /// A Pattern region: the steps that make its `notes`.
     pub pattern: Option<PatternDoc>,
     /// A Drummer region: the settings that make its `notes`.
@@ -142,6 +145,24 @@ pub struct FlexDoc {
     pub pitch: Vec<FlexPitchDoc>,
     /// The Pitch Editor's note edits (Melodyne-style), when the region has any.
     pub melody: Option<MelodyDoc>,
+    /// Follow Tempo: the recording's own beats, from which its markers are made again when
+    /// the project's tempo changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow: Option<FollowDoc>,
+}
+
+/// The beats of a recording that follows the project's tempo.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct FollowDoc {
+    /// Seconds into the recording of its beat 1 (may be before the file's start).
+    pub one_secs: f64,
+    /// Seconds into the recording of whole beats in a row.
+    pub beats: Vec<f64>,
+    /// The quarter note of the first of `beats`, counted from beat 1 (0).
+    pub first: i64,
+    /// The tempo before the first beat and after the last.
+    pub bpm: f64,
 }
 
 /// The notes of an audio region as the Pitch Editor edits them.

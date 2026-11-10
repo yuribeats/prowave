@@ -425,15 +425,16 @@ pub fn draw(
     controls: &[Control],
     selected: Option<usize>,
 ) {
-    use egui::{pos2, Color32, Stroke};
+    use crate::theme;
+    use egui::{pos2, Stroke};
     let Some(num) = lane.num() else { return };
     let r = view.rect;
-    let col = Color32::from_rgb(0x5a, 0xb4, 0xff);
+    // Drawn in the lane's dark window in the signal orange.
     let rest_y = view.y_of(lane, lane.rest());
     if lane == Lane::PitchBend {
         g.line_segment(
             [pos2(r.left(), rest_y), pos2(r.right(), rest_y)],
-            Stroke::new(1.0, Color32::from_gray(0x55)),
+            Stroke::new(1.0, crate::hw::lerp(theme::METER_WELL, theme::ON_DARK, 0.3)),
         );
     }
     let pts = points(controls, num);
@@ -458,31 +459,63 @@ pub fn draw(
         y = py;
     }
     line.push(pos2(r.right().max(x), y));
-    // The area under the value, then its line.
+    // The area under the value as one mesh (no seams between the steps), orange fading to
+    // the floor, then the line.
+    let mut mesh = egui::epaint::Mesh::default();
+    let fill_at = |y: f32| {
+        let t = ((y - r.top()) / r.height().max(1.0)).clamp(0.0, 1.0);
+        theme::ORANGE.gamma_multiply(0.25 + (0.05 - 0.25) * t)
+    };
     for w in line.windows(2) {
         if w[1].x > w[0].x {
-            g.rect_filled(
-                egui::Rect::from_min_max(
-                    pos2(w[0].x, w[0].y.min(r.bottom())),
-                    pos2(w[1].x, r.bottom()),
-                ),
-                0.0,
-                Color32::from_rgba_unmultiplied(0x5a, 0xb4, 0xff, 40),
-            );
+            let top = w[0].y.clamp(r.top(), r.bottom());
+            let i = mesh.vertices.len() as u32;
+            mesh.colored_vertex(pos2(w[0].x, top), fill_at(top));
+            mesh.colored_vertex(pos2(w[1].x, top), fill_at(top));
+            mesh.colored_vertex(pos2(w[1].x, r.bottom()), fill_at(r.bottom()));
+            mesh.colored_vertex(pos2(w[0].x, r.bottom()), fill_at(r.bottom()));
+            mesh.add_triangle(i, i + 1, i + 2);
+            mesh.add_triangle(i, i + 2, i + 3);
         }
     }
-    g.add(egui::Shape::line(line, Stroke::new(1.5, col)));
-    for &i in &pts {
+    g.add(egui::Shape::mesh(mesh));
+    g.add(egui::Shape::line(line, Stroke::new(2.0, theme::ORANGE)));
+    // Breakpoint handles (a bone ring round an orange core) where there is room for them;
+    // a drawn ramp's dense points show only at its ends.
+    let shown: Vec<usize> = pts
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let px = (view.x_of)(controls[i].start);
+            px >= r.left() - 4.0 && px <= r.right() + 4.0
+        })
+        .collect();
+    let mut last_x = f32::NEG_INFINITY;
+    for (k, &i) in shown.iter().enumerate() {
         let px = (view.x_of)(controls[i].start);
-        if px < r.left() - 4.0 || px > r.right() + 4.0 {
+        let next_x = shown
+            .get(k + 1)
+            .map_or(f32::INFINITY, |&j| (view.x_of)(controls[j].start));
+        let room = px - last_x >= 10.0 && next_x - px >= 10.0;
+        let end = k == 0 || k + 1 == shown.len();
+        if !(room || end || selected == Some(i)) {
             continue;
         }
+        last_x = px;
         let p = pos2(px, view.y_of(lane, val(&controls[i])));
         if selected == Some(i) {
-            g.circle_filled(p, 4.0, Color32::WHITE);
-        } else {
-            g.circle_filled(p, 2.6, col);
+            g.circle_filled(p, 8.0, theme::ORANGE.gamma_multiply(0.3));
         }
+        g.circle_filled(p, 4.5, theme::BONE_HI);
+        g.circle_filled(
+            p,
+            3.0,
+            if selected == Some(i) {
+                theme::ORANGE_HI
+            } else {
+                theme::ORANGE
+            },
+        );
     }
 }
 

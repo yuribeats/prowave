@@ -42,6 +42,8 @@ pub struct Typing {
     /// Notes held down, by key.
     held: Vec<(Key, u8)>,
     notes: Vec<LiveNote>,
+    /// The key of the keybed held down with the mouse.
+    mouse: Option<Key>,
 }
 
 impl Default for Typing {
@@ -54,6 +56,7 @@ impl Default for Typing {
             vel: 100,
             held: Vec::new(),
             notes: Vec::new(),
+            mouse: None,
         }
     }
 }
@@ -361,64 +364,281 @@ fn poll_events(ctx: &egui::Context, t: &mut Typing) {
     });
 }
 
-/// The small window that shows it is on, the octave and the velocity.
+/// The note names, from C.
+const NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+/// A pitch as its name and octave ("C3", "F#4").
+fn note_name(pitch: u8) -> String {
+    format!(
+        "{}{}",
+        NAMES[usize::from(pitch % 12)],
+        i32::from(pitch / 12) - 2
+    )
+}
+
+/// The letter printed on a key cap for an egui key.
+fn cap_letter(key: Key) -> &'static str {
+    match key {
+        Key::Semicolon => ";",
+        Key::Quote => "'",
+        other => other.name(),
+    }
+}
+
+/// Size of the window's keys.
+const WHITE: egui::Vec2 = egui::vec2(40.0, 104.0);
+const BLACK: egui::Vec2 = egui::vec2(26.0, 62.0);
+const WHITE_GAP: f32 = 4.0;
+
+/// The keybed's keys and where they sit inside `bed`: (key, semitone, black, rect). Black keys
+/// come last, so they are drawn over the white ones and found first under the pointer.
+fn keybed(bed: egui::Rect) -> Vec<(Key, u8, bool, egui::Rect)> {
+    let mut whites = Vec::new();
+    let mut blacks = Vec::new();
+    let mut x = bed.left();
+    for (key, semi) in KEYS {
+        if matches!(semi % 12, 1 | 3 | 6 | 8 | 10) {
+            // Between the white key just placed and the next.
+            let cx = x - WHITE_GAP / 2.0;
+            let r = egui::Rect::from_min_size(egui::pos2(cx - BLACK.x / 2.0, bed.top()), BLACK);
+            blacks.push((key, semi, true, r));
+        } else {
+            let r = egui::Rect::from_min_size(egui::pos2(x, bed.top()), WHITE);
+            whites.push((key, semi, false, r));
+            x += WHITE.x + WHITE_GAP;
+        }
+    }
+    whites.extend(blacks);
+    whites
+}
+
+/// Width of the keybed.
+fn keybed_width() -> f32 {
+    let whites = KEYS
+        .iter()
+        .filter(|(_, s)| !matches!(s % 12, 1 | 3 | 6 | 8 | 10))
+        .count() as f32;
+    whites * WHITE.x + (whites - 1.0) * WHITE_GAP
+}
+
+/// The small window: an LCD with the octave, the velocity and the notes held, the keybed (the
+/// computer keys printed on the caps; the mouse plays it too) and the octave and velocity keys.
 pub fn show(ctx: &egui::Context, t: &mut Typing) {
+    use crate::hw::{self, Cap};
+    use crate::midi_monitor::hw_utilities as hu;
+    use crate::theme::{self, Face};
+    use egui::{pos2, vec2, Align2, Rect, Sense};
     if !t.open {
         return;
     }
-    let mut open = true;
-    egui::Window::new(tr("Musical Typing"))
-        .id(egui::Id::unique("musical_typing"))
-        .open(&mut open)
-        .resizable(false)
-        .show(ctx, |ui| {
-            const NAMES: [&str; 12] = [
-                "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
-            ];
-            let held: Vec<u8> = t.held.iter().map(|(_, p)| *p).collect();
-            ui.horizontal(|ui| {
-                for (key, semi) in KEYS {
-                    let pitch = t.base + semi;
-                    let black = matches!(semi % 12, 1 | 3 | 6 | 8 | 10);
-                    let on = held.contains(&pitch);
-                    let fill = match (on, black) {
-                        (true, _) => egui::Color32::from_rgb(0xf0, 0xc8, 0x40),
-                        (false, true) => egui::Color32::from_gray(0x30),
-                        (false, false) => egui::Color32::from_gray(0xe8),
-                    };
-                    let text = if black && !on {
-                        egui::Color32::WHITE
-                    } else {
-                        egui::Color32::BLACK
-                    };
-                    let (r, _) =
-                        ui.allocate_exact_size(egui::vec2(26.0, 46.0), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 3.0, fill);
-                    ui.painter().text(
-                        r.center_bottom() - egui::vec2(0.0, 8.0),
-                        egui::Align2::CENTER_CENTER,
-                        key.name(),
-                        egui::FontId::proportional(11.0),
-                        text,
-                    );
-                    ui.painter().text(
-                        r.center_top() + egui::vec2(0.0, 9.0),
-                        egui::Align2::CENTER_CENTER,
-                        NAMES[usize::from(pitch % 12)],
-                        egui::FontId::proportional(9.0),
-                        text,
-                    );
-                }
+    let width = keybed_width() + 16.0;
+    let id = egui::Id::unique("musical_typing");
+    let outer = width + 2.0 * hu::PAD;
+    let (open, _) = hu::window(ctx, id, tr("Musical Typing"), "", outer, None, |ui| {
+        // The LCD: octave | velocity | notes held.
+        let (lcd_r, _) = ui.allocate_exact_size(vec2(width, 66.0), Sense::hover());
+        let g = ui.painter().clone();
+        let glass = hw::lcd(&g, lcd_r);
+        let z1 = glass.left() + 112.0;
+        let z2 = z1 + 168.0;
+        for x in [z1, z2] {
+            hu::lcd_divider(&g, x, glass.top() + 6.0..=glass.bottom() - 6.0);
+        }
+        hu::lcd_label(&g, glass.left_top() + vec2(9.0, 6.0), tr("Octave"));
+        let oct = format!("C{}", i32::from(t.base / 12) - 2);
+        hw::seg(
+            &g,
+            pos2(glass.left() + 12.0, glass.top() + 21.0),
+            &oct,
+            26.0,
+            theme::LCD_INK,
+            true,
+        );
+        hu::lcd_label(&g, pos2(z1 + 9.0, glass.top() + 6.0), tr("Velocity"));
+        let vel = format!("{:>3}", t.vel);
+        hw::seg(
+            &g,
+            pos2(z1 + 12.0, glass.top() + 21.0),
+            &vel,
+            26.0,
+            theme::LCD_INK,
+            true,
+        );
+        // A ladder of the velocity: ten bars rising.
+        for i in 0..10 {
+            let h = 4.0 + i as f32 * 2.4;
+            let x = z1 + 84.0 + i as f32 * 7.0;
+            let r = Rect::from_min_max(
+                pos2(x, glass.bottom() - 9.0 - h),
+                pos2(x + 4.5, glass.bottom() - 9.0),
+            );
+            let lit = f32::from(t.vel) / 127.0 * 10.0 > i as f32 + 0.25;
+            g.rect_filled(
+                r,
+                0.0,
+                if lit {
+                    theme::LCD_INK
+                } else {
+                    theme::LCD_GHOST
+                },
+            );
+        }
+        hu::lcd_label(&g, pos2(z2 + 9.0, glass.top() + 6.0), tr("Notes"));
+        let mut held: Vec<u8> = t.held.iter().map(|(_, p)| *p).collect();
+        held.sort_unstable();
+        let names = held
+            .iter()
+            .map(|p| note_name(*p))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let room = glass.right() - z2 - 18.0;
+        let shown = hw::fit(&g, &names, Face::Lcd, 15.0, room);
+        hw::text(
+            &g,
+            pos2(z2 + 10.0, glass.top() + 36.0),
+            Align2::LEFT_CENTER,
+            &shown,
+            Face::Lcd,
+            15.0,
+            theme::LCD_INK,
+        );
+
+        // The keybed in its dark slot.
+        ui.add_space(10.0);
+        let (slot, resp) =
+            ui.allocate_exact_size(vec2(width, WHITE.y + 14.0), Sense::click_and_drag());
+        g.rect_filled(slot.translate(vec2(0.0, 1.0)), 4.0, theme::BONE_HI);
+        hw::gradient(
+            &g,
+            slot,
+            4.0,
+            theme::METER_WELL,
+            egui::Color32::from_rgb(0x0f, 0x0f, 0x0e),
+        );
+        hw::inner_shadow(&g, slot, 4.0, 0.6);
+        let bed = Rect::from_min_size(
+            pos2(
+                slot.left() + (slot.width() - keybed_width()) / 2.0,
+                slot.top() + 5.0,
+            ),
+            vec2(keybed_width(), WHITE.y),
+        );
+        let keys = keybed(bed);
+        // The mouse plays the key under it; dragging slides from key to key.
+        let under = resp
+            .interact_pointer_pos()
+            .filter(|_| resp.is_pointer_button_down_on())
+            .and_then(|p| {
+                keys.iter()
+                    .rev()
+                    .find(|(_, _, _, r)| r.contains(p))
+                    .map(|(k, _, _, _)| *k)
             });
-            ui.label(format!(
-                "C{}  ·  {} {}  ·  Z / X {}  ·  C / V {}",
-                i32::from(t.base / 12) - 2,
-                tr("Velocity"),
-                t.vel,
-                tr("Octave"),
-                tr("Velocity"),
-            ));
-        });
+        if under != t.mouse {
+            if let Some(k) = t.mouse.take() {
+                handle(t, k, false, false);
+            }
+            if let Some(k) = under {
+                handle(t, k, true, false);
+                t.mouse = Some(k);
+            }
+        }
+        let held: Vec<Key> = t.held.iter().map(|(k, _)| *k).collect();
+        for (key, semi, black, r) in &keys {
+            let pitch = (t.base + semi).min(127);
+            let on = held.contains(key);
+            let cap = match (on, black) {
+                (true, _) => Cap::Orange,
+                (false, true) => Cap::Dark,
+                (false, false) => Cap::Bone,
+            };
+            let face = hw::paint_key(&g, *r, cap, on, false);
+            let ink = cap.ink();
+            let print = if cap == Cap::Dark {
+                theme::ON_DARK_DIM
+            } else if on {
+                theme::INK
+            } else {
+                theme::PRINT
+            };
+            // The note over the computer key, below where the black keys reach.
+            let note_y = if *black {
+                face.top() + 12.0
+            } else {
+                face.bottom() - 34.0
+            };
+            hw::text(
+                &g,
+                pos2(face.center().x, note_y),
+                Align2::CENTER_CENTER,
+                &note_name(pitch),
+                Face::Bold,
+                if *black { 8.5 } else { 9.5 },
+                print,
+            );
+            hw::text(
+                &g,
+                pos2(face.center().x, face.bottom() - 13.0),
+                Align2::CENTER_CENTER,
+                cap_letter(*key),
+                Face::Bold,
+                if *black { 12.0 } else { 14.0 },
+                ink,
+            );
+        }
+
+        // Octave and velocity keys (Z X, C V).
+        ui.add_space(6.0);
+        let (row, _) = ui.allocate_exact_size(vec2(width, 72.0), Sense::hover());
+        let half = (width - 16.0) / 2.0;
+        let groups = [
+            (tr("Octave"), [(Key::Z, "Z", "-"), (Key::X, "X", "+")]),
+            (tr("Velocity"), [(Key::C, "C", "-"), (Key::V, "V", "+")]),
+        ];
+        for (gi, (label, pair)) in groups.into_iter().enumerate() {
+            let left = row.left() + gi as f32 * (half + 16.0);
+            hw::bracket(&g, left, left + half, row.top() + 8.0, label);
+            let kw = (half - 10.0) / 2.0;
+            for (ki, (key, letter, sign)) in pair.into_iter().enumerate() {
+                let r = Rect::from_min_size(
+                    pos2(left + ki as f32 * (kw + 10.0), row.top() + 22.0),
+                    vec2(kw, 38.0),
+                );
+                let (resp, face) = hw::key(
+                    ui,
+                    &g,
+                    r,
+                    id.with(("step", gi, ki)),
+                    Cap::Bone,
+                    false,
+                    None,
+                    hw::Legend::Custom,
+                );
+                hw::text(
+                    &g,
+                    pos2(face.left() + 14.0, face.center().y),
+                    Align2::CENTER_CENTER,
+                    letter,
+                    Face::Bold,
+                    14.0,
+                    theme::INK,
+                );
+                // The sign, drawn (a minus or a plus).
+                let c = pos2(face.right() - 16.0, face.center().y);
+                let st = egui::Stroke::new(2.2, theme::INK);
+                g.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], st);
+                if sign == "+" {
+                    g.line_segment([c + vec2(0.0, -5.0), c + vec2(0.0, 5.0)], st);
+                }
+                if resp.clicked() {
+                    handle(t, key, true, false);
+                    handle(t, key, false, false);
+                }
+            }
+        }
+    });
     if !open {
         t.set_open(false);
     }
@@ -516,5 +736,28 @@ mod tests {
                 LiveNote::Off { pitch: 60 }
             ]
         );
+    }
+
+    /// `musical-typing.png`: the window with a chord held.
+    #[test]
+    #[ignore = "pictures"]
+    fn picture_musical_typing() {
+        let mut t = Typing::default();
+        t.set_open(true);
+        for k in [Key::A, Key::E, Key::G] {
+            handle(&mut t, k, true, false);
+        }
+        crate::ui_test::render_png(
+            600.0,
+            420.0,
+            2.0,
+            crate::theme::BONE3,
+            |ui| {
+                crate::theme::apply(ui.ctx());
+                show(ui.ctx(), &mut t);
+            },
+            &crate::midi_monitor::hw_utilities::picture_path("musical-typing.png"),
+        )
+        .unwrap();
     }
 }

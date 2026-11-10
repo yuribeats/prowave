@@ -1,11 +1,7 @@
-//! The Sampler's offline work, run on background threads: decoding a file, finding where to
-//! chop it, preparing a pad's sound (cut, reversed, faded, normalised, at a sampling grade,
-//! stretched), resampling through the effect, and guessing tempo and key.
-//!
-//! Chopping is an extension: the SP-303 has none (its successor the SP-404 added it); on the
-//! 303 a pad's sound is cut with Start/End and MARK (manual pp. 38–41).
-use crate::sampler::SampleBuf;
-use crate::sp_fx::{FxSettings, SpFx};
+//! Offline work on samples, run on background threads: decoding a file, finding where to
+//! chop it, preparing a sound (cut, reversed, faded, normalised, at a sampling grade,
+//! stretched), and guessing tempo and key.
+use crate::sample_buf::SampleBuf;
 use std::path::Path;
 
 /// Reads a whole file as stereo at its own rate. `progress` hears 0 to 1 and can stop it.
@@ -138,8 +134,7 @@ pub fn zero_crossing(buf: &SampleBuf, frame: usize, radius: usize) -> usize {
     frame
 }
 
-/// The SP-303's sampling grades (LONG/LO-FI key; manual p. 27): STANDARD 44.1 kHz, LONG
-/// 22.05 kHz, LO-FI 11.025 kHz.
+/// Sampling grades: STANDARD 44.1 kHz, LONG 22.05 kHz, LO-FI 11.025 kHz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Grade {
     #[default]
@@ -170,7 +165,7 @@ pub struct SliceEdit {
     pub fade_out: f32,
     pub normalize: bool,
     pub grade: Grade,
-    /// STEREO off: both sides the mono mix (manual p. 27).
+    /// STEREO off: both sides the mono mix.
     pub stereo: bool,
 }
 
@@ -319,35 +314,6 @@ pub fn stretch(buf: &SampleBuf, time: f64, semis: f32) -> SampleBuf {
     SampleBuf::new(buf.rate, out)
 }
 
-/// The pad's sound played through the effect into a new sound, with `tail` seconds after it
-/// for echoes to ring out (the SP-303's RESAMPLE; manual pp. 32–33).
-pub fn resample(buf: &SampleBuf, fx: FxSettings, level: f32, tail: f32) -> SampleBuf {
-    let mut unit = SpFx::new(buf.rate);
-    unit.set(fx);
-    let frames = buf.frames();
-    let extra = (tail.max(0.0) * buf.rate as f32) as usize;
-    let mut out = Vec::with_capacity((frames + extra) * 2);
-    for i in 0..frames + extra {
-        let (l, r) = if i < frames {
-            (buf.data[i * 2], buf.data[i * 2 + 1])
-        } else {
-            (0.0, 0.0)
-        };
-        let (a, b) = unit.process(l, r);
-        out.push(a * level);
-        out.push(b * level);
-    }
-    // The tail stops where the echoes have died away.
-    let last = out
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .rposition(|f| f[0].abs() > 1e-4 || f[1].abs() > 1e-4)
-        .map_or(frames, |i| (i + 1).max(frames));
-    out.truncate(last * 2);
-    SampleBuf::new(buf.rate, out)
-}
-
 /// The tempo of the music in `buf` (onset autocorrelation, as Smart Tempo uses).
 pub fn estimate_bpm(buf: &SampleBuf) -> Option<f64> {
     let mut a = crate::analysis::Analyzer::new(buf.rate);
@@ -360,9 +326,8 @@ pub fn estimate_bpm(buf: &SampleBuf) -> Option<f64> {
     a.finish().tempo.map(|t| t.bpm)
 }
 
-/// The SP-303's way (manual pp. 29–30): a loop's tempo from its length, taking the number of
-/// beats (a power of two) that puts it nearest the middle of 70–140 BPM. It may be half or
-/// double the felt tempo, as on the hardware.
+/// A loop's tempo from its length, taking the number of beats (a power of two) that puts it
+/// nearest the middle of 70–140 BPM. It may be half or double the felt tempo.
 pub fn loop_bpm(seconds: f64) -> Option<f64> {
     if seconds <= 0.05 {
         return None;
@@ -506,7 +471,7 @@ mod tests {
         // A WAV written here: 0.25 s of 1 kHz.
         let dir = tempfile::tempdir().unwrap();
         let wav = dir.path().join("t.wav");
-        let tone = crate::sampler::tests::sine(1000.0, 12_000, 48_000);
+        let tone = crate::sample_buf::tests::sine(1000.0, 12_000, 48_000);
         crate::flex::write_wav(&wav, &tone, 48_000).unwrap();
         let back = decode(&wav, |_| true).unwrap();
         assert_eq!((back.rate, back.frames()), (48_000, 12_000));
@@ -591,7 +556,7 @@ mod tests {
 
     #[test]
     fn the_lo_fi_grade_is_11_khz() {
-        let buf = SampleBuf::new(SR, crate::sampler::tests::sine(440.0, 44_100, SR));
+        let buf = SampleBuf::new(SR, crate::sample_buf::tests::sine(440.0, 44_100, SR));
         let out = render_slice(
             &buf,
             &SliceEdit {
@@ -602,13 +567,13 @@ mod tests {
         assert_eq!(out.rate, 11_025);
         assert!((out.frames() as i64 - 11_025).abs() <= 1);
         let mono: Vec<f32> = out.data.iter().step_by(2).copied().collect();
-        let hz = crate::sampler::tests::peak_hz(&mono, 11_025);
+        let hz = crate::sample_buf::tests::peak_hz(&mono, 11_025);
         assert!((hz - 440.0).abs() < 2.0, "{hz}");
     }
 
     #[test]
     fn stretch_keeps_the_pitch_and_changes_the_length_within_one_percent() {
-        let buf = SampleBuf::new(SR, crate::sampler::tests::sine(440.0, 88_200, SR));
+        let buf = SampleBuf::new(SR, crate::sample_buf::tests::sine(440.0, 88_200, SR));
         for time in [0.75, 1.5] {
             let out = stretch(&buf, time, 0.0);
             let want = 88_200.0 * time;
@@ -616,19 +581,19 @@ mod tests {
             assert!(err < 0.01, "length off by {}", err * 100.0);
             let mono: Vec<f32> = out.data.iter().step_by(2).copied().collect();
             let n = mono.len();
-            let hz = crate::sampler::tests::peak_hz(&mono[n / 8..n * 7 / 8], SR);
+            let hz = crate::sample_buf::tests::peak_hz(&mono[n / 8..n * 7 / 8], SR);
             assert!((hz - 440.0).abs() / 440.0 < 0.01, "{hz} Hz");
         }
         // And the pitch alone, up a fifth, length kept.
         let out = stretch(&buf, 1.0, 7.0);
         assert_eq!(out.frames(), 88_200);
         let mono: Vec<f32> = out.data.iter().step_by(2).copied().collect();
-        let hz = crate::sampler::tests::peak_hz(&mono[10_000..80_000], SR);
+        let hz = crate::sample_buf::tests::peak_hz(&mono[10_000..80_000], SR);
         assert!((hz - 659.25).abs() < 7.0, "{hz}");
     }
 
     #[test]
-    fn loop_tempo_from_length_like_the_sp303() {
+    fn loop_tempo_from_length() {
         // A 2-second loop: 4 beats is 120 BPM.
         assert!((loop_bpm(2.0).unwrap() - 120.0).abs() < 1e-9);
         // 4 bars at 90: 10.667 s, 16 beats.
@@ -656,26 +621,5 @@ mod tests {
         }
         let key = estimate_key(&SampleBuf::new(SR, data)).unwrap();
         assert_eq!(key, "Am");
-    }
-
-    #[test]
-    fn resampling_through_the_delay_adds_its_echo_tail() {
-        let mut data = vec![0.0f32; 2000];
-        data[0] = 1.0;
-        data[1] = 1.0;
-        let buf = SampleBuf::new(SR, data);
-        let fx = FxSettings {
-            kind: crate::sp_fx::SpFxKind::Delay,
-            on: true,
-            ctrl: [7.5 / 13.0, 0.0, 1.0],
-            bpm: 120.0,
-        };
-        let out = resample(&buf, fx, 1.0, 1.0);
-        // The echo half a second later is in the new sound.
-        assert!(out.frames() > 22_050);
-        let echo = (22_040..out.frames().min(22_060))
-            .map(|i| out.data[i * 2].abs())
-            .fold(0.0, f32::max);
-        assert!(echo > 0.5, "{echo}");
     }
 }

@@ -101,10 +101,22 @@ fn flex_from_doc(d: &prowave_project::FlexDoc, original: AudioFile) -> crate::fl
             semitones: p.semitones.clamp(-24.0, 24.0),
         })
         .collect();
+    let follow = d.follow.as_ref().and_then(|f| {
+        let beats: Vec<f64> = f.beats.iter().take(MAX_FLEX_POINTS).copied().collect();
+        let follow = crate::flex_edit::TempoFollow {
+            one_secs: f.one_secs,
+            beats,
+            first: f.first.clamp(-100_000, 100_000),
+            bpm: f.bpm,
+        };
+        (follow.is_usable() && (1.0..=999.0).contains(&follow.bpm) && ok(follow.one_secs.abs()))
+            .then_some(follow)
+    });
     crate::flex_edit::FlexEdit {
         markers,
         pitch,
         melody: d.melody.as_ref().and_then(crate::pitch_editor::from_doc),
+        follow,
         ..crate::flex_edit::FlexEdit::new(original, mode)
     }
 }
@@ -485,27 +497,7 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
             soundfont: t.soundfont.as_ref().map(|s| s.path.clone()),
             soundfont_bank: t.soundfont.as_ref().map_or(0, |s| s.bank),
             soundfont_program: t.soundfont.as_ref().map_or(0, |s| s.program),
-            au_instrument: t.au_instrument.as_ref().map(|slot| {
-                let mut d = plugin_doc(slot);
-                // The Sampler's files are copied in with the project (when it says so).
-                if crate::sampler::is_sampler(slot) {
-                    let state = crate::sampler::state_for_save(&slot.state, |path| {
-                        by_source
-                            .entry(path.to_path_buf())
-                            .or_insert_with(|| {
-                                let zip_path = media_path(media.len(), path);
-                                media.push(MediaFile {
-                                    zip_path: zip_path.clone(),
-                                    source: path.to_path_buf(),
-                                });
-                                zip_path
-                            })
-                            .clone()
-                    });
-                    d.state = crate::plugins::encode_state(&state);
-                }
-                d
-            }),
+            au_instrument: t.au_instrument.as_ref().map(plugin_doc),
             au_effects: t.au_effects.iter().map(plugin_doc).collect(),
             icon: t.icon.map(|k| k.name().to_string()),
             input: match t.input {
@@ -624,6 +616,12 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
                                 })
                                 .collect(),
                             melody: f.melody.as_ref().map(crate::pitch_editor::to_doc),
+                            follow: f.follow.as_ref().map(|x| prowave_project::FollowDoc {
+                                one_secs: x.one_secs,
+                                beats: x.beats.clone(),
+                                first: x.first,
+                                bpm: x.bpm,
+                            }),
                         }
                     }),
                     mute: r.params.mute,
@@ -635,8 +633,17 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
                     fade_out: r.params.fade_out,
                     fade_curve: curve_name(r.params.fade_curve).into(),
                     reverse: r.params.reverse,
-                    offset_secs: r.params.offset_secs,
+                    // In the time of the edit's sound, which is what is made again on opening
+                    // (the region may still play the sound before it).
+                    offset_secs: r
+                        .audio
+                        .as_ref()
+                        .and_then(|a| a.flex.as_ref())
+                        .map_or(r.params.offset_secs, |f| {
+                            f.target_offset(r.params.offset_secs)
+                        }),
                     crossfade: r.params.crossfade,
+                    loop_beats: r.params.loop_beats,
                     pattern: match r.generated.as_ref().map(|g| &g.source) {
                         Some(Generator::Pattern(p)) => Some(pattern_to_doc(p)),
                         _ => None,
@@ -877,8 +884,20 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                         0.0
                     },
                     crossfade: r.crossfade,
+                    loop_beats: finite_in(r.loop_beats, 0.0, MAX_BEATS, 0.0),
                 },
             };
+            // A Flex edit plays its recording until its sound is made again: from the same
+            // moment of it.
+            if let Some(f) = region
+                .audio
+                .as_mut()
+                .and_then(|a| a.flex.as_mut())
+                .filter(|f| !f.markers.is_empty())
+            {
+                region.params.offset_secs = f.source_of(region.params.offset_secs).max(0.0);
+                f.played = Some(Vec::new());
+            }
             // A take folder's notes are what its comp plays.
             if let Some(folder) = folder {
                 folder.apply(&mut region.notes, &mut region.controls);
@@ -918,13 +937,7 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
             midi_program: t.midi_program.map(|p| p.min(127)),
             midi_bank: t.midi_bank.map(|b| b.min(16383)),
             soundfont: soundfont_of(t),
-            au_instrument: t.au_instrument.as_ref().map(|d| {
-                let mut slot = plugin_slot(d);
-                if crate::sampler::is_sampler(&slot) {
-                    slot.state = crate::sampler::state_after_load(&slot.state, media_dir);
-                }
-                slot
-            }),
+            au_instrument: t.au_instrument.as_ref().map(plugin_slot),
             au_effects: t.au_effects.iter().map(plugin_slot).collect(),
             icon: t
                 .icon
@@ -1980,6 +1993,12 @@ pub(crate) mod tests {
             }];
             // The region plays a made file that is not the recording.
             f.rendered = 7;
+            f.follow = Some(crate::flex_edit::TempoFollow {
+                one_secs: -0.25,
+                beats: vec![0.25, 0.75, 1.25],
+                first: 1,
+                bpm: 120.0,
+            });
         }
         p.tracks[t].regions[0].audio.as_mut().unwrap().file.path = dir.path().join("made.wav");
         crate::groove::set_groove_track(&mut p, Some(t));
@@ -1994,6 +2013,9 @@ pub(crate) mod tests {
         assert_eq!((f.markers[1].src, f.markers[1].dst), (0.3, 0.32));
         assert_eq!(f.pitch.len(), 1);
         assert_eq!(f.pitch[0].semitones, -1.5);
+        let fol = f.follow.as_ref().unwrap();
+        assert_eq!((fol.one_secs, fol.first, fol.bpm), (-0.25, 1, 120.0));
+        assert_eq!(fol.beats, vec![0.25, 0.75, 1.25]);
         // The recording was saved (not the made file), and the sound is made again.
         assert_eq!(a.file.path, f.original.path);
         assert_eq!(f.rendered, 0);
@@ -2282,8 +2304,15 @@ pub(crate) mod tests {
                 },
             ],
             melody: None,
+            follow: Some(prowave_project::FollowDoc {
+                one_secs: 0.0,
+                beats: vec![1.0, 0.5, f64::NAN],
+                first: 0,
+                bpm: 120.0,
+            }),
         };
         let f = flex_from_doc(&doc, original);
+        assert!(f.follow.is_none(), "beats out of order are not followed");
         assert_eq!(f.mode, prowave_engine::FlexMode::default());
         assert_eq!(f.markers.len(), 1);
         assert_eq!(f.pitch.len(), 1);

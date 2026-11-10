@@ -7,14 +7,13 @@
 //! - Right-click: colour, or Delete Marker.
 use crate::i18n::tr;
 use crate::model::{Project, MARKER_COLORS};
+use crate::theme::{self, Face};
+use crate::tracks_area::hw_tracks;
 use crate::widgets::context_menu;
-use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Align2, Color32, Rect, Sense, Stroke, Ui};
 
 /// Height of the Marker track, in points.
-pub const HEIGHT: f32 = 24.0;
-
-const BG: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
-const HEADER_BG: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub const HEIGHT: f32 = 28.0;
 
 /// What a right-click or double-click asked for, run after drawing.
 enum Action {
@@ -39,31 +38,31 @@ pub fn show(
 
     // ---- header
     let gh = ui.painter_at(header);
-    gh.rect_filled(header, 0.0, HEADER_BG);
-    gh.line_segment(
-        [header.left_bottom(), header.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x22)),
-    );
-    gh.text(
-        pos2(header.left() + 12.0, header.center().y),
-        Align2::LEFT_CENTER,
-        tr("Marker"),
-        FontId::proportional(13.0),
-        Color32::from_gray(0xdc),
-    );
+    hw_tracks::global_header(&gh, header, tr("Marker"));
     if let Some(i) = p.marker_at(p.position_beats) {
-        gh.text(
-            pos2(header.right() - 10.0, header.center().y),
+        let name = hw_tracks::fit(
+            &gh,
+            &p.markers[i].name.to_uppercase(),
+            Face::Bold,
+            11.0,
+            0.05,
+            header.width() * 0.45,
+        );
+        hw_tracks::label(
+            &gh,
+            pos2(header.right() - 20.0, header.center().y),
             Align2::RIGHT_CENTER,
-            &p.markers[i].name,
-            FontId::proportional(11.0),
-            Color32::from_gray(0xa8),
+            &name,
+            Face::Bold,
+            11.0,
+            0.05,
+            theme::INK2,
         );
     }
 
     // ---- lane: double-click an empty spot to add a marker
     let g = ui.painter_at(lane);
-    g.rect_filled(lane, 0.0, BG);
+    hw_tracks::global_lane(&g, lane);
     let lane_resp = ui.interact(lane, egui::Id::unique("marker_track_lane"), Sense::click());
     if lane_resp.double_clicked() {
         if let Some(pt) = lane_resp.interact_pointer_pos() {
@@ -86,7 +85,10 @@ pub fn show(
         if x1 < lane.left() || x0 > lane.right() {
             continue;
         }
-        let block = Rect::from_min_max(pos2(x0, lane.top() + 2.0), pos2(x1, lane.bottom() - 2.0));
+        let block = Rect::from_min_max(
+            pos2(x0 + 1.0, lane.top() + 4.0),
+            pos2(x1 - 1.0, lane.bottom() - 4.0),
+        );
         let resp = ui.interact(
             block.intersect(lane),
             egui::Id::unique(("marker", i)),
@@ -133,24 +135,35 @@ pub fn show(
         });
 
         let m = &p.markers[i];
-        let selected = p.marker_at(p.position_beats) == Some(i);
-        let fill = if selected {
-            m.color
+        // The marker the playhead is in is an orange cap; the others are black caps. The
+        // marker's own colour is a stripe at its left.
+        let current = p.marker_at(p.position_beats) == Some(i);
+        let cap = block.intersect(lane.expand2(vec2(4.0, 0.0)));
+        if current {
+            hw_tracks::plate(&g, cap, theme::ORANGE, true);
         } else {
-            m.color.gamma_multiply(0.7)
-        };
-        g.rect_filled(block, 3.0, fill);
-        g.line_segment(
-            [pos2(x0, lane.top()), pos2(x0, lane.bottom())],
-            Stroke::new(1.5, m.color),
-        );
-        let label = g.layout_no_wrap(m.name.clone(), FontId::proportional(12.0), Color32::WHITE);
-        let text_x = x0.max(lane.left()) + 5.0;
+            hw_tracks::dark_plate(&g, cap);
+        }
+        if cap.width() > 8.0 {
+            g.rect_filled(
+                Rect::from_min_size(cap.min + vec2(3.0, 3.0), vec2(3.0, cap.height() - 6.0)),
+                1.0,
+                m.color,
+            );
+        }
+        g.vline(x0, lane.top()..=lane.bottom(), Stroke::new(2.0, theme::INK));
+        let text_x = x0.max(lane.left()) + 11.0;
         if text_x + 10.0 < x1 {
-            g.with_clip_rect(block.shrink(1.0).intersect(lane)).galley(
-                pos2(text_x, block.center().y - label.size().y / 2.0),
-                label,
-                Color32::WHITE,
+            let clip = g.with_clip_rect(block.shrink(1.0).intersect(lane));
+            hw_tracks::label(
+                &clip,
+                pos2(text_x, block.center().y),
+                Align2::LEFT_CENTER,
+                &m.name.to_uppercase(),
+                Face::Silk,
+                12.0,
+                0.1,
+                if current { theme::INK } else { theme::BONE_HI },
             );
         }
     }
@@ -184,7 +197,7 @@ pub fn show(
             egui::TextEdit::singleline(&mut text)
                 .id(rename_id.with("field"))
                 .char_limit(64)
-                .font(FontId::proportional(12.0)),
+                .font(theme::font(Face::Silk, 13.0)),
         );
         if !edit.has_focus() && !edit.lost_focus() {
             edit.request_focus();
@@ -210,16 +223,5 @@ pub fn show(
         }
     }
 
-    // ---- playhead
-    let x = x_of(p.position_beats);
-    if x >= lane.left() && x <= lane.right() {
-        g.line_segment(
-            [pos2(x, lane.top()), pos2(x, lane.bottom())],
-            Stroke::new(1.0, Color32::WHITE),
-        );
-    }
-    g.line_segment(
-        [lane.left_bottom(), lane.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x1a)),
-    );
+    // The playhead runs through this lane from the Tracks area's ruler.
 }

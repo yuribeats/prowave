@@ -58,8 +58,12 @@ pub struct EngineSync {
     playing: bool,
     /// The tracks that hear their input, as last sent.
     monitors: Vec<MonitorTrack>,
-    /// Tempo, tempo changes and signature last sent.
+    /// Tempo, tempo changes and signature last sent, and when.
     tempo: Option<TempoKey>,
+    tempo_sent_at: Option<std::time::Instant>,
+    /// The tempo the audio regions of the song last sent were cut for (an audio region plays
+    /// for seconds, so a new tempo cuts it at another length).
+    layout_tempo: Option<TempoKey>,
     metronome: bool,
     /// The click level in dB and accent, and the reference pitch, as last sent.
     click: Option<(f32, bool)>,
@@ -538,12 +542,16 @@ fn pdc_plan_full(p: &Project, sample_rate: f32, input: &PlanInput) -> Plan {
                 (0, 0)
             } else if is_aux {
                 (0, aux.saturating_sub(actual[i]))
-            } else if flag(input.llm_live, i) {
-                content[i] = plain.saturating_sub(actual[i]);
+            } else if flag(input.llm_live, i) || (input.low_latency && flag(input.live, i)) {
+                // Low Latency Mode: nothing after the fader either, so the input is heard at
+                // once; the regions alone wait for everything, Aux strips included, and reach
+                // the Stereo Out with the click and the other tracks at `plain + aux`. (Their
+                // sends reach an Aux `aux` later than a plain track's do.)
+                content[i] = (plain + aux).saturating_sub(actual[i]);
                 (0, 0)
             } else if flag(input.live, i) {
                 content[i] = plain.saturating_sub(actual[i]);
-                (0, if input.low_latency { 0 } else { aux })
+                (0, aux)
             } else {
                 (plain.saturating_sub(actual[i]), aux)
             }
@@ -623,9 +631,42 @@ pub(crate) fn region_notes(t: &Track, r: &Region, origin: f64, track: u16) -> Ve
         .collect()
 }
 
-/// Every unmuted region on an engine track, with its engine track number and start beat
-/// (quarter notes, as the engine counts them).
-fn playing_regions(p: &Project) -> impl Iterator<Item = (u16, &Track, &Region, f64)> {
+/// Where region `r` plays: from its start (`None`), then once more for every repeat of its
+/// loop (Logic: Loop), each with how long it plays, the last one cut where the loop ends.
+pub(crate) fn plays_of(p: &Project, r: &Region) -> Vec<(f64, Option<f64>)> {
+    let mut out = vec![(p.region_start_beats(r), None)];
+    out.extend(
+        p.loop_repeats(r)
+            .into_iter()
+            .map(|(at, span)| (at, Some(span))),
+    );
+    out
+}
+
+/// What region `r` plays from `origin`: all its notes, or for a loop repeat of `span` quarter
+/// notes the ones that start in it, ended where it ends.
+pub(crate) fn played_notes(
+    t: &Track,
+    r: &Region,
+    origin: f64,
+    span: Option<f64>,
+    track: u16,
+) -> Vec<NoteEvent> {
+    let mut notes = region_notes(t, r, origin, track);
+    if let Some(span) = span {
+        let end = origin + span;
+        notes.retain(|n| n.start_beat < end - 1e-9);
+        for n in &mut notes {
+            n.end_beat = n.end_beat.min(end);
+        }
+    }
+    notes
+}
+
+/// Every unmuted region on an engine track, and every repeat of a looped one, with its engine
+/// track number, start beat (quarter notes, as the engine counts them) and, for a repeat, how
+/// long it plays.
+fn playing_regions(p: &Project) -> impl Iterator<Item = (u16, &Track, &Region, f64, Option<f64>)> {
     p.tracks
         .iter()
         .enumerate()
@@ -634,7 +675,11 @@ fn playing_regions(p: &Project) -> impl Iterator<Item = (u16, &Track, &Region, f
             t.regions
                 .iter()
                 .filter(|r| !r.params.mute)
-                .map(move |r| (track, t, r, p.region_start_beats(r)))
+                .flat_map(move |r| {
+                    plays_of(p, r)
+                        .into_iter()
+                        .map(move |(origin, span)| (track, t, r, origin, span))
+                })
         })
 }
 
@@ -651,14 +696,20 @@ fn song_controls(p: &Project) -> Vec<ControlEvent> {
             let (mut from, mut to) = (f64::MAX, 0.0f64);
             // Only an external instrument gets System Exclusive.
             let sysex = t.kind == TrackKind::ExternalMidi;
-            for r in t.regions.iter().filter(|r| !r.params.mute) {
-                let origin = p.region_start_beats(r);
+            for (r, origin, span) in t
+                .regions
+                .iter()
+                .filter(|r| !r.params.mute)
+                .flat_map(|r| plays_of(p, r).into_iter().map(move |(o, s)| (r, o, s)))
+            {
                 from = from.min(origin);
-                to = to.max(p.region_end_beats(r));
+                to = to.max(p.region_end_beats(r).max(origin + span.unwrap_or(0.0)));
                 out.extend(
                     r.controls
                         .iter()
                         .filter(|c| sysex || c.num != SYSEX_BYTE)
+                        // A loop repeat cut short sends only what is in it.
+                        .filter(|c| span.is_none_or(|s| f64::from(c.start) < s - 1e-9))
                         .filter_map(|c| {
                             // Controllers and pressure are 7 bits, pitch bend 14, SysEx bytes 8.
                             let max = match c.num {
@@ -714,7 +765,11 @@ fn song_notes(p: &Project) -> Vec<NoteEvent> {
                 .regions
                 .iter()
                 .filter(|r| !r.params.mute)
-                .flat_map(|r| region_notes(t, r, p.region_start_beats(r), track))
+                .flat_map(|r| {
+                    plays_of(p, r)
+                        .into_iter()
+                        .flat_map(move |(origin, span)| played_notes(t, r, origin, span, track))
+                })
                 .collect();
             if let Some(g) = groove
                 .as_ref()
@@ -742,8 +797,18 @@ struct AudioLayout {
 }
 
 /// The edits of region `r` of track `t`: its own gain, fades and reverse, with the fades
-/// lengthened where it crossfades with another region.
-fn clip_edit(p: &Project, t: &Track, r: &Region) -> prowave_engine::ClipEdit {
+/// lengthened where it crossfades with another region. A loop repeat starting at `origin`
+/// plays `span` quarter notes of it.
+fn clip_edit(
+    p: &Project,
+    t: &Track,
+    r: &Region,
+    origin: f64,
+    span: Option<f64>,
+) -> prowave_engine::ClipEdit {
+    if let Some(span) = span {
+        return p.repeat_clip_edit(r, origin, span);
+    }
     let ti = p.tracks.iter().position(|x| std::ptr::eq(x, t));
     let ri = t.regions.iter().position(|x| std::ptr::eq(x, r));
     match (ti, ri) {
@@ -756,10 +821,10 @@ fn audio_layout(p: &Project) -> AudioLayout {
     AudioLayout {
         tracks: p.tracks.len(),
         clips: playing_regions(p)
-            .filter_map(|(track, t, r, origin)| {
+            .filter_map(|(track, t, r, origin, span)| {
                 let a = r.audio.as_ref()?;
                 // Gain, fades and reverse are set when a clip starts streaming.
-                let edit = format!("{:?}", clip_edit(p, t, r));
+                let edit = format!("{:?}", clip_edit(p, t, r, origin, span));
                 Some((a.file.path.clone(), track, origin.to_bits(), edit))
             })
             .collect(),
@@ -769,12 +834,13 @@ fn audio_layout(p: &Project) -> AudioLayout {
 fn build_song(engine: &Engine, p: &Project) -> Song {
     // Every clip reads ahead as much as the whole song's prefetch memory allows.
     let streamed = playing_regions(p)
-        .filter(|(_, _, r, _)| r.audio.is_some())
+        .filter(|(_, _, r, _, _)| r.audio.is_some())
         .count();
     let clips = playing_regions(p)
-        .filter_map(|(track, t, r, origin)| {
+        .filter_map(|(track, t, r, origin, span)| {
             let a = r.audio.as_ref()?;
-            Some(engine.stream_clip_in(&a.file, track, origin, clip_edit(p, t, r), streamed))
+            let edit = clip_edit(p, t, r, origin, span);
+            Some(engine.stream_clip_in(&a.file, track, origin, edit, streamed))
         })
         .collect();
     let notes = song_notes(p);
@@ -796,6 +862,31 @@ fn tempo_map(p: &Project) -> Command {
 /// What the engine's tempo map depends on: the start tempo, the tempo changes, the first
 /// signature and the signature changes.
 type TempoKey = (f32, Vec<TempoPoint>, (u8, u8), Vec<crate::model::SigChange>);
+
+/// While playing, how long a new tempo rests before the audio regions are cut for it again.
+const TEMPO_REST: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether the audio regions are cut again for the tempo `key`: they were cut for another
+/// one (`cut_for`), and the transport is stopped or the engine has had `key` (`sent`) for
+/// [`TEMPO_REST`] (`since_sent` ago), so a tempo being dragged while playing does not
+/// re-stream the audio on every step.
+///
+/// While following an external MIDI clock (`following_clock`) the tempo is the clock's,
+/// re-measured every beat, so it never rests: the regions are cut again only once the
+/// transport stops. Re-streaming the song drops the audio out, and doing it on every clock
+/// wobble would drop it out every beat; until then a region ends a little early or late (at
+/// 120 BPM a drift of 0.1 BPM moves the end of an 8-second region by under 7 ms).
+fn retempo_due(
+    cut_for: Option<&TempoKey>,
+    sent: Option<&TempoKey>,
+    since_sent: Option<std::time::Duration>,
+    key: &TempoKey,
+    playing: bool,
+    following_clock: bool,
+) -> bool {
+    let rested = sent == Some(key) && since_sent.is_some_and(|d| d >= TEMPO_REST);
+    cut_for != Some(key) && (!playing || (rested && !following_clock))
+}
 
 fn tempo_key(p: &Project) -> TempoKey {
     (p.tempo, p.tempo_points(), p.sig, p.sig_changes.clone())
@@ -826,6 +917,8 @@ impl EngineSync {
             playing: false,
             monitors: Vec::new(),
             tempo: None,
+            tempo_sent_at: None,
+            layout_tempo: None,
             metronome: false,
             click: None,
             tuning: None,
@@ -882,12 +975,23 @@ impl EngineSync {
     /// move is still pending.
     fn push(&mut self, p: &Project) -> bool {
         self.retry = false;
-        // Tracks or regions changed. Re-streaming audio reopens every file and briefly drops
-        // it out, so swap only the notes unless the audio layout itself changed.
-        if self.song_rev != Some(p.song_rev) {
+        let key = tempo_key(p);
+        let retempo = retempo_due(
+            self.layout_tempo.as_ref(),
+            self.tempo.as_ref(),
+            self.tempo_sent_at.map(|t| t.elapsed()),
+            &key,
+            p.playing,
+            p.midi_clock_in.is_some(),
+        );
+        // Tracks or regions changed, or the tempo (which cuts the audio regions at other
+        // lengths). Re-streaming audio reopens every file and briefly drops it out, so swap
+        // only the notes unless the audio layout itself changed, and while playing wait for
+        // a tempo being dragged to rest.
+        if self.song_rev != Some(p.song_rev) || retempo {
             let layout = audio_layout(p);
             let sent = if self.layout.as_ref() == Some(&layout) {
-                self.send(Command::set_notes(song_notes(p)))
+                self.song_rev == Some(p.song_rev) || self.send(Command::set_notes(song_notes(p)))
             } else {
                 let song = build_song(&self.engine, p);
                 let sent = self.send(Command::SetSong(Box::new(song)));
@@ -901,6 +1005,7 @@ impl EngineSync {
             };
             if sent {
                 self.song_rev = Some(p.song_rev);
+                self.layout_tempo = Some(key.clone());
             }
         }
         let controls = song_controls(p);
@@ -939,9 +1044,9 @@ impl EngineSync {
         {
             self.playing = p.playing;
         }
-        let key = tempo_key(p);
         if self.tempo.as_ref() != Some(&key) && self.send(tempo_map(p)) {
             self.tempo = Some(key);
+            self.tempo_sent_at = Some(std::time::Instant::now());
         }
         let mtc = (p.mtc_out.is_some(), p.smpte_rate, p.smpte_offset_frames());
         if self.mtc != Some(mtc)
@@ -1823,6 +1928,58 @@ mod tests {
     }
 
     #[test]
+    fn low_latency_live_regions_wait_for_the_aux_too() {
+        use crate::model::{Insert, SendSlot};
+        use prowave_engine::FxKind;
+        let sr = 48_000.0;
+        let mut p = Project::empty();
+        p.tracks.clear();
+        let plain = p.add_track(TrackKind::Audio);
+        let keys = p.add_track(TrackKind::Instrument);
+        let mic = p.add_track(TrackKind::Audio);
+        let aux = p.add_track(TrackKind::Aux);
+        // A plain track feeds an Aux with a limiter: the Aux comes out late.
+        p.tracks[aux].inserts = vec![Insert::new(FxKind::Limiter)];
+        p.tracks[plain].sends = vec![SendSlot {
+            bus: Some(p.aux_bus_of(aux)),
+            level: 0.5,
+            pre: false,
+        }];
+        p.selected_track = keys;
+        p.tracks[mic].monitor = true;
+        let look = FxKind::Limiter.latency_samples(sr);
+        assert!(look > 0);
+        let live = live_set(&p);
+        assert!(live[keys] && live[mic] && !live[aux], "{live:?}");
+        let (llm, paths) = (live_tracks(&p), live_paths(&p));
+        let full = pdc_plan_full(
+            &p,
+            sr,
+            &PlanInput {
+                llm_live: &llm,
+                paths: &paths,
+                basis_delay: &[],
+                actual_delay: &[],
+                live: &live,
+                low_latency: true,
+            },
+        );
+        assert_eq!(full.master, look, "the click waits for the Aux");
+        // Every track's regions reach the Stereo Out together with the click.
+        for i in [plain, keys, mic] {
+            let (pre, post) = full.pdc[i];
+            assert_eq!(
+                full.content[i] + pre + post,
+                full.master,
+                "track {i}: {full:?}"
+            );
+        }
+        // The live tracks still hear their input at once.
+        assert_eq!(full.pdc[keys], (0, 0));
+        assert_eq!(full.pdc[mic], (0, 0));
+    }
+
+    #[test]
     fn quantize_transpose_and_velocity_are_applied() {
         let mut t = track(vec![note(0.9, 60, 100)]);
         t.regions[0].params = RegionParams {
@@ -1879,7 +2036,7 @@ mod tests {
         {
             p.sig = sig;
             assert_eq!(p.bar_len(0), quarters_per_bar, "{sig:?}");
-            let (_, _, _, origin) = playing_regions(&p).next().unwrap();
+            let (_, _, _, origin, _) = playing_regions(&p).next().unwrap();
             // Bar 3 (1-based) is the engine's bar 2 (0-based).
             let engine_beat = TempoMap::constant(p.tempo, sig).beat_of_bar(2);
             assert!(
@@ -2273,5 +2430,457 @@ mod tests {
             program: 0,
         };
         assert!(soundfont_player(&sf, 48_000.0).is_ok());
+    }
+
+    /// A region on an audio track playing `file`: one bar from bar 1, looped `loop_beats`.
+    fn looped_audio(file: prowave_engine::AudioFile, loop_beats: f32) -> Project {
+        let mut p = Project::empty();
+        p.tracks.clear();
+        p.tracks.push(Track::new("Loop", TrackKind::Audio));
+        p.tracks[0].regions.push(Region {
+            name: "Click".into(),
+            start_bar: 1.0,
+            len_bars: 1.0,
+            notes: Vec::new(),
+            controls: Vec::new(),
+            folder: None,
+            audio: Some(crate::model::AudioRegion {
+                file,
+                peaks: Default::default(),
+                flex: None,
+            }),
+            params: RegionParams {
+                loop_beats,
+                ..RegionParams::default()
+            },
+            generated: None,
+        });
+        p
+    }
+
+    #[test]
+    fn a_looped_region_plays_its_notes_again_and_cuts_the_last_repeat() {
+        let mut t = track(vec![note(0.0, 60, 100), note(3.0, 62, 100)]);
+        t.regions[0].start_bar = 1.0;
+        t.regions[0].len_bars = 1.0;
+        t.regions[0].notes[1].len = 2.0; // beats 3-5: crosses the end of the region
+        t.regions[0].params.loop_beats = 6.0; // one whole repeat and half of another
+        let mut p = Project::empty();
+        p.tracks.clear();
+        p.tracks.push(t);
+        let notes = song_notes(&p);
+        let mut at: Vec<(f64, f64, u8)> = notes
+            .iter()
+            .map(|n| (n.start_beat, n.end_beat, n.pitch))
+            .collect();
+        at.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(
+            at,
+            vec![
+                (0.0, 0.5, 60),
+                (3.0, 5.0, 62),
+                (4.0, 4.5, 60),
+                (7.0, 8.0, 62),
+                (8.0, 8.5, 60),
+            ],
+            "the repeats start at beats 4 and 8; the last one stops at beat 10, and a repeat's \
+             notes end where it ends"
+        );
+        assert_eq!(p.region_loop_end_beats(&p.tracks[0].regions[0]), 10.0);
+        // No loop: just the region.
+        p.tracks[0].regions[0].params.loop_beats = 0.0;
+        assert_eq!(song_notes(&p).len(), 2);
+    }
+
+    #[test]
+    fn a_looped_audio_region_repeats_sample_exactly_in_an_offline_render() {
+        use prowave_engine::{DiskThread, EngineCore, Shared};
+        use std::time::{Duration, Instant};
+        const RATE: u32 = 48_000;
+        // 480 bpm: a beat is 6000 frames, a bar 24000. Clicks at frames 500, 1000 and 15000.
+        let clicks = [(500usize, 0.9f32), (1000, -0.6), (15_000, 0.75)];
+        let mut stereo = vec![0.0f32; 24_000 * 2];
+        for (at, v) in clicks {
+            stereo[at * 2] = v;
+            stereo[at * 2 + 1] = v;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("click.wav");
+        prowave_engine::write_wav(&path, &stereo, RATE).unwrap();
+        let file = prowave_engine::AudioFile::open(&path).unwrap();
+        // Looped 6 beats: one whole repeat (frames 24000-48000), then 2 beats (48000-60000),
+        // which ends before the third click.
+        let mut p = looped_audio(file, 6.0);
+        p.tempo = 480.0;
+
+        let disk = DiskThread::spawn();
+        let clips = playing_regions(&p)
+            .filter_map(|(track, t, r, origin, span)| {
+                let a = r.audio.as_ref()?;
+                let edit = clip_edit(&p, t, r, origin, span);
+                Some(disk.stream_with(&a.file, RATE, track, origin, edit))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(clips.len(), 3, "the region and its two repeats");
+        let song = Song::new(song_notes(&p), track_mixes(&p)).with_clips(clips);
+        let (mut tx, rx) = rtrb::RingBuffer::<Command>::new(64);
+        let (gtx, _grx) = rtrb::RingBuffer::new(64);
+        let mut core = EngineCore::new(RATE, rx, gtx, std::sync::Arc::new(Shared::new()));
+        assert!(tx.push(tempo_map(&p)).is_ok());
+        assert!(tx.push(Command::SetSong(Box::new(song))).is_ok());
+        assert!(tx.push(Command::SetMasterGain { linear: 1.0 }).is_ok());
+        assert!(tx
+            .push(Command::SetRoute {
+                track: 0,
+                route: route_of(&p, 0)
+            })
+            .is_ok());
+        assert!(tx.push(Command::SetPosition { beat: 0.0 }).is_ok());
+        let mut buf = vec![0.0f32; 1024];
+        // The disk thread reads ahead before the transport starts.
+        core.process(&mut buf);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(tx.push(Command::Play).is_ok());
+        // At playback speed, so the disk thread keeps up as it would in the app.
+        let mut left: Vec<f32> = Vec::new();
+        let began = Instant::now();
+        while left.len() < 72_000 {
+            core.process(&mut buf);
+            left.extend(buf.iter().step_by(2));
+            let due = began + Duration::from_secs_f64(left.len() as f64 / f64::from(RATE));
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+        }
+        // Where the playback started: the first click is 500 frames in.
+        let heard: Vec<(usize, f32)> = left
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.abs() > 0.05)
+            .map(|(i, v)| (i, *v))
+            .collect();
+        let first = heard.first().map_or(0, |h| h.0);
+        assert!(first >= 500, "the first click is heard at frame {first}");
+        let origin = first - 500;
+        let gain = heard[0].1 / 0.9;
+        let expected: Vec<usize> = [500, 1000, 15_000, 24_500, 25_000, 39_000, 48_500, 49_000]
+            .iter()
+            .map(|f| origin + f)
+            .collect();
+        let at: Vec<usize> = heard.iter().map(|h| h.0).collect();
+        assert_eq!(
+            at, expected,
+            "each repeat plays the clicks a bar later, to the sample"
+        );
+        for (i, &(_, v)) in heard.iter().enumerate() {
+            let want = clicks[i % 3].1 * gain;
+            assert!((v - want).abs() < 1e-4, "click {i}: {v} vs {want}");
+        }
+    }
+
+    /// Where the sound of an audio region at bar 1 stops, in frames, played by the engine
+    /// under `map` with the cut `edit`.
+    fn region_sound_ends(
+        wav: &std::path::Path,
+        map: &TempoMap,
+        edit: prowave_engine::ClipEdit,
+        sr: u32,
+    ) -> usize {
+        use prowave_engine::{AudioFile, DiskThread, EngineCore, Shared, Song, TrackMix};
+        let disk = DiskThread::spawn();
+        let file = AudioFile::open(wav).unwrap();
+        let clip = disk.stream_with(&file, sr, 0, 0.0, edit);
+        let (mut tx, rx) = rtrb::RingBuffer::new(64);
+        let (gtx, _grx) = rtrb::RingBuffer::new(64);
+        let mut core = EngineCore::new(sr, rx, gtx, std::sync::Arc::new(Shared::new()));
+        for c in [
+            Command::SetMasterGain { linear: 1.0 },
+            Command::SetTempoMap(Box::new(map.clone())),
+            Command::SetSong(Box::new(
+                Song::new(vec![], vec![TrackMix::default()]).with_clips(vec![clip]),
+            )),
+        ] {
+            assert!(tx.push(c).is_ok());
+        }
+        let mut buf = vec![0f32; 512 * 2];
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            core.process(&mut buf);
+        }
+        assert!(tx.push(Command::Play).is_ok());
+        let (mut last, mut at) = (0, 0);
+        while at < sr as usize * 6 {
+            core.process(&mut buf);
+            for (i, f) in buf.as_chunks::<2>().0.iter().enumerate() {
+                if f[0].abs() > 1e-3 {
+                    last = at + i + 1;
+                }
+            }
+            at += 512;
+            if at % 8192 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        last
+    }
+
+    /// A tempo edit is not a song edit, but an audio region plays seconds and is drawn in
+    /// bars: the region has to be cut again for the new tempo. Without it the engine plays
+    /// it for the old tempo's seconds (here half the region at 120 -> 60 BPM). The song is
+    /// sent again at once while stopped, and once the tempo rests while playing.
+    #[test]
+    fn a_tempo_change_cuts_the_audio_regions_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("dc.wav");
+        let sr = 48_000u32;
+        prowave_engine::write_wav(&wav, &vec![0.5f32; sr as usize * 10 * 2], sr).unwrap();
+        let ctx = egui::Context::default();
+        let mut p = Project::empty();
+        p.tempo = 120.0;
+        crate::import::import_audio(&mut p, &wav, &ctx).unwrap();
+        let ti = p.tracks.len() - 1;
+        // One bar of 4/4: 2 s at 120 BPM, 4 s at 60.
+        p.tracks[ti].regions[0].len_bars = 1.0;
+        let (rev, layout, cut_for) = (p.song_rev, audio_layout(&p), tempo_key(&p));
+        let old_cut = p.clip_edit_of(ti, 0);
+        p.set_tempo_at(0.0, 60.0);
+        let key = tempo_key(&p);
+        let new_cut = p.clip_edit_of(ti, 0);
+        assert_eq!(
+            p.song_rev, rev,
+            "a tempo edit leaves the song revision alone"
+        );
+        assert_ne!(
+            audio_layout(&p),
+            layout,
+            "but the audio is cut at another length"
+        );
+        assert!(
+            (old_cut.length_secs - 2.0).abs() < 1e-9,
+            "{}",
+            old_cut.length_secs
+        );
+        assert!(
+            (new_cut.length_secs - 4.0).abs() < 1e-9,
+            "{}",
+            new_cut.length_secs
+        );
+        let map = p.tempo_map();
+        let stale = region_sound_ends(&wav, &map, old_cut, sr);
+        let fresh = region_sound_ends(&wav, &map, new_cut, sr);
+        let drawn_end = (map.seconds_at(p.region_end_beats(&p.tracks[ti].regions[0]))
+            * f64::from(sr))
+        .round() as usize;
+        println!(
+            "\nRegion drawn to frame {drawn_end} after 120 -> 60 BPM: the old cut stops at \
+             {stale}, the new one at {fresh}"
+        );
+        assert_eq!(stale, 2 * sr as usize);
+        assert_eq!(fresh, drawn_end);
+        // When the song goes again.
+        let long = Some(std::time::Duration::from_secs(5));
+        let short = Some(std::time::Duration::from_millis(10));
+        assert!(retempo_due(
+            Some(&cut_for),
+            Some(&cut_for),
+            long,
+            &key,
+            false,
+            false
+        ));
+        assert!(retempo_due(Some(&cut_for), None, None, &key, false, false));
+        assert!(!retempo_due(
+            Some(&cut_for),
+            Some(&cut_for),
+            long,
+            &key,
+            true,
+            false
+        ));
+        assert!(!retempo_due(
+            Some(&cut_for),
+            Some(&key),
+            short,
+            &key,
+            true,
+            false
+        ));
+        assert!(retempo_due(
+            Some(&cut_for),
+            Some(&key),
+            Some(TEMPO_REST),
+            &key,
+            true,
+            false
+        ));
+        assert!(!retempo_due(
+            Some(&key),
+            Some(&key),
+            long,
+            &key,
+            false,
+            false
+        ));
+    }
+
+    /// Following an external MIDI clock, the tempo moves with every clock reading. The audio
+    /// regions are not cut again (re-streaming the whole song, an audio drop-out) while the
+    /// song plays, however long a reading rests; they are once it stops.
+    #[test]
+    fn a_followed_clock_tempo_never_re_streams_the_song_while_playing() {
+        let mut p = Project::empty();
+        p.midi_clock_in = Some("Clock Source".into());
+        let cut_for = tempo_key(&p);
+        let mut seen = Vec::new();
+        // The clock reads 120.0, 120.1, 119.9, ... once a beat (half a second apart).
+        for bpm in [120.1f32, 119.9, 120.0, 120.2, 119.8] {
+            p.tempo = bpm;
+            let key = tempo_key(&p);
+            let half_a_beat = Some(std::time::Duration::from_millis(500));
+            seen.push(retempo_due(
+                Some(&cut_for),
+                Some(&key),
+                half_a_beat,
+                &key,
+                true,
+                p.midi_clock_in.is_some(),
+            ));
+        }
+        assert_eq!(seen, [false; 5], "no re-stream while playing");
+        let key = tempo_key(&p);
+        assert!(
+            retempo_due(Some(&cut_for), Some(&key), None, &key, false, true),
+            "cut again once stopped"
+        );
+        // Without a clock, a tempo set while playing is still cut once it rests.
+        assert!(retempo_due(
+            Some(&cut_for),
+            Some(&key),
+            Some(TEMPO_REST),
+            &key,
+            true,
+            false
+        ));
+    }
+
+    /// The output frame of the click on bar `bar` (1-based), played by the engine with the
+    /// output delay `delay` in blocks of `block`.
+    fn click_out_frame(sr: u32, block: usize, map: &TempoMap, delay: u32, bar: u32) -> usize {
+        use prowave_engine::{EngineCore, Shared};
+        let (mut tx, rx) = rtrb::RingBuffer::new(64);
+        let (gtx, _grx) = rtrb::RingBuffer::new(64);
+        let mut core = EngineCore::new(sr, rx, gtx, std::sync::Arc::new(Shared::new()));
+        for c in [
+            Command::SetMasterGain { linear: 1.0 },
+            Command::SetTempoMap(Box::new(map.clone())),
+            Command::SetOutputDelay {
+                strips: delay,
+                master: delay,
+            },
+            Command::SetMetronome { on: true },
+            Command::Play,
+        ] {
+            assert!(tx.push(c).is_ok());
+        }
+        let exact = map.seconds_at(map.beat_of_bar(bar - 1)) * f64::from(sr);
+        let from = exact as usize;
+        let frames = from + delay as usize + 2 * block + 64;
+        let mut out: Vec<f32> = Vec::with_capacity(frames);
+        let mut buf = vec![0f32; block * 2];
+        while out.len() < frames {
+            core.process(&mut buf);
+            out.extend(buf.iter().step_by(2));
+        }
+        (from..out.len()).find(|&i| out[i].abs() > 1e-9).unwrap()
+    }
+
+    /// A note played exactly when the click of bar 9 is heard goes on the beat of bar 9:
+    /// the recording moves it back by what the click waits (the delay compensation of the
+    /// plan, the click delayed by it) and by the device's output latency, as audio takes.
+    #[test]
+    fn midi_played_on_the_heard_click_is_recorded_on_the_beat() {
+        use crate::recorder::{self, LiveNote, Outcome, Recorder};
+        let bar = 9u32;
+        println!("\nNote played on the heard click of bar {bar}: recorded off the beat by (ms):");
+        for sr in [44_100u32, 48_000] {
+            for block in [64usize, 127, 512] {
+                // (plug-ins on the instrument track: instrument, effects; live; low latency)
+                for (inst, fx, selected, llm) in [
+                    (false, false, false, false),
+                    (true, false, false, false),
+                    (true, false, true, false),
+                    (true, true, false, false),
+                    (true, true, true, false),
+                    (true, true, true, true),
+                ] {
+                    let mut p = Project::empty();
+                    p.tracks.clear();
+                    p.tracks.push(Track::new("Keys", TrackKind::Instrument));
+                    p.tracks.push(Track::new("Stem", TrackKind::Audio));
+                    p.tempo = 117.02;
+                    p.selected_track = if selected { 0 } else { 1 };
+                    p.tracks[0].rec = llm;
+                    let (pb, io) = (256u32, block as u32);
+                    let live = live_set(&p);
+                    let host = |l: bool| {
+                        if inst {
+                            prowave_engine::plugin_host_delay(true, fx, l, pb, io)
+                        } else {
+                            0
+                        }
+                    };
+                    let llm_live = if llm { live_tracks(&p) } else { Vec::new() };
+                    let plan = pdc_plan_full(
+                        &p,
+                        sr as f32,
+                        &PlanInput {
+                            llm_live: &llm_live,
+                            paths: &[],
+                            basis_delay: &[host(false), 0],
+                            actual_delay: &[host(live[0]), 0],
+                            live: &live,
+                            low_latency: llm,
+                        },
+                    );
+                    let delay = plan.master as u32;
+                    let map = p.tempo_map();
+                    let heard = click_out_frame(sr, block, &map, delay, bar);
+                    for device_us in [0u32, 5_333] {
+                        // Heard `device_us` after it is rendered; the playhead is then where
+                        // the transport renders.
+                        let device = f64::from(device_us) * 1e-6 * f64::from(sr);
+                        let raw = map.beat_at((heard as f64 + device) / f64::from(sr));
+                        let comp = u64::from(delay) * 1_000_000 / u64::from(sr);
+                        let mut rec = Recorder::default();
+                        rec.set_heard_latency(device_us + comp as u32);
+                        let mut q = p.clone();
+                        q.recording = true;
+                        q.playing = true;
+                        q.position_beats = 0.0;
+                        assert!(matches!(
+                            recorder::update(&mut rec, &mut q, &[]),
+                            Outcome::Started(0, _)
+                        ));
+                        q.position_beats = raw;
+                        recorder::update(
+                            &mut rec,
+                            &mut q,
+                            &[LiveNote::On {
+                                pitch: 60,
+                                vel: 100,
+                            }],
+                        );
+                        let (t, r) = rec.target().unwrap();
+                        let at = f64::from(q.tracks[t].regions[r].notes[0].start);
+                        let off_ms =
+                            (map.seconds_at(at) - map.seconds_at(map.beat_of_bar(bar - 1))) * 1e3;
+                        println!(
+                            "  sr {sr} block {block:>3} inst {inst} fx {fx} live {} llm {llm} \
+                             delay {delay:>4} device {device_us:>4} us: {off_ms:+.4}",
+                            live[0]
+                        );
+                        assert!(off_ms.abs() < 1.0, "{off_ms} ms");
+                    }
+                }
+            }
+        }
     }
 }

@@ -201,7 +201,7 @@ mod mac {
             let menu = Menu::new();
             let about = AboutMetadata {
                 name: Some(crate::APP_NAME.into()),
-                version: Some(env!("CARGO_PKG_VERSION").into()),
+                version: Some(crate::about_version()),
                 license: Some("GPL-3.0-or-later".into()),
                 ..Default::default()
             };

@@ -11,7 +11,6 @@ mod automation;
 mod automation_ui;
 mod bench;
 mod channel_rack;
-mod chop_set;
 mod clock_follow;
 mod clock_in;
 mod dsp_load_check;
@@ -20,11 +19,17 @@ mod engine_sync;
 mod event_list;
 mod file_browser;
 mod file_commands;
+mod fit_grid;
 mod flex_edit;
+#[cfg(test)]
+mod fx_pictures;
 mod fx_ui;
+mod gear;
 mod graphics;
 mod groove;
 mod groups;
+mod hw;
+mod hw_sampler;
 mod i18n;
 mod import;
 mod inspector;
@@ -54,14 +59,15 @@ mod pattern;
 mod piano_roll;
 mod piano_tools;
 mod pitch_editor;
+#[cfg(target_os = "macos")]
+mod plugin_unit;
 mod plugins;
 mod project_io;
 mod project_settings;
 mod recent_files;
 mod recorder;
 mod region_edit;
-mod sampler;
-mod sampler_ui;
+mod region_loop;
 mod score;
 mod scripter;
 mod side_panes;
@@ -89,6 +95,8 @@ mod ui_scale;
 #[cfg(test)]
 mod ui_test;
 mod undo;
+// The private build has no updater: its releases (on the upstream project) are not this
+// program, which is built from its own checkout.
 mod updater;
 mod vst3_scan;
 mod widgets;
@@ -97,6 +105,14 @@ mod window_chrome;
 /// The program's name (window, menus, About box, MIDI ports) and its settings folder's name.
 pub const APP_NAME: &str = "Pro Wave (Yuri's Version)";
 pub const SETTINGS_DIR: &str = "prowave-mac";
+/// The version in the About box.
+pub fn about_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+/// The window title.
+pub fn window_title() -> String {
+    APP_NAME.to_string()
+}
 
 use model::Project;
 
@@ -144,8 +160,6 @@ pub struct UiState {
     pub spectrogram: spectrogram_view::SpectrogramView,
     /// The native effect whose window is open (its slot's uid).
     pub native_window: Option<u64>,
-    /// The Sampler windows open, and their browser.
-    pub sampler: sampler_ui::SamplerWindows,
     /// Window > Open Piano Roll: the Piano Roll in a window of its own.
     pub piano_window: bool,
     /// Whether the engine was last told to send MIDI clock.
@@ -207,6 +221,9 @@ pub struct UiState {
     pub score_heard: Option<(u8, f64)>,
     /// Flex Time and Flex Pitch work running in the background.
     pub flex: flex_edit::FlexState,
+    /// Fit to Grid: files being read to be placed on the grid, and File > Import > Fit to Grid
+    /// on Drop.
+    pub fit: fit_grid::FitState,
     /// The audio Groove Track's hits being read.
     pub groove: groove::GrooveState,
     /// File > Import > MIDI File… or Export > Selection as MIDI File…, run after the menus.
@@ -266,7 +283,6 @@ impl UiState {
             paint: paint_image::PaintState::default(),
             spectrogram: spectrogram_view::SpectrogramView::default(),
             native_window: None,
-            sampler: sampler_ui::SamplerWindows::default(),
             piano_window: false,
             midi_clock_sent: false,
             midi_panic: false,
@@ -305,6 +321,7 @@ impl UiState {
             score: score::ScoreView::default(),
             score_heard: None,
             flex: flex_edit::FlexState::default(),
+            fit: fit_grid::FitState::default(),
             groove: groove::GrooveState::default(),
             midi_cmd: None,
             piano_focus: false,
@@ -315,7 +332,7 @@ impl UiState {
             recent_pick: None,
             recent: recent_files::Recent::default(),
             cpu_load: 0.0,
-            light_menus: false,
+            light_menus: true,
             chooser: None,
             ui_scale: 1.0,
             undo_cmd: None,
@@ -376,6 +393,17 @@ struct App {
 }
 
 impl App {
+    /// Help > Check for Updates…, and the updater's notices and install.
+    fn updates(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.ui.update_check) {
+            self.updater.start_check(true);
+        }
+        let unsaved = || file_commands::content(&self.project) != self.saved;
+        if self.updater.show(ctx, &unsaved) == updater::Action::Quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     /// File > Import > MIDI File… and File > Export > Selection as MIDI File…
     fn run_midi_cmd(&mut self, cmd: midi_file::MidiCmd) {
         let (p, s) = (&mut self.project, &mut self.ui);
@@ -424,7 +452,10 @@ impl App {
             self.ui.status = Some(i18n::trf("not an audio file: {}", &[&path.display()]));
             return;
         }
-        if let Err(e) = import::import_audio(&mut self.project, path, ctx) {
+        // Fit to Grid on Drop, unless Option is held: the first audio of the project gives it
+        // its tempo, later files are stretched to it; either way onto the grid.
+        let raw = fit_grid::raw_drop_held(ctx);
+        if let Err(e) = fit_grid::import_dropped(&mut self.project, &mut self.ui, path, ctx, raw) {
             self.ui.status = Some(i18n::trf("cannot import {}: {}", &[&path.display(), &e]));
         }
     }
@@ -451,16 +482,23 @@ impl App {
         let undo_cmd = self.ui.undo_cmd.take();
         // A recording is one edit: it is recorded when it ends, not on every frame.
         let recording = self.ui.rec.active() || self.ui.audio_rec.active();
+        // A file being fitted to the grid: its drop and its fitting are one edit.
+        let recording = recording || self.ui.fit.busy();
         if !dragging
             && !recording
             && (gesture_ended || undo_cmd.is_some() || self.frames_since_record >= 30)
         {
             self.frames_since_record = 0;
-            self.history.record(&self.project);
+            self.history
+                .record_followed(&mut self.project, &mut self.ui.flex);
         }
         let changed = match undo_cmd {
-            Some(undo::UndoCmd::Undo) => self.history.undo(&mut self.project),
-            Some(undo::UndoCmd::Redo) => self.history.redo(&mut self.project),
+            Some(undo::UndoCmd::Undo) => self
+                .history
+                .undo_followed(&mut self.project, &mut self.ui.flex),
+            Some(undo::UndoCmd::Redo) => self
+                .history
+                .redo_followed(&mut self.project, &mut self.ui.flex),
             Some(undo::UndoCmd::Clear) => {
                 self.history.clear(&self.project);
                 false
@@ -527,6 +565,9 @@ impl App {
             midi.poll(&mut input);
         }
         input.extend(self.ui.typing.take());
+        // Notes go where the song was heard when they were played, as audio takes do.
+        let heard = self.heard_latency_us();
+        self.ui.rec.set_heard_latency(heard);
         let p = &mut self.project;
         let s = &mut self.ui;
         let track = s.rec.target().map_or(p.selected_track, |(t, _)| t);
@@ -588,18 +629,23 @@ impl App {
     }
 
     /// Audio inputs: opens the input while a track wants it and records the armed tracks.
-    fn record_audio(&mut self, ctx: &egui::Context) {
-        // What the performer hears is late by the device, by the delay compensation of the
-        // whole mix (pre-rendered plug-ins included) and by the Stereo Out's plug-ins after
-        // it: the take is moved back by all three.
-        let latency_us = self.sync.as_mut().map_or(0, |sync| {
+    /// What the performer hears is late by the device, by the delay compensation of the
+    /// whole mix (pre-rendered plug-ins included, the click too) and by the Stereo Out's
+    /// plug-ins after it, in microseconds: audio takes and MIDI recordings are moved back by
+    /// all three.
+    fn heard_latency_us(&mut self) -> u32 {
+        self.sync.as_mut().map_or(0, |sync| {
             let sr = u64::from(sync.engine.sample_rate().max(1));
             let comp = u64::from(sync.output_delay_frames()) * 1_000_000 / sr;
             let state = sync.engine.state();
             let device = u64::from(state.output_latency_us);
             let master = u64::from(state.master_latency_us);
             (device + comp + master).min(u64::from(u32::MAX)) as u32
-        });
+        })
+    }
+
+    fn record_audio(&mut self, ctx: &egui::Context) {
+        let latency_us = self.heard_latency_us();
         let s = &mut self.ui;
         // A new output: the engine moves to it, and the input is opened again on it. Not
         // while recording, which would lose the take.
@@ -697,6 +743,7 @@ impl eframe::App for App {
         ui_scale::apply(&ctx, self.ui.ui_scale);
         tracks_area::poll_normalize(&ctx, &mut self.project, &mut self.ui);
         smart_tempo::poll(&ctx, &mut self.project, &mut self.ui);
+        fit_grid::poll(&ctx, &mut self.project, &mut self.ui);
         flex_edit::poll(&ctx, &mut self.project, &mut self.ui);
         groove::poll(&ctx, &mut self.project, &mut self.ui);
         // PROWAVE_QUIT_AFTER=<seconds>: closes the window then, the way a user quits (for
@@ -824,6 +871,7 @@ impl eframe::App for App {
                 }
             }
             self.plugins.tend_windows();
+            self.plugins.show_units(&ctx, &mut self.project);
             let opened = self.ui.mixer.open_plugin.take();
             if let Some((uid, title)) = opened {
                 // The Channel Rack opens its own window; an Audio Unit its plug-in's.
@@ -831,11 +879,6 @@ impl eframe::App for App {
                     t.au_instrument
                         .as_ref()
                         .is_some_and(|s| s.uid == uid && channel_rack::is_rack(s))
-                });
-                let sampler_slot = self.project.tracks.iter().any(|t| {
-                    t.au_instrument
-                        .as_ref()
-                        .is_some_and(|s| s.uid == uid && sampler::is_sampler(s))
                 });
                 let native = self
                     .project
@@ -845,8 +888,6 @@ impl eframe::App for App {
                 if let Some((i, _)) = rack {
                     self.project.selected_track = i;
                     self.ui.bottom = Bottom::ChannelRack;
-                } else if sampler_slot {
-                    self.ui.sampler.open(uid);
                 } else if native {
                     self.ui.native_window = Some(uid);
                 } else if let Err(e) = self.plugins.show_window(uid, &title) {
@@ -929,8 +970,8 @@ impl eframe::App for App {
 
         top_bar(ui, p, s);
         egui::Panel::top("control")
-            .exact_size(58.0)
-            .frame(egui::Frame::new().fill(egui::Color32::from_gray(0x47)))
+            .exact_size(transport::HEIGHT)
+            .frame(egui::Frame::new().fill(theme::TOOLBAR))
             .show(ui, |ui| transport::control_bar(ui, p, s, master_peaks));
         if s.show_inspector {
             egui::Panel::left("inspector")
@@ -960,13 +1001,14 @@ impl eframe::App for App {
                 .show(ui, |ui| event_list::show(ui, p, s));
         }
         if s.show_mixer || s.bottom != Bottom::Mixer {
-            // About half of the space under the control bar (500 points at most), so the Tracks
+            // About half of the space under the control bar (700 points at most, so tall screens
+            // get the strips' main density), so the Tracks
             // area keeps room on short screens. The Piano Roll can be pulled taller; the mixer
             // has a fixed height, as in Logic: its strips have a natural size and a taller panel
             // would only stretch the faders and meters. (It follows the window, so it is never
             // outside its range when the window shrinks.)
             let room = ui.available_height();
-            let usual = (room * 0.48).clamp(160.0, 500.0);
+            let usual = (room * 0.48).clamp(160.0, 700.0);
             let panel = egui::Panel::bottom("bottom").frame(egui::Frame::new());
             let panel = if s.bottom == Bottom::Mixer {
                 panel.resizable(false).exact_size(usual)
@@ -987,10 +1029,6 @@ impl eframe::App for App {
 
         side_panes::tips(&ctx, &mut self.ui);
         native_fx_ui::show(&ctx, &mut self.project, &mut self.ui);
-        if sampler::tick(&self.project) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-        sampler_ui::show(&ctx, &mut self.project, &mut self.ui);
         piano_roll::show_window(&ctx, &mut self.project, &mut self.ui);
         paint_image::show(&ctx, &mut self.project, &mut self.ui);
         spectrogram_view::show(&ctx, &mut self.ui);
@@ -999,13 +1037,7 @@ impl eframe::App for App {
         }
         self.record_audio(&ctx);
         self.play_and_record_midi(&ctx);
-        if std::mem::take(&mut self.ui.update_check) {
-            self.updater.start_check(true);
-        }
-        let unsaved = || file_commands::content(&self.project) != self.saved;
-        if self.updater.show(&ctx, &unsaved) == updater::Action::Quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        self.updates(&ctx);
 
         // Forward live notes (piano keys, note auditioning) to the engine.
         // Notes on tracks past the engine's limit are silent, like the rest of those tracks.
@@ -1356,8 +1388,9 @@ fn main() -> eframe::Result {
         .with_min_inner_size([800.0, 520.0])
         // Fill the screen, as Logic does; on a small screen 1600 x 980 would not fit.
         .with_maximized(true)
-        // Just the app name, on every system: no project name or view in the title bar.
-        .with_title(APP_NAME)
+        // Just the app name (the private build adds its commit), on every system: no project
+        // name or view in the title bar.
+        .with_title(window_title())
         // Window class: lets Linux desktops match the window to its .desktop entry and icon.
         .with_app_id(window_app_id())
         // Windows and Linux: no title bar from the system; the menu bar row has the window
@@ -1398,8 +1431,11 @@ fn main() -> eframe::Result {
             };
             let mut audio_error = None;
             let mut midi_out = None;
+            // Pictures and measurements use the default output, or the one named by its Core
+            // Audio uid in `PROWAVE_SHOT_OUTPUT` (a silent virtual device keeps playing
+            // scenes, `PROWAVE_SHOT_SCENE=mix…`, off the speakers).
             let (output, input) = if measuring {
-                (None, None)
+                (std::env::var("PROWAVE_SHOT_OUTPUT").ok(), None)
             } else {
                 audio_rec::InputChoice::saved_devices()
             };
@@ -1448,8 +1484,11 @@ fn main() -> eframe::Result {
                 updater: updater::Updater::new(),
             };
             if !measuring {
-                app.ui.update_auto = updater::auto_enabled();
+                {
+                    app.ui.update_auto = updater::auto_enabled();
+                }
                 app.ui.software_monitoring = audio_rec::software_monitoring();
+                app.ui.fit.on_drop = fit_grid::on_drop_setting();
                 app.ui.modes = engine_mode::Modes::load();
                 let mode = app.ui.modes.mode;
                 // Low Latency Mode as it was left: the mode sets it, the menu can change it.

@@ -78,6 +78,12 @@ pub fn tempo_curve(beats: &[f64]) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// The beats through an onset strength ([`STRENGTH_RATE`] values a second) at about `bpm`, in
+/// seconds: for a tempo found another way (Fit to Grid), followed as [`Analysis::beats`] are.
+pub fn beats_at(strength: &[f32], bpm: f64) -> Vec<f64> {
+    track_beats(strength, bpm)
+}
+
 /// The beats through an onset strength at about `bpm` (dynamic programming: each beat is the
 /// best place given the beat before it, a beat apart, with a cost for straying from the
 /// tempo, so the beats follow a tempo that drifts or changes).

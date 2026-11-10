@@ -16,7 +16,7 @@ This is NOT a wrapper around JUCE or Electron. Every agent must respect audio-th
 | **midi-agent** | `prowave-midi` | Piano Roll logic, Score data, Step Seq, Event List, MIDI Transform, MIDI FX chain (Arp, Chord Trigger, Scripter via Rhai), MPE, MIDI 2.0, Articulation ID | No direct audio buffer access | Quantize, Humanize, Flam, Brush, Time Handles, MIDI Draw |
 | **mixer-agent** | `prowave-mixer` | Summing, busses, Aux, VCA, Groups, Sends on Fader, Automation (Read/Touch/Latch/Write/Trim, Bezier curves) | No UI code | Must implement PDC, 64-bit summing, automation sample-accurate |
 | **plugin-agent** | `prowave-plugin-host` | CLAP primary, VST3, AU, out-of-process sandbox (seccomp/seatbelt/AppContainer), scanner, quarantine | No unsafe without SAFETY comment + miri test | Must survive plugin crash without DAW crash |
-| **ui-agent** | `prowave-ui` | egui widgets: Tracks area, Mixer, Piano Roll, Score Editor, Step Seq Grid, Audio Track Editor, Smart Controls, Library/Patches, Loop Browser, Live Loops Grid, Video Track, Key Commands window, Channel Strip | No audio processing, only Commands via ringbuf | Must look like Logic dark gray, 1:1 controls |
+| **ui-agent** | `prowave-ui` | egui widgets: Tracks area, Mixer, Piano Roll, Score Editor, Step Seq Grid, Audio Track Editor, Smart Controls, Library/Patches, Loop Browser, Live Loops Grid, Video Track, Key Commands window, Channel Strip | No audio processing, only Commands via ringbuf | Must follow the Hardware design system (see below), Logic's controls 1:1 in function |
 | **wasm-agent** | `prowave-wasm` | wasm-bindgen, AudioWorkletGlobalScope (128 samples), SharedArrayBuffer + Atomics, OPFS, Web Remote (Logic Remote clone via browser) | No cpal, no native-only deps | Must play 32 tracks in Chrome |
 | **qa-agent** | all | RTL benchmarks, clippy -D warnings, miri, fuzzing (wav, project), drop-out detection, preset compatibility tests vs Logic presets corpus | No feature work | Must verify no alloc on audio thread |
 
@@ -127,3 +127,13 @@ If plugin sandbox crashes >3 times on scan, @plugin-agent must quarantine plugin
 
 ---
 > TL;DR for agents: You are building Pro Wave, a complete Logic Pro clone in Rust + WASM. Audio thread is real-time, no alloc. UI is egui + wgpu. Everything is Rust. If you allocate on audio thread, you break music. Check roadmap.md Section 1 for exact Logic features to clone.
+
+## UI design system: Hardware (PW-1)
+
+The app's look is "Hardware": a piece of studio gear, not a Logic-gray clone. Every window follows it.
+
+- **Tokens:** `crates/prowave-app/src/theme.rs`. Never hard-code a colour in a panel; use the tokens (bone chassis `BONE`/`BONE2`/`BONE3`, seams `SEAM`, print `INK`/`INK2`/`PRINT`, the one signal colour `ORANGE`, LCD glass `LCD`/`LCD_INK`, black caps `CAP`, meter wells `METER_WELL`, text on dark `ON_DARK`). Text tokens are dark and surface tokens light; dark materials use `ON_DARK`. `theme::text_on(c)` picks text for any fill.
+- **Type:** bundled OFL fonts, `theme::font(Face, size)`: `Silk` (Barlow Condensed caps, spaced) for labels and captions, `SilkX` for headings, `Bold` (JetBrains Mono) for key legends, menus and names, `Body` for text, `Lcd` for LCD text. Seven-segment digits for time, tempo and level readouts: `hw::seg`.
+- **Controls:** custom-painted with `crates/prowave-app/src/hw.rs`: key caps (`hw::key`, bone/black/orange, LED dot), toggles, track pads, knobs (black, orange pointer, tick ring), faders with tick scales, segmented meters, LCD panels and readouts, insert/routing slots, dark value fields (dropdowns), faceplates, seams, screws, bracketed section labels. `hw-kit.png` (`cargo test -p prowave-app manual_pictures_hardware_kit -- --ignored`) shows them all.
+- **Regions:** `theme::region_look` + `hw::paint_region`: black MIDI bodies with bone notes, warm-grey audio bodies with dark waveforms, a header bar in the track colour; selected = orange header and outline. New tracks take `theme::TRACK_PALETTE` tones.
+- **Rules:** orange only for signal (selection, record, lit LEDs, playhead); labels in caps; keep hit targets at least 20 pt; no invented captions or hint text.

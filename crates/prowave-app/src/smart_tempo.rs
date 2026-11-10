@@ -9,8 +9,9 @@
 //! the bars that now fall under them, as in Logic, so the recordings still play together.
 use crate::i18n::{tr, trf};
 use crate::model::{Project, TempoPoint, MAX_BPM, MIN_BPM};
+use crate::theme::{self, Face};
 use crate::UiState;
-use egui::{pos2, vec2, Align2, Color32, FontId, Sense, Stroke};
+use egui::{pos2, vec2, Color32, Sense, Stroke};
 use prowave_engine::{Analysis, AudioFile, STRENGTH_RATE};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
@@ -527,43 +528,65 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
             let (rect, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), 150.0), Sense::hover());
             let g = ui.painter_at(rect);
-            g.rect_filled(rect, 4.0, Color32::from_rgb(0x22, 0x22, 0x26));
+            // The recording in the audio-region material: warm grey with ink columns.
+            crate::hw::gradient(
+                &g,
+                rect,
+                3.0,
+                Color32::from_rgb(0xb0, 0xaa, 0x9c),
+                Color32::from_rgb(0x9d, 0x97, 0x89),
+            );
             if let Some(peaks) = &peaks {
                 let mid = rect.center().y;
                 let h = rect.height() * 0.45;
+                g.hline(
+                    rect.x_range(),
+                    mid,
+                    Stroke::new(0.6, theme::INK.gamma_multiply(0.4)),
+                );
                 let w = rect.width().max(1.0) as usize;
-                for x in 0..w {
+                for x in (0..w).step_by(3) {
                     if let Some((lo, hi)) = peaks.get(x * peaks.len() / w) {
-                        let xx = rect.left() + x as f32;
+                        let xx = rect.left() + x as f32 + 1.5;
                         g.line_segment(
                             [pos2(xx, mid - hi * h), pos2(xx, mid - lo * h)],
-                            Stroke::new(1.0, Color32::from_rgb(0x6a, 0x9c, 0xe8)),
+                            Stroke::new(1.7, theme::INK),
                         );
                     }
                 }
             }
+            // Beats in ink; every bar's first beat in orange with its number on a chip.
             for (k, b) in e.edited_beats().iter().enumerate() {
                 let x = rect.left() + (*b / secs) as f32 * rect.width();
                 let bar = k % num == 0;
-                let colour = if bar {
-                    Color32::from_rgb(0xff, 0xd0, 0x40)
-                } else {
-                    Color32::from_white_alpha(70)
-                };
-                g.line_segment(
-                    [pos2(x, rect.top()), pos2(x, rect.bottom())],
-                    Stroke::new(if bar { 1.5 } else { 1.0 }, colour),
-                );
                 if bar {
-                    g.text(
-                        pos2(x + 3.0, rect.top() + 2.0),
-                        Align2::LEFT_TOP,
-                        format!("{}", k / num + 1),
-                        FontId::proportional(10.0),
-                        colour,
+                    g.vline(x, rect.y_range(), Stroke::new(2.0, theme::ORANGE));
+                    let label = format!("{:03}", k / num + 1);
+                    let gal = crate::hw::galley(&g, &label, Face::Lcd, 9.5, theme::INK);
+                    let chip = egui::Rect::from_min_size(
+                        pos2(x + 1.0, rect.top() + 2.0),
+                        vec2(gal.size().x + 6.0, 12.0),
+                    );
+                    g.rect_filled(chip, 1.5, theme::ORANGE);
+                    g.galley(
+                        pos2(chip.left() + 3.0, chip.center().y - gal.size().y / 2.0),
+                        gal,
+                        theme::INK,
+                    );
+                } else {
+                    g.vline(
+                        x,
+                        rect.y_range(),
+                        Stroke::new(1.0, theme::INK.gamma_multiply(0.35)),
                     );
                 }
             }
+            g.rect_stroke(
+                rect,
+                3.0,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(20, 20, 19, 191)),
+                egui::StrokeKind::Inside,
+            );
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 let ready = ready && e.edited_beats().len() >= 2;

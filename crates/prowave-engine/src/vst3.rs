@@ -1097,6 +1097,17 @@ impl Vst3Handle {
         }
     }
 
+    /// Parameter `index`'s default, normalized. UI thread.
+    pub fn parameter_default(&self, index: usize) -> Option<f64> {
+        let c = self.0.controller.as_ref()?;
+        // SAFETY: a UI-thread controller call into a zeroed struct it fills.
+        unsafe {
+            let mut info: ParameterInfo = std::mem::zeroed();
+            (c.getParameterInfo(index as i32, &mut info) == kResultOk)
+                .then_some(info.defaultNormalizedValue)
+        }
+    }
+
     /// The parameters the user moved in the plug-in's window since the last call: (index in
     /// the controller's order, normalized value). UI thread.
     pub fn take_edits(&self) -> Vec<(usize, f64)> {
@@ -1115,6 +1126,38 @@ impl Vst3Handle {
         let c = self.0.controller.as_ref()?;
         // SAFETY: a UI-thread controller call.
         Some(unsafe { c.getParamNormalized(id) })
+    }
+
+    /// Moves parameter `index` to `value` (normalized) as a hand on its knob does: the
+    /// controller (and its window) shows it, the processor takes it next block, and
+    /// [`Vst3Handle::take_edits`] reports it. UI thread.
+    pub fn edit_parameter(&self, index: usize, value: f64) {
+        let Some(id) = self.0.param_ids.get(index) else {
+            return;
+        };
+        if !value.is_finite() {
+            return;
+        }
+        let v = value.clamp(0.0, 1.0);
+        if let Some(c) = &self.0.controller {
+            // SAFETY: a UI-thread controller call.
+            unsafe {
+                c.setParamNormalized(*id, v);
+            }
+        }
+        self.0.handler.edit(*id, v);
+    }
+
+    /// The text the plug-in shows for parameter `index` at `value` (normalized), e.g.
+    /// "-6.0 dB". UI thread.
+    pub fn parameter_text(&self, index: usize, value: f64) -> Option<String> {
+        let id = *self.0.param_ids.get(index)?;
+        let c = self.0.controller.as_ref()?;
+        let mut out: vst3::Steinberg::Vst::String128 = [0; 128];
+        // SAFETY: a UI-thread controller call into a buffer of the size the SDK fixes.
+        let ok = unsafe { c.getParamStringByValue(id, value, &mut out) } == kResultOk;
+        ok.then(|| crate::vst3_host::read_string128(&out))
+            .filter(|s| !s.trim().is_empty())
     }
 
     /// Shows parameter `index` at `value` in the controller (its window). The processor

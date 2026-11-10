@@ -5,24 +5,28 @@
 //! In / Out, Curve and Reverse; Track Transpose, Velocity,
 //! Key Limit and Vel Limit (all applied non-destructively when the engine song is built);
 //! both channel strips (fader, pan, M/S, meters). Fields Logic has that are not implemented
-//! yet are shown dimmed and do nothing.
+//! yet keep their black fields with dim print and do nothing.
+use crate::hw::{self, Cap};
 use crate::i18n::tr;
-use crate::mixer::{channel_strip, fx_rows_for, rows, send_rows_for, Meters, NameStyle, StripKey};
-use crate::model::{Project, SoundFontUse, TrackKind, MAX_REGION_GAIN, MIN_REGION_GAIN};
-use crate::track_icons::{draw_icon, track_icon};
-use crate::widgets::{stroke, BTN_BG, TEXT, TEXT_DIM};
-use crate::UiState;
-use egui::{
-    pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
+use crate::mixer::hw_mixer as hwm;
+use crate::mixer::{
+    channel_strip, fx_rows_for, rows, send_rows_for, Density, Meters, NameStyle, StripKey,
 };
+use crate::model::{Project, SoundFontUse, TrackKind, MAX_REGION_GAIN, MIN_REGION_GAIN};
+use crate::theme::{self, Face};
+use crate::track_icons::{draw_icon, track_icon};
+use crate::UiState;
+use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Sense, Shape, Stroke, Ui};
 use prowave_engine::FadeCurve;
 
-const PANEL_BG: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-const HEADER_BG: Color32 = Color32::from_rgb(0x42, 0x42, 0x42);
-const ROW_H: f32 = 20.0;
-const HEADER_H: f32 = 24.0;
-const LABEL_RIGHT: f32 = 104.0;
-const VALUE_LEFT: f32 = 112.0;
+/// The Inspector's panel (A.1: panel-inspector).
+const PANEL_BG: Color32 = Color32::from_rgb(0xe4, 0xdf, 0xd4);
+const ROW_H: f32 = 28.0;
+/// Value fields: their height inside a row.
+const FIELD_H: f32 = 22.0;
+const HEADER_H: f32 = 34.0;
+const LABEL_RIGHT: f32 = 90.0;
+const VALUE_LEFT: f32 = 98.0;
 const STRIPS_MIN_H: f32 = 430.0;
 
 /// Fade lengths move in 1/16 notes.
@@ -112,7 +116,18 @@ fn note_name(n: u8) -> String {
     format!("{}{}", NAMES[(n % 12) as usize], n as i32 / 12 - 2)
 }
 
-/// Disclosure triangle + "Title: name" section header. Returns true when toggled.
+/// The print of a row: ink2, or the print colour for a row that does nothing here (the
+/// material stays; only the print fades).
+fn label_ink(enabled: bool) -> Color32 {
+    if enabled {
+        theme::INK2
+    } else {
+        theme::PRINT
+    }
+}
+
+/// A section head (A.2: inspector section heads): a disclosure triangle, the title in
+/// silkscreen ink, the name in print colour, and a rule under it. Returns true when toggled.
 fn section_header(
     ui: &Ui,
     g: &Painter,
@@ -123,97 +138,108 @@ fn section_header(
     name: &str,
 ) -> bool {
     let resp = ui.interact(r, id(("section", key)), Sense::click());
-    g.rect_filled(r, 0.0, HEADER_BG);
-    g.line_segment(
-        [r.left_bottom(), r.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x2a)),
-    );
-    let c = pos2(r.left() + 12.0, r.center().y);
+    if resp.hovered() {
+        g.rect_filled(r, 0.0, Color32::from_black_alpha(8));
+    }
+    let cy = r.center().y - 2.0;
+    let c = pos2(r.left() + 17.0, cy);
     let tri = if open {
         vec![
-            c + vec2(-4.0, -2.0),
-            c + vec2(4.0, -2.0),
-            c + vec2(0.0, 3.0),
+            c + vec2(-5.0, -3.0),
+            c + vec2(5.0, -3.0),
+            c + vec2(0.0, 4.0),
         ]
     } else {
         vec![
-            c + vec2(-2.0, -4.0),
-            c + vec2(3.0, 0.0),
-            c + vec2(-2.0, 4.0),
+            c + vec2(-3.0, -5.0),
+            c + vec2(4.0, 0.0),
+            c + vec2(-3.0, 5.0),
         ]
     };
-    g.add(Shape::convex_polygon(tri, TEXT, Stroke::NONE));
-    let t = g.text(
-        pos2(r.left() + 24.0, r.center().y),
+    g.add(Shape::convex_polygon(tri, theme::INK, Stroke::NONE));
+    let title = title.trim_end_matches(':');
+    let t = hw::silk(
+        g,
+        pos2(r.left() + 30.0, cy),
         Align2::LEFT_CENTER,
         title,
-        FontId::proportional(12.5),
-        TEXT_DIM,
+        14.0,
+        theme::INK,
     );
-    let name_left = t.right() + 5.0;
-    let font = FontId::proportional(12.5);
-    let shown = crate::mixer::elide(g, name, &font, r.right() - 8.0 - name_left);
-    g.text(
-        pos2(name_left, r.center().y),
+    let name_left = t.right() + 10.0;
+    // The name: a size smaller and tighter, then shortened word by word, before it is cut.
+    let fitted = hwm::fit_steps(
+        g,
+        &name.to_uppercase(),
+        Face::Silk,
+        &[(14.0, 0.15), (13.0, 0.08), (12.0, 0.04)],
+        r.right() - 12.0 - name_left,
+    );
+    hwm::text_t(
+        g,
+        pos2(name_left, cy),
         Align2::LEFT_CENTER,
-        shown,
-        font,
-        TEXT,
+        &fitted.text,
+        Face::Silk,
+        fitted.size,
+        fitted.track,
+        theme::PRINT,
+    );
+    g.hline(
+        r.left() + 14.0..=r.right() - 14.0,
+        r.bottom() - 4.0,
+        Stroke::new(1.0, theme::INK2.gamma_multiply(0.35)),
     );
     resp.clicked()
 }
 
+/// A row label: silkscreen caps, right-aligned against the value column (shrunk to fit).
 fn label(g: &Painter, panel_left: f32, y: f32, text: &str, enabled: bool) {
-    let col = if enabled {
-        Color32::from_gray(0xb0)
-    } else {
-        Color32::from_gray(0x6c)
-    };
-    g.text(
+    let text = text.trim_end_matches(':');
+    let room = LABEL_RIGHT - 6.0;
+    let mut size = 11.0;
+    while size > 8.5 && hw::silk_width(g, text, size) > room {
+        size -= 0.5;
+    }
+    hw::silk(
+        g,
         pos2(panel_left + LABEL_RIGHT, y + ROW_H / 2.0),
         Align2::RIGHT_CENTER,
         text,
-        FontId::proportional(11.5),
-        col,
+        size,
+        label_ink(enabled),
     );
 }
 
-/// Small checkbox. Returns true when toggled.
+/// The rect of a value field in the row at `y`, from `x`, `w` wide.
+fn field_rect(x: f32, y: f32, w: f32) -> Rect {
+    Rect::from_min_size(pos2(x, y + (ROW_H - FIELD_H) / 2.0), vec2(w, FIELD_H))
+}
+
+/// An on/off value: a small bone key with its LED, latched while on. Returns true when toggled.
 fn checkbox(ui: &Ui, g: &Painter, at: Pos2, key: &str, value: bool, enabled: bool) -> bool {
-    let r = Rect::from_min_size(at + vec2(0.0, (ROW_H - 12.0) / 2.0), vec2(12.0, 12.0));
-    let clicked = enabled
-        && ui
-            .interact(r.expand(3.0), id(("check", key)), Sense::click())
-            .clicked();
-    let border = if enabled {
-        Color32::from_gray(0x8a)
-    } else {
-        Color32::from_gray(0x55)
-    };
-    g.rect_filled(
-        r,
-        2.5,
-        if value {
-            crate::widgets::BLUE
-        } else {
-            Color32::from_gray(0x2c)
-        },
-    );
-    g.rect_stroke(r, 2.5, Stroke::new(1.0, border), StrokeKind::Inside);
-    if value {
-        g.add(Shape::line(
-            vec![
-                r.left_center() + vec2(2.5, 0.0),
-                r.center_bottom() + vec2(-1.0, -3.0),
-                r.right_top() + vec2(-2.5, 3.0),
-            ],
-            Stroke::new(1.6, Color32::WHITE),
-        ));
+    let r = Rect::from_min_size(at + vec2(0.0, (ROW_H - FIELD_H) / 2.0), vec2(36.0, FIELD_H));
+    if !enabled {
+        let face = hw::paint_key(g, r, Cap::Bone, false, false);
+        hw::led_sized(g, face.center(), 3.0, false);
+        return false;
     }
-    clicked
+    let (resp, face) = hw::key(
+        ui,
+        g,
+        r,
+        id(("check", key)),
+        Cap::Bone,
+        value,
+        None,
+        hw::Legend::None,
+    );
+    hw::led_sized(g, face.center(), 3.0, value);
+    resp.clicked()
 }
 
-/// Compact popup ("Off ⇕"). Disabled ones are drawn dim and never open.
+/// A dropdown: a dark value field with the stepper. Disabled ones are drawn dim and never
+/// open.
 fn popup(
     ui: &Ui,
     g: &Painter,
@@ -222,48 +248,15 @@ fn popup(
     text: &str,
     enabled: bool,
 ) -> Option<egui::Response> {
-    let col = if enabled {
-        TEXT
-    } else {
-        Color32::from_gray(0x70)
-    };
-    let resp = enabled.then(|| ui.interact(r, id(("popup", key)), Sense::click()));
-    let hovered = resp.as_ref().is_some_and(|r| r.hovered());
-    g.rect_filled(
-        r,
-        3.0,
-        if hovered {
-            Color32::from_gray(0x5c)
-        } else if enabled {
-            BTN_BG
-        } else {
-            Color32::from_gray(0x44)
-        },
-    );
-    g.text(
-        pos2(r.left() + 6.0, r.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        FontId::proportional(11.5),
-        col,
-    );
-    let c = pos2(r.right() - 8.0, r.center().y);
-    g.add(Shape::line(
-        vec![
-            c + vec2(-2.5, -1.5),
-            c + vec2(0.0, -4.0),
-            c + vec2(2.5, -1.5),
-        ],
-        stroke(col),
-    ));
-    g.add(Shape::line(
-        vec![c + vec2(-2.5, 1.5), c + vec2(0.0, 4.0), c + vec2(2.5, 1.5)],
-        stroke(col),
-    ));
-    resp
+    if !enabled {
+        hwm::paint_field_ink(g, r, text, true, hwm::FIELD_DIM);
+        return None;
+    }
+    Some(hw::field(ui, g, r, id(("popup", key)), text, true))
 }
 
-/// Logic-style value field: drag up/down to change, double-click to reset.
+/// A value field: drag up/down to change, double-click to reset. An empty value shows the
+/// field's dash.
 #[allow(clippy::too_many_arguments)]
 fn drag_value(
     ui: &Ui,
@@ -276,23 +269,17 @@ fn drag_value(
     text: String,
     enabled: bool,
 ) -> Option<i32> {
-    let col = if enabled {
-        TEXT
+    let shown = if text.is_empty() {
+        "—".to_string()
     } else {
-        Color32::from_gray(0x70)
+        text
     };
-    g.rect_filled(r, 3.0, Color32::from_gray(0x30));
-    g.text(
-        pos2(r.left() + 6.0, r.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        FontId::proportional(11.5),
-        col,
-    );
     if !enabled {
+        hwm::paint_field_ink(g, r, &shown, false, hwm::FIELD_DIM);
         return None;
     }
     let resp = ui.interact(r, id(("drag", key)), Sense::click_and_drag());
+    hw::paint_field(g, r, &shown, false, resp.hovered() || resp.dragged());
     if resp.double_clicked() {
         return Some(reset);
     }
@@ -324,6 +311,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     ui.allocate_rect(panel, Sense::hover());
     let g = ui.painter_at(panel);
     g.rect_filled(panel, 0.0, PANEL_BG);
+    hw::seam_v(&g, panel.right() - 3.0, panel.y_range());
     let left = panel.left();
     let w = panel.width();
 
@@ -356,7 +344,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     ) {
         s.inspector.region_open = !s.inspector.region_open;
     }
-    y += HEADER_H + 4.0;
+    y += HEADER_H + 2.0;
     if s.inspector.region_open {
         let is_audio = sel.is_some_and(|(t, r)| {
             p.tracks[t].regions[r].audio.is_some() || p.tracks[t].kind == TrackKind::Audio
@@ -379,14 +367,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             .iter()
             .find(|(_, q)| *q == params.quantize)
             .map_or(tr("Off"), |(t, _)| tr(t));
-        if let Some(resp) = popup(
-            ui,
-            &g,
-            Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
-            "quantize",
-            q_text,
-            midi,
-        ) {
+        if let Some(resp) = popup(ui, &g, field_rect(vx, y, vw), "quantize", q_text, midi) {
             egui::Popup::menu(&resp).show(|ui| {
                 for (t, q) in QUANTIZE {
                     if ui.selectable_label(params.quantize == q, tr(t)).clicked() {
@@ -398,7 +379,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         }
         y += ROW_H;
         label(&g, left, y, tr("Transpose:"), midi);
-        let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+        let r = field_rect(vx, y, vw);
         if let Some(v) = drag_value(
             ui,
             &g,
@@ -414,7 +395,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         }
         y += ROW_H;
         label(&g, left, y, tr("Velocity:"), midi);
-        let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+        let r = field_rect(vx, y, vw);
         if let Some(v) = drag_value(
             ui,
             &g,
@@ -438,7 +419,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         });
         let bpm = p.tempo_at(start_beat);
         label(&g, left, y, tr("Gain:"), audio);
-        let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+        let r = field_rect(vx, y, vw);
         if let Some(v) = drag_value(
             ui,
             &g,
@@ -468,7 +449,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 params.fade_out
             };
             label(&g, left, y, name, audio);
-            let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+            let r = field_rect(vx, y, vw);
             if let Some(v) = drag_value(
                 ui,
                 &g,
@@ -497,7 +478,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         if let Some(resp) = popup(
             ui,
             &g,
-            Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
+            field_rect(vx, y, vw),
             "fade_curve",
             curve_name,
             audio,
@@ -548,20 +529,18 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     ) {
         s.inspector.track_open = !s.inspector.track_open;
     }
-    y += HEADER_H + 4.0;
+    y += HEADER_H + 2.0;
     if s.inspector.track_open && ti < p.tracks.len() {
         let vx = left + VALUE_LEFT;
         let vw = w - VALUE_LEFT - 10.0;
         let audio = p.tracks[ti].kind == TrackKind::Audio;
         let mut tp = p.tracks[ti].params;
 
-        label(&g, left, y, tr("Icon:"), true);
-        draw_icon(
-            &g,
-            Rect::from_min_size(pos2(vx, y + 1.0), vec2(26.0, 26.0)),
-            track_icon(&p.tracks[ti]),
-        );
-        y += 30.0;
+        let well = Rect::from_min_size(pos2(vx, y + 2.0), vec2(34.0, 34.0));
+        label(&g, left, y + 5.0, tr("Icon:"), true);
+        hw::recess(&g, well, 4.0);
+        draw_icon(&g, well.shrink(5.0), track_icon(&p.tracks[ti]));
+        y += 40.0;
         if !audio {
             let external = p.tracks[ti].kind == TrackKind::ExternalMidi;
             if external {
@@ -571,14 +550,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                     .midi_port
                     .clone()
                     .unwrap_or_else(|| tr("No Port").to_string());
-                if let Some(resp) = popup(
-                    ui,
-                    &g,
-                    Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
-                    "midi_out_port",
-                    &port,
-                    true,
-                ) {
+                if let Some(resp) =
+                    popup(ui, &g, field_rect(vx, y, vw), "midi_out_port", &port, true)
+                {
                     egui::Popup::menu(&resp).show(|ui| {
                         let current = p.tracks[ti].midi_port.clone();
                         if ui
@@ -601,7 +575,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 }
                 y += ROW_H;
                 label(&g, left, y, tr("MIDI Out Channel:"), true);
-                let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+                let r = field_rect(vx, y, vw);
                 let channel = p.tracks[ti].midi_channel.clamp(1, 16);
                 if let Some(v) = drag_value(
                     ui,
@@ -624,7 +598,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 if let Some(v) = drag_value(
                     ui,
                     &g,
-                    Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
+                    field_rect(vx, y, vw),
                     "midi_out_program",
                     program,
                     (0, 128),
@@ -644,7 +618,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 if let Some(v) = drag_value(
                     ui,
                     &g,
-                    Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0)),
+                    field_rect(vx, y, vw),
                     "midi_out_bank",
                     bank,
                     (0, 16384),
@@ -668,7 +642,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                     None => tr("None").to_string(),
                     Some(sf) => soundfont_label(sf),
                 };
-                let rect = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+                let rect = field_rect(vx, y, vw);
                 if let Some(resp) = popup(ui, &g, rect, "soundfont", &shown, true) {
                     egui::Popup::menu(&resp).show(|ui| {
                         if ui.button(tr("Choose SoundFont…")).clicked() {
@@ -728,7 +702,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 y += ROW_H;
             }
             label(&g, left, y, tr("Transpose:"), true);
-            let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+            let r = field_rect(vx, y, vw);
             if let Some(v) = drag_value(
                 ui,
                 &g,
@@ -744,7 +718,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             }
             y += ROW_H;
             label(&g, left, y, tr("Velocity:"), true);
-            let r = Rect::from_min_size(pos2(vx, y + 2.0), vec2(vw, ROW_H - 4.0));
+            let r = field_rect(vx, y, vw);
             if let Some(v) = drag_value(
                 ui,
                 &g,
@@ -762,8 +736,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             let half = (vw - 4.0) / 2.0;
             label(&g, left, y, tr("Key Limit:"), true);
             let (lo, hi) = tp.key_limit;
-            let r1 = Rect::from_min_size(pos2(vx, y + 2.0), vec2(half, ROW_H - 4.0));
-            let r2 = Rect::from_min_size(pos2(vx + half + 4.0, y + 2.0), vec2(half, ROW_H - 4.0));
+            let r1 = field_rect(vx, y, half);
+            let r2 = field_rect(vx + half + 4.0, y, half);
             if let Some(v) = drag_value(
                 ui,
                 &g,
@@ -793,8 +767,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             y += ROW_H;
             label(&g, left, y, tr("Vel Limit:"), true);
             let (lo, hi) = tp.vel_limit;
-            let r1 = Rect::from_min_size(pos2(vx, y + 2.0), vec2(half, ROW_H - 4.0));
-            let r2 = Rect::from_min_size(pos2(vx + half + 4.0, y + 2.0), vec2(half, ROW_H - 4.0));
+            let r1 = field_rect(vx, y, half);
+            let r2 = field_rect(vx + half + 4.0, y, half);
             if let Some(v) = drag_value(
                 ui,
                 &g,
@@ -834,12 +808,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     let strips_h = (panel.bottom() - y - 4.0).max(STRIPS_MIN_H);
     if !p.tracks.is_empty() {
         let keys = [StripKey::Track(ti), StripKey::StereoOut];
-        let r = rows(y, fx_rows_for(p, &keys), send_rows_for(p, &keys));
-        let sw = (w - 12.0) / 2.0;
+        let (fx, sends) = (fx_rows_for(p, &keys), send_rows_for(p, &keys));
+        let sw = (w - 3.0 - 10.0 - 6.0 - 6.0) / 2.0;
+        let d = Density::fit(strips_h, sw, fx, sends);
+        let r = rows(y, fx, sends, d);
         for (n, key) in keys.iter().enumerate() {
             let strip = Rect::from_min_size(
-                pos2(left + 4.0 + n as f32 * (sw + 4.0), y),
-                vec2(sw, strips_h),
+                pos2(left + 8.0 + n as f32 * (sw + 6.0), y),
+                vec2(sw, strips_h - 6.0),
             );
             channel_strip(
                 ui,
@@ -915,5 +891,45 @@ mod tests {
             Some(19),
             "drawing the row changes nothing"
         );
+    }
+
+    /// Where the pictures go: `PROWAVE_SHOT_DIR`, else a folder in the temp directory.
+    fn shot_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::var_os("PROWAVE_SHOT_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("prowave-mixer"));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(name)
+    }
+
+    /// The Inspector with a region selected, both sections open, and its two strips.
+    #[test]
+    #[ignore = "pictures"]
+    fn inspector_pictures() {
+        for (name, track_open) in [("inspector.png", false), ("inspector-track.png", true)] {
+            let mut p = Project::demo();
+            p.selected_track = 0;
+            let mut s = UiState::new();
+            s.tracks.select_only(0, 0);
+            s.inspector.track_open = track_open;
+            let db = |x: f32| 10f32.powf(x / 20.0);
+            let meters = Meters {
+                tracks: vec![(db(-6.6), db(-7.9)); p.tracks.len()],
+                master: (db(-2.4), db(-3.0)),
+                ..Meters::default()
+            };
+            crate::ui_test::render_png(
+                244.0,
+                980.0,
+                2.0,
+                theme::BONE,
+                |ui| {
+                    theme::apply(ui.ctx());
+                    show(ui, &mut p, &mut s, &meters)
+                },
+                &shot_path(name),
+            )
+            .unwrap();
+        }
     }
 }

@@ -6,15 +6,15 @@
 //! to the audio thread, where [`AuInstance::process`] renders one block. The audio is 32-bit
 //! float, two non-interleaved channels, at the engine's sample rate.
 use objc2_audio_toolbox::{
-    kAudioUnitProperty_Latency, kAudioUnitProperty_MaximumFramesPerSlice,
-    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global,
-    kAudioUnitScope_Input, kAudioUnitScope_Output, kAudioUnitType_Effect,
-    kAudioUnitType_MusicDevice, kAudioUnitType_MusicEffect, AURenderCallbackStruct, AudioComponent,
-    AudioComponentCopyName, AudioComponentDescription, AudioComponentFindNext,
-    AudioComponentGetDescription, AudioComponentInstanceDispose, AudioComponentInstanceNew,
-    AudioUnit, AudioUnitGetProperty, AudioUnitInitialize, AudioUnitRender,
-    AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitSetProperty, AudioUnitUninitialize,
-    MusicDeviceMIDIEvent,
+    kAudioUnitProperty_HostCallbacks, kAudioUnitProperty_Latency,
+    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_SetRenderCallback,
+    kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
+    kAudioUnitScope_Output, kAudioUnitType_Effect, kAudioUnitType_MusicDevice,
+    kAudioUnitType_MusicEffect, AURenderCallbackStruct, AudioComponent, AudioComponentCopyName,
+    AudioComponentDescription, AudioComponentFindNext, AudioComponentGetDescription,
+    AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioUnit, AudioUnitGetProperty,
+    AudioUnitInitialize, AudioUnitRender, AudioUnitRenderActionFlags, AudioUnitReset,
+    AudioUnitSetProperty, AudioUnitUninitialize, MusicDeviceMIDIEvent,
 };
 use objc2_core_audio_types::{
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked,
@@ -25,6 +25,8 @@ use objc2_core_foundation::{CFRetained, CFString};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
+use crate::au_host_time::HostTime;
+use crate::plugin_track::BlockTransport;
 use crate::plugin_window_layout::WindowLayout;
 
 /// What an Audio Unit is for.
@@ -193,6 +195,14 @@ pub struct AuInstance {
     errors: u64,
     /// The unit renders one channel; it is copied to the other.
     mono_out: bool,
+    /// The tempo and position its host callbacks answer with (the unit holds its address).
+    host: Box<HostTime>,
+    /// The transport of the current block, and the frames rendered since it came.
+    transport: BlockTransport,
+    rendered: i64,
+    sample_rate: f64,
+    /// Whether the unit took the host callbacks.
+    host_callbacks: bool,
 }
 
 // SAFETY: an Audio Unit may be used from another thread than the one that made it, as long
@@ -338,7 +348,22 @@ impl AuInstance {
                 latency_s: 0.0,
                 errors: 0,
                 mono_out: false,
+                host: Box::new(HostTime::new(f64::from(sample_rate))),
+                transport: BlockTransport::default(),
+                rendered: 0,
+                sample_rate: f64::from(sample_rate),
+                host_callbacks: false,
             };
+            // Tempo, position and transport for tempo-synced arpeggiators, LFOs and delays.
+            // A unit that does not ask for them refuses the property; that is fine.
+            let cb = au.host.callbacks();
+            au.host_callbacks = set_prop(
+                unit,
+                kAudioUnitProperty_HostCallbacks,
+                kAudioUnitScope_Global,
+                0,
+                &cb,
+            ) == 0;
             let fmt = stereo_format(f64::from(sample_rate));
             let frames = max_frames as u32;
             set_prop(
@@ -467,6 +492,27 @@ impl AuInstance {
         }
     }
 
+    /// Whether the unit took the host callbacks (tempo, position, transport).
+    pub fn has_host_callbacks(&self) -> bool {
+        self.host_callbacks
+    }
+
+    /// Host callback calls the unit has made so far (diagnostics: does it follow the tempo).
+    pub fn host_callback_calls(&self) -> u32 {
+        self.host.calls()
+    }
+
+    /// Where the transport stands at the start of the next block: what the unit's host
+    /// callbacks answer while it renders (the snapshot a VST 3 plug-in gets as its process
+    /// context). Audio thread, no allocation.
+    pub fn set_transport(&mut self, t: &BlockTransport) {
+        if crate::au_host_time::discontinuous(&self.transport, t, self.rendered) {
+            self.host.mark_changed();
+        }
+        self.transport = *t;
+        self.rendered = 0;
+    }
+
     /// Renders one block: `input` (an effect's; ignored by instruments) into `out`. Blocks
     /// longer than the unit was opened for are done in pieces. Audio thread, no allocation.
     pub fn process(&mut self, input: (&[f32], &[f32]), out: (&mut [f32], &mut [f32])) {
@@ -474,6 +520,13 @@ impl AuInstance {
         let mut done = 0;
         while done < frames {
             let n = (frames - done).min(self.max_frames);
+            // Each piece answers with its own start (the block's, `rendered` frames on).
+            let t = crate::plugin_track::advance(
+                self.transport,
+                self.rendered as u64,
+                self.sample_rate as f32,
+            );
+            self.host.store(&t);
             if self.kind != AuKind::Instrument {
                 let (il, ir) = input;
                 for i in 0..n {
@@ -483,6 +536,7 @@ impl AuInstance {
                 self.feed.frames = n;
             }
             let ok = self.render(n);
+            self.rendered += n as i64;
             for i in 0..n {
                 out.0[done + i] = if ok { self.out_l[i] } else { 0.0 };
                 out.1[done + i] = if ok { self.out_r[i] } else { 0.0 };
@@ -586,6 +640,88 @@ mod tests {
         let input = vec![0.5f32; 256];
         fx.process((&input, &input), (&mut l[..256], &mut r[..256]));
         assert_eq!(fx.errors(), 0);
+    }
+
+    /// Apple's units take the host callbacks; the ones registered answer with the transport
+    /// of the block being rendered. Also lists which of Apple's units ask for it.
+    #[test]
+    fn apple_units_take_the_host_callbacks() {
+        use objc2_audio_toolbox::HostCallbackInfo;
+        let delay = find("aufx:dely:appl").expect("AUDelay is on every Mac");
+        let mut fx = AuInstance::new(&delay, 48_000, 256).expect("opens");
+        assert!(fx.has_host_callbacks());
+        let t = BlockTransport {
+            playing: true,
+            recording: false,
+            sample_pos: 141_000,
+            beat: 5.5,
+            bar_start_beat: 4.0,
+            tempo: 117.02,
+            sig: (4, 4),
+            cycle: None,
+        };
+        fx.set_transport(&t);
+        let input = vec![0.25f32; 256];
+        let (mut l, mut r) = (vec![0f32; 256], vec![0f32; 256]);
+        assert_no_alloc::assert_no_alloc(|| fx.process((&input, &input), (&mut l, &mut r)));
+        // What the unit holds is what was registered.
+        // SAFETY: a zeroed HostCallbackInfo is valid (null pointers); the unit writes it.
+        let mut cb: HostCallbackInfo = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<HostCallbackInfo>() as u32;
+        // SAFETY: `cb` and `size` live across the call.
+        let s = unsafe {
+            AudioUnitGetProperty(
+                fx.unit,
+                kAudioUnitProperty_HostCallbacks,
+                kAudioUnitScope_Global,
+                0,
+                NonNull::from(&mut cb).cast(),
+                NonNull::from(&mut size),
+            )
+        };
+        assert_eq!(s, 0);
+        assert_eq!(cb.hostUserData, fx.host.callbacks().hostUserData);
+        let (mut beat, mut tempo) = (0.0, 0.0);
+        // SAFETY: the registered callback with its own user data and local outputs.
+        let s =
+            unsafe { cb.beatAndTempoProc.expect("set")(cb.hostUserData, &mut beat, &mut tempo) };
+        assert_eq!(s, 0);
+        // The last piece rendered started at the block's start: beat 5.5 at 117.02.
+        assert_eq!((beat, tempo), (5.5, 117.02));
+        // A block twice as long as the unit renders at once: the second piece is 256 frames on.
+        let long = vec![0.25f32; 512];
+        let (mut l2, mut r2) = (vec![0f32; 512], vec![0f32; 512]);
+        fx.set_transport(&BlockTransport {
+            sample_pos: t.sample_pos + 256,
+            beat: t.beat + 256.0 / 48_000.0 * 117.02 / 60.0,
+            ..t
+        });
+        fx.process((&long, &long), (&mut l2, &mut r2));
+        // SAFETY: as above.
+        unsafe {
+            cb.beatAndTempoProc.expect("set")(cb.hostUserData, &mut beat, std::ptr::null_mut())
+        };
+        let want = t.beat + 512.0 / 48_000.0 * 117.02 / 60.0;
+        assert!((beat - want).abs() < 1e-9, "{beat} vs {want}");
+
+        // Which of Apple's own units ask (none has to: AUDelay has no tempo sync).
+        let mut asked = Vec::new();
+        for info in list().iter().filter(|i| i.id.ends_with(":appl")) {
+            let Ok(mut u) = AuInstance::new(info, 48_000, 512) else {
+                continue;
+            };
+            u.set_transport(&t);
+            u.midi(0x90, 60, 100, 0);
+            let (mut l, mut r) = (vec![0f32; 512], vec![0f32; 512]);
+            let input = vec![0.1f32; 512];
+            for _ in 0..4 {
+                u.process((&input, &input), (&mut l, &mut r));
+            }
+            if u.host_callback_calls() > 0 {
+                asked.push(format!("{} ({})", info.label(), u.host_callback_calls()));
+            }
+        }
+        eprintln!("Apple units that asked for the host's tempo: {asked:?}");
     }
 
     #[test]
@@ -1173,6 +1309,32 @@ impl AuHandle {
             }
             NonNull::new(q.outString.cast_mut())
                 .map(|n| CFRetained::<CFString>::from_raw(n).to_string())
+        }
+    }
+
+    /// Moves parameter `id` to `value` as a hand on its knob does (`AUParameterSet`): the unit
+    /// takes it, and its window and the parameter listeners (the automation watch) hear it.
+    /// UI thread.
+    pub fn edit_parameter(&self, id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        let param = objc2_audio_toolbox::AudioUnitParameter {
+            mAudioUnit: self.0,
+            mParameterID: id,
+            mScope: kAudioUnitScope_Global,
+            mElement: 0,
+        };
+        // SAFETY: the parameter lives across the call; null sender and object notify every
+        // listener.
+        unsafe {
+            objc2_audio_toolbox::AUParameterSet(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                NonNull::from(&param),
+                value,
+                0,
+            );
         }
     }
 

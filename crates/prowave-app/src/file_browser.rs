@@ -195,23 +195,159 @@ pub fn show(ui: &mut egui::Ui, s: &mut crate::UiState) {
             }
         }
     }
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.strong(match tab {
-            Tab::Loops => tr("Loops"),
-            Tab::Files => tr("All Files"),
-        });
-    });
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        if ui
-            .add_enabled(dir.parent().is_some(), egui::Button::new(tr("Up")))
-            .clicked()
-        {
-            v.dir = dir.parent().map(Path::to_path_buf);
+    pane(ui, tab, &dir, v);
+    let (enter, add) = rows(ui, tab, v);
+    if enter.is_some() {
+        v.dir = enter;
+        v.search.clear();
+    }
+    s.open_paths.extend(add);
+}
+
+/// The side of the pane's padding.
+const PAD: f32 = 12.0;
+/// A list row, and one with a line of tags under the name.
+const ROW_H: f32 = 30.0;
+const ROW_TAGS_H: f32 = 46.0;
+
+/// `path` as the LCD shows it: whole when it fits `room`, else its last folders after "…/".
+fn path_tail(g: &egui::Painter, path: &Path, size: f32, room: f32) -> String {
+    use crate::hw;
+    use crate::theme::Face;
+    let full = path.display().to_string();
+    let w = |s: &str| {
+        hw::galley(g, s, Face::Lcd, size, crate::theme::INK)
+            .size()
+            .x
+    };
+    if w(&full) <= room {
+        return full;
+    }
+    let parts: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    for skip in 1..parts.len() {
+        let tail = format!("…/{}", parts[skip..].join("/"));
+        if w(&tail) <= room {
+            return tail;
         }
-        if tab == Tab::Loops && ui.button(tr("Choose Folder…")).clicked() {
+    }
+    hw::fit(
+        g,
+        parts.last().map_or("", String::as_str),
+        Face::Lcd,
+        size,
+        room,
+    )
+}
+
+/// The top of the pane: the title strip with the number of entries on a small LCD, the Up and
+/// Choose Folder keys, the search field and the folder on show.
+fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
+    use crate::hw::{self, Cap};
+    use crate::midi_monitor::hw_utilities as hu;
+    use crate::theme::{self, Face};
+    use egui::{pos2, vec2, Align2, Rect, Sense};
+    let g = ui.painter().clone();
+    let all = ui.max_rect();
+    hw::chassis(&g, all);
+    hw::seam_v(&g, all.left(), all.y_range());
+    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    let w = ui.available_width();
+    let id = egui::Id::unique(("browser", tab == Tab::Loops));
+
+    // Title strip.
+    let (head, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+    hw::gradient(&g, head, 0.0, theme::BONE_TOP, theme::BONE);
+    let title = match tab {
+        Tab::Loops => tr("Loops"),
+        Tab::Files => tr("All Files"),
+    };
+    let t = hw::text(
+        &g,
+        pos2(head.left() + PAD + 2.0, head.center().y),
+        Align2::LEFT_CENTER,
+        &title.to_uppercase(),
+        Face::SilkX,
+        14.0,
+        theme::INK,
+    );
+    g.rect_filled(
+        Rect::from_center_size(pos2(t.right() + 16.0, head.center().y), vec2(9.0, 9.0)),
+        1.0,
+        theme::ORANGE,
+    );
+    let count = v
+        .entries
+        .iter()
+        .filter(|e| {
+            entry_matches(
+                &e.name,
+                v.tags.get(&e.path).and_then(Option::as_ref),
+                &v.search,
+            )
+        })
+        .count()
+        .min(9999);
+    let lr = Rect::from_min_size(
+        pos2(head.right() - PAD - 58.0, head.top() + 8.0),
+        vec2(58.0, 24.0),
+    );
+    hw::lcd_glass(&g, lr);
+    let digits = format!("{count:>4}");
+    let dw = hw::seg_width(&digits, 13.0);
+    hw::seg(
+        &g,
+        pos2(lr.right() - 7.0 - dw, lr.top() + 5.5),
+        &digits,
+        13.0,
+        theme::LCD_INK,
+        true,
+    );
+    hw::seam_h(&g, head.x_range(), head.bottom() - 2.0);
+
+    // Up, and the loop folder.
+    let (keys, _) = ui.allocate_exact_size(vec2(w, 46.0), Sense::hover());
+    let up = Rect::from_min_size(pos2(keys.left() + PAD, keys.top() + 9.0), vec2(64.0, 28.0));
+    let can_up = dir.parent().is_some();
+    let resp = hu::key(ui, up, id.with("up"), Cap::Bone, false, None, "", can_up);
+    {
+        let mut p = g.clone();
+        if !can_up {
+            p.set_opacity(0.42);
+        }
+        hu::icon_up(&p, pos2(up.left() + 15.0, up.center().y), theme::INK);
+        hw::text(
+            &p,
+            pos2(up.left() + 27.0, up.center().y),
+            Align2::LEFT_CENTER,
+            &tr("Up").to_uppercase(),
+            Face::Bold,
+            11.0,
+            theme::INK,
+        );
+    }
+    if resp.clicked() {
+        v.dir = dir.parent().map(Path::to_path_buf);
+    }
+    if tab == Tab::Loops {
+        let r = Rect::from_min_max(
+            pos2(up.right() + 8.0, up.top()),
+            pos2(keys.right() - PAD, up.bottom()),
+        );
+        if hu::key(
+            ui,
+            r,
+            id.with("choose"),
+            Cap::Bone,
+            false,
+            None,
+            tr("Choose Folder…"),
+            true,
+        )
+        .clicked()
+        {
             if let Some(picked) = rfd::FileDialog::new().pick_folder() {
                 if let Some(file) = loop_folder_file() {
                     let saved = file
@@ -225,57 +361,150 @@ pub fn show(ui: &mut egui::Ui, s: &mut crate::UiState) {
                 v.dir = Some(picked);
             }
         }
-    });
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
+    }
+
+    // Search.
+    let (row, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+    let label = tr("Search");
+    let lw = hw::silk_width(&g, label, 11.0).min(70.0);
+    hw::silk(
+        &g,
+        pos2(row.left() + PAD, row.center().y - 2.0),
+        Align2::LEFT_CENTER,
+        label,
+        11.0,
+        theme::INK2,
+    );
+    let field = Rect::from_min_max(
+        pos2(row.left() + PAD + lw + 10.0, row.top() + 2.0),
+        pos2(row.right() - PAD, row.top() + 26.0),
+    );
+    hw::paint_field(&g, field, "", false, false);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(field.shrink2(vec2(4.0, 3.0))));
+    crate::hw_sampler::fields(&mut child, |ui| {
         ui.add(
             egui::TextEdit::singleline(&mut v.search)
-                .hint_text(tr("Search"))
-                .desired_width(WIDTH - 24.0),
+                .frame(egui::Frame::NONE)
+                .font(theme::font(Face::Bold, 11.0))
+                .text_color(theme::ON_DARK)
+                .desired_width(field.width() - 8.0),
         );
     });
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.small(dir.display().to_string());
-    });
-    ui.separator();
+
+    // The folder on show, on an LCD.
+    let (row, _) = ui.allocate_exact_size(vec2(w, 50.0), Sense::hover());
+    let glass = Rect::from_min_max(
+        pos2(row.left() + PAD, row.top() + 6.0),
+        pos2(row.right() - PAD, row.bottom() - 8.0),
+    );
+    hw::lcd_glass(&g, glass);
+    hu::lcd_label(&g, glass.left_top() + vec2(7.0, 4.0), tr("Folder"));
+    let tail = path_tail(&g, dir, 10.5, glass.width() - 14.0);
+    hw::text(
+        &g,
+        pos2(glass.left() + 7.0, glass.bottom() - 10.0),
+        Align2::LEFT_CENTER,
+        &tail,
+        Face::Lcd,
+        10.5,
+        theme::LCD_INK,
+    );
+    let (sep, _) = ui.allocate_exact_size(vec2(w, 2.0), Sense::hover());
+    hw::seam_h(&g, sep.x_range(), sep.top());
+}
+
+/// The list: a recessed floor with a row a folder or a file. A click opens a folder, a
+/// double-click adds a file. Returns the folder to open and the file to add.
+fn rows(ui: &mut egui::Ui, tab: Tab, v: &BrowserView) -> (Option<PathBuf>, Option<PathBuf>) {
+    use crate::hw;
+    use crate::midi_monitor::hw_utilities as hu;
+    use crate::theme::{self, Face};
+    use egui::{pos2, vec2, Align2, Rect, Sense};
+    let g = ui.painter().clone();
+    let floor = Rect::from_min_max(ui.cursor().min, ui.max_rect().max);
+    g.rect_filled(floor, 0.0, theme::BONE2);
+    hw::inner_shadow(&g, floor, 0.0, 0.18);
     let mut enter = None;
     let mut add = None;
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for e in v.entries.iter().filter(|e| {
-            let tags = v.tags.get(&e.path).and_then(Option::as_ref);
-            entry_matches(&e.name, tags, &v.search)
-        }) {
-            let text = if e.folder {
-                format!("▸ {}", e.name)
-            } else {
-                e.name.clone()
-            };
-            let row = ui.selectable_label(false, text);
-            if e.folder && row.clicked() {
-                enter = Some(e.path.clone());
-            } else if !e.folder && row.double_clicked() {
-                add = Some(e.path.clone());
+    egui::ScrollArea::vertical()
+        .id_salt(("browser_rows", tab == Tab::Loops))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            ui.add_space(4.0);
+            for e in v.entries.iter().filter(|e| {
+                let tags = v.tags.get(&e.path).and_then(Option::as_ref);
+                entry_matches(&e.name, tags, &v.search)
+            }) {
+                let tags = v.tags.get(&e.path).and_then(Option::as_ref);
+                let chips: Vec<String> = tags.map(LoopTags::parts).unwrap_or_default();
+                let h = if chips.is_empty() { ROW_H } else { ROW_TAGS_H };
+                let (r, resp) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+                let g = ui.painter();
+                if resp.hovered() {
+                    g.rect_filled(r.shrink2(vec2(4.0, 1.0)), 3.0, theme::BONE_HI);
+                }
+                let top = Rect::from_min_size(r.min, vec2(r.width(), ROW_H));
+                let well = Rect::from_center_size(
+                    pos2(r.left() + PAD + 11.0, top.center().y),
+                    vec2(22.0, 22.0),
+                );
+                hu::well(g, well);
+                let icon = well.shrink(5.0);
+                let midi = crate::midi_file::is_midi_path(&e.path);
+                if e.folder {
+                    hu::icon_folder(g, icon, theme::INK);
+                } else if midi {
+                    hu::icon_midi(g, icon, theme::INK);
+                } else {
+                    hu::icon_wave(g, icon, theme::INK);
+                }
+                let name_x = well.right() + 9.0;
+                let right = r.right() - PAD - if e.folder { 14.0 } else { 0.0 };
+                let shown = hw::fit(g, &e.name, Face::Bold, 11.0, right - name_x);
+                hw::text(
+                    g,
+                    pos2(name_x, top.center().y),
+                    Align2::LEFT_CENTER,
+                    &shown,
+                    Face::Bold,
+                    11.0,
+                    theme::INK,
+                );
+                if e.folder {
+                    hu::arrow(
+                        g,
+                        pos2(r.right() - PAD - 4.0, top.center().y),
+                        8.0,
+                        true,
+                        theme::PRINT,
+                    );
+                }
+                let mut x = name_x;
+                for c in &chips {
+                    let cr = hu::tag(g, pos2(x, top.bottom() + 5.0), c, 8.5);
+                    x = cr.right() + 5.0;
+                    if x > r.right() - PAD - 30.0 {
+                        break;
+                    }
+                }
+                g.hline(
+                    r.left() + PAD..=r.right() - PAD,
+                    r.bottom() - 0.5,
+                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(22)),
+                );
+                if e.folder && resp.clicked() {
+                    enter = Some(e.path.clone());
+                } else if !e.folder && resp.double_clicked() {
+                    add = Some(e.path.clone());
+                }
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
             }
-            if let Some(line) = v
-                .tags
-                .get(&e.path)
-                .and_then(Option::as_ref)
-                .map(LoopTags::summary)
-                .filter(|line| !line.is_empty())
-            {
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.weak(egui::RichText::new(line).small());
-                });
-            }
-        }
-    });
-    if enter.is_some() {
-        v.dir = enter;
-        v.search.clear();
-    }
-    s.open_paths.extend(add);
+        });
+    (enter, add)
 }
 
 #[cfg(test)]
@@ -415,5 +644,54 @@ mod tests {
             .map(|e| e.name.as_str())
             .collect();
         assert_eq!(drums, ["Hits.caf"], "found by its category, not its name");
+    }
+
+    /// `loop-browser.png` and `all-files.png`: the pane on a folder of loops and files.
+    #[test]
+    #[ignore = "pictures"]
+    fn picture_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Loops").join("Funk Kit");
+        std::fs::create_dir_all(&root).unwrap();
+        for d in ["Drums", "Keys and Organs"] {
+            std::fs::create_dir(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("Groove Bass.caf"), loop_bytes("Bass")).unwrap();
+        std::fs::write(root.join("Tight Hats.caf"), loop_bytes("Drums")).unwrap();
+        for f in [
+            "Clav Stab 02.wav",
+            "Rhodes Chords in G Minor With Tape Wobble.aif",
+            "verse.mid",
+        ] {
+            std::fs::write(root.join(f), b"").unwrap();
+        }
+        for (tab, name) in [
+            (Tab::Loops, "loop-browser.png"),
+            (Tab::Files, "all-files.png"),
+        ] {
+            let mut s = crate::UiState::new();
+            s.browser.open = Some(tab);
+            s.browser.dir = Some(root.clone());
+            let mut h = crate::ui_test::Harness::new(WIDTH, 700.0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while (tab == Tab::Loops && s.browser.tags.len() < 2 || s.browser.listed.is_none())
+                && std::time::Instant::now() < deadline
+            {
+                h.frame(vec![], |ui| show(ui, &mut s));
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            crate::ui_test::render_png(
+                WIDTH,
+                700.0,
+                2.0,
+                crate::theme::BONE,
+                |ui| {
+                    crate::theme::apply(ui.ctx());
+                    show(ui, &mut s);
+                },
+                &crate::midi_monitor::hw_utilities::picture_path(name),
+            )
+            .unwrap();
+        }
     }
 }

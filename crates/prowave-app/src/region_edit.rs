@@ -86,6 +86,96 @@ pub(crate) fn paste_at_playhead(p: &mut Project, v: &mut TracksView, clip: &Regi
     p.song_rev += 1;
 }
 
+/// Whether every region of a drag (track, region, start) would find a track of its kind
+/// `rows` tracks further down (up when negative): audio regions go on audio tracks, the others
+/// on tracks that play MIDI.
+pub(crate) fn fits_rows(p: &Project, group: &[(usize, usize, f64)], rows: isize) -> bool {
+    group.iter().all(|&(t, r, _)| {
+        let Some(region) = p.tracks.get(t).and_then(|tr| tr.regions.get(r)) else {
+            return false;
+        };
+        let Some(to) = t.checked_add_signed(rows).and_then(|to| p.tracks.get(to)) else {
+            return false;
+        };
+        to.kind.has_regions() && region.audio.is_some() == (to.kind == TrackKind::Audio)
+    })
+}
+
+/// The bar (1-based) a region that started at `start` lands on, moved by `delta` quarter notes
+/// (never before the start of the song).
+pub(crate) fn landing_bar(p: &Project, start: f64, delta: f64) -> f32 {
+    p.beats_to_bar((start + delta).max(0.0)) as f32 + 1.0
+}
+
+/// The end of a Pointer-tool drag of regions, as in Logic. Each region of `group` (track,
+/// region, its start in quarter notes when the drag began) lands `delta` quarter notes later
+/// and `rows` tracks further down. With `copy` (Option held when the button is let go) the
+/// regions stay where they were and copies of them land there instead, the same in everything
+/// but their place. The automation under them goes along (Automation: Move with Regions), and
+/// with `xfade` (Drag: X-Fade) an audio region dropped over another crossfades with it.
+/// Returns where the landed regions are now, to be selected.
+pub(crate) fn drop_regions(
+    p: &mut Project,
+    auto: &crate::automation::AutoView,
+    group: &[(usize, usize, f64)],
+    delta: f64,
+    rows: isize,
+    copy: bool,
+    xfade: bool,
+) -> Vec<(usize, usize)> {
+    let group: Vec<(usize, usize, f64)> = group
+        .iter()
+        .copied()
+        .filter(|&(t, r, _)| p.tracks.get(t).is_some_and(|tr| r < tr.regions.len()))
+        .collect();
+    let rows = if fits_rows(p, &group, rows) { rows } else { 0 };
+    let mut landed: Vec<(usize, usize)> = Vec::new();
+    if !copy && rows == 0 {
+        // A plain move: each region takes its new place on its own track.
+        for &(t, r, s0) in &group {
+            p.tracks[t].regions[r].start_bar = landing_bar(p, s0, delta);
+        }
+        crate::automation_ui::follow_moves(p, auto, &group);
+        landed.extend(group.iter().map(|&(t, r, _)| (t, r)));
+    } else {
+        let mut made: Vec<(usize, Region)> = Vec::new();
+        let mut spans = Vec::new();
+        for &(t, r, s0) in &group {
+            // The region itself stays where it began (the drag may have moved it along).
+            let back = p.beats_to_bar(s0) as f32 + 1.0;
+            p.tracks[t].regions[r].start_bar = back;
+            let to = t.saturating_add_signed(rows);
+            let mut region = p.tracks[t].regions[r].clone();
+            region.start_bar = landing_bar(p, s0, delta);
+            let len = p.region_len_beats(&p.tracks[t].regions[r]);
+            spans.push((t, s0, len, to, p.region_start_beats(&region)));
+            made.push((to, region));
+        }
+        if !copy {
+            // Moved to other tracks: taken off their own ones, the highest index first so
+            // the lower ones stay valid.
+            let mut gone: Vec<(usize, usize)> = group.iter().map(|&(t, r, _)| (t, r)).collect();
+            gone.sort_unstable();
+            gone.dedup();
+            for &(t, r) in gone.iter().rev() {
+                p.tracks[t].regions.remove(r);
+            }
+        }
+        for (to, region) in made {
+            p.tracks[to].regions.push(region);
+            landed.push((to, p.tracks[to].regions.len() - 1));
+        }
+        crate::automation_ui::follow_drops(p, auto, &spans, !copy);
+    }
+    for &(t, r) in &landed {
+        if p.tracks[t].kind == TrackKind::Audio && crate::tracks_area::overlaps_another(p, t, r) {
+            p.tracks[t].regions[r].params.crossfade = xfade;
+        }
+    }
+    p.song_rev += 1;
+    landed
+}
+
 /// Whether Split at Playhead does anything to the selection.
 pub(crate) fn can_split(p: &Project, v: &TracksView) -> bool {
     v.selection()
@@ -435,5 +525,327 @@ mod tests {
             )),
         ));
         assert!(!can_quantize(&p, &v));
+    }
+
+    // ---- Option-drag copies (Logic: Option held when the region is let go)
+
+    use crate::ui_test::Harness;
+    use egui::{vec2, Modifiers, PointerButton, Pos2, Rect};
+
+    /// Two instrument tracks; track 0 has a two-bar region at bar 2 with notes, a controller
+    /// and its own settings, and track 1 a region far right (only there to find the row).
+    fn drag_rig() -> (Project, crate::UiState) {
+        let mut p = Project::empty();
+        p.add_track(TrackKind::Instrument);
+        let mut r = Region {
+            name: "Riff".into(),
+            start_bar: 2.0,
+            len_bars: 2.0,
+            notes: vec![note(0.0, 1.0), note(2.5, 0.5)],
+            controls: vec![crate::model::Control {
+                start: 1.0,
+                num: 64,
+                val: 127,
+            }],
+            folder: None,
+            audio: None,
+            params: crate::model::RegionParams {
+                transpose: 3,
+                velocity: -5,
+                quantize: Some(0.25),
+                ..Default::default()
+            },
+            generated: None,
+        };
+        p.tracks[0].regions.push(r.clone());
+        r.start_bar = 9.0;
+        r.name = "Far".into();
+        p.tracks[1].regions.push(r);
+        p.selected_track = 0;
+        (p, crate::UiState::new())
+    }
+
+    fn show(h: &mut Harness, p: &mut Project, s: &mut crate::UiState) {
+        let meters = crate::mixer::Meters::default();
+        h.settle(|ui| crate::tracks_area::show(ui, p, s, &meters));
+    }
+
+    /// Where region `r` of track `t` is on screen (the last frame).
+    fn rect_of(h: &Harness, t: usize, r: usize) -> Rect {
+        h.ctx
+            .read_response(egui::Id::unique(("tracks_area", ("region", t, r))))
+            .expect("the region is on screen")
+            .rect
+    }
+
+    /// Drags from `from` by `by`, with `mods` held at each step (the last ones when let go).
+    /// The drag begins with a small step (a drag starts only once the pointer has moved a
+    /// little, and the region is held where it was then); `by` is counted from there.
+    fn drag_with(
+        h: &mut Harness,
+        p: &mut Project,
+        s: &mut crate::UiState,
+        from: Pos2,
+        by: egui::Vec2,
+        mods: &[Modifiers],
+    ) {
+        let meters = crate::mixer::Meters::default();
+        let mut ui = |ui: &mut egui::Ui| crate::tracks_area::show(ui, p, s, &meters);
+        h.modifiers = mods[0];
+        h.press(from, PointerButton::Primary, &mut ui);
+        let from = from + vec2(10.0, 0.0);
+        h.move_to(from, &mut ui);
+        for (i, m) in mods.iter().enumerate() {
+            h.modifiers = *m;
+            let k = (i + 1) as f32 / mods.len() as f32;
+            h.move_to(from + by * k, &mut ui);
+        }
+        h.release(from + by, PointerButton::Primary, &mut ui);
+        h.frame(vec![], &mut ui);
+        h.modifiers = Modifiers::NONE;
+    }
+
+    /// Everything about two regions but where they are.
+    fn same_content(a: &Region, b: &Region) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.len_bars, b.len_bars);
+        assert_eq!(a.notes, b.notes);
+        assert_eq!(a.controls, b.controls);
+        assert!(a.params == b.params);
+        assert_eq!(a.generated, b.generated);
+        assert_eq!(
+            a.audio.as_ref().map(|x| &x.file.path),
+            b.audio.as_ref().map(|x| &x.file.path)
+        );
+    }
+
+    /// Points of one bar in the tracks area (a bar is 96 points wide at the start).
+    const BAR: f32 = 96.0;
+
+    #[test]
+    fn option_drag_leaves_the_region_and_drops_an_identical_copy_where_it_ends() {
+        let (mut p, mut s) = drag_rig();
+        let mut h = Harness::new(1400.0, 600.0);
+        show(&mut h, &mut p, &mut s);
+        let original = p.tracks[0].regions[0].clone();
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        let meters = crate::mixer::Meters::default();
+        h.modifiers = Modifiers::ALT;
+        h.press(grab, PointerButton::Primary, |ui| {
+            crate::tracks_area::show(ui, &mut p, &mut s, &meters)
+        });
+        let grab = grab + vec2(10.0, 0.0);
+        h.move_to(grab, |ui| {
+            crate::tracks_area::show(ui, &mut p, &mut s, &meters)
+        });
+        h.move_to(grab + vec2(BAR, 0.0), |ui| {
+            crate::tracks_area::show(ui, &mut p, &mut s, &meters)
+        });
+        h.move_to(grab + vec2(2.0 * BAR, 0.0), |ui| {
+            crate::tracks_area::show(ui, &mut p, &mut s, &meters)
+        });
+        // On the way the region stays where it was (its copy follows the pointer).
+        assert_eq!(
+            p.tracks[0].regions.len(),
+            1,
+            "nothing lands before the button is let go"
+        );
+        assert_eq!(
+            p.tracks[0].regions[0].start_bar, 2.0,
+            "the original stays in place"
+        );
+        h.release(grab + vec2(2.0 * BAR, 0.0), PointerButton::Primary, |ui| {
+            crate::tracks_area::show(ui, &mut p, &mut s, &meters)
+        });
+        h.modifiers = Modifiers::NONE;
+        let regions = &p.tracks[0].regions;
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].start_bar, 2.0, "the original is unchanged");
+        same_content(&regions[0], &original);
+        assert_eq!(regions[1].start_bar, 4.0, "the copy is two bars later");
+        same_content(&regions[1], &original);
+        assert_eq!(s.tracks.selection(), vec![(0, 1)], "the copy is selected");
+    }
+
+    #[test]
+    fn a_plain_drag_still_moves_and_option_counts_only_when_the_button_is_let_go() {
+        let (mut p, mut s) = drag_rig();
+        let mut h = Harness::new(1400.0, 600.0);
+        show(&mut h, &mut p, &mut s);
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        let (none, alt) = (Modifiers::NONE, Modifiers::ALT);
+        drag_with(
+            &mut h,
+            &mut p,
+            &mut s,
+            grab,
+            vec2(BAR, 0.0),
+            &[none, none, none],
+        );
+        assert_eq!(p.tracks[0].regions.len(), 1);
+        assert_eq!(p.tracks[0].regions[0].start_bar, 3.0, "moved a bar");
+
+        // Option pressed on the way and let go before the drop: a move.
+        show(&mut h, &mut p, &mut s);
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        drag_with(
+            &mut h,
+            &mut p,
+            &mut s,
+            grab,
+            vec2(BAR, 0.0),
+            &[none, alt, none],
+        );
+        assert_eq!(p.tracks[0].regions.len(), 1);
+        assert_eq!(p.tracks[0].regions[0].start_bar, 4.0);
+
+        // Option pressed only at the end: a copy.
+        show(&mut h, &mut p, &mut s);
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        drag_with(
+            &mut h,
+            &mut p,
+            &mut s,
+            grab,
+            vec2(-BAR, 0.0),
+            &[none, none, alt],
+        );
+        let starts: Vec<f32> = p.tracks[0].regions.iter().map(|r| r.start_bar).collect();
+        assert_eq!(starts, vec![4.0, 3.0]);
+    }
+
+    #[test]
+    fn option_drag_copies_a_whole_selection_keeping_its_spacing() {
+        let (mut p, mut s) = drag_rig();
+        let mut extra = p.tracks[0].regions[0].clone();
+        extra.start_bar = 5.0;
+        extra.name = "Second".into();
+        p.tracks[0].regions.push(extra);
+        let mut h = Harness::new(1400.0, 600.0);
+        show(&mut h, &mut p, &mut s);
+        s.tracks.select_many(&[(0, 0), (0, 1)]);
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        let alt = Modifiers::ALT;
+        drag_with(&mut h, &mut p, &mut s, grab, vec2(BAR, 0.0), &[alt, alt]);
+        let regions = &p.tracks[0].regions;
+        let at: Vec<(&str, f32)> = regions
+            .iter()
+            .map(|r| (r.name.as_str(), r.start_bar))
+            .collect();
+        assert_eq!(
+            at,
+            vec![
+                ("Riff", 2.0),
+                ("Second", 5.0),
+                ("Riff", 3.0),
+                ("Second", 6.0)
+            ]
+        );
+        same_content(&regions[2], &regions[0]);
+        same_content(&regions[3], &regions[1]);
+        assert_eq!(s.tracks.selection(), vec![(0, 2), (0, 3)]);
+    }
+
+    #[test]
+    fn option_drag_copies_to_another_track_and_a_plain_drag_moves_there() {
+        let (mut p, mut s) = drag_rig();
+        let mut h = Harness::new(1400.0, 600.0);
+        show(&mut h, &mut p, &mut s);
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        let down = rect_of(&h, 1, 0).center().y - rect_of(&h, 0, 0).center().y;
+        assert!(down > 10.0);
+        let alt = Modifiers::ALT;
+        drag_with(&mut h, &mut p, &mut s, grab, vec2(BAR, down), &[alt, alt]);
+        assert_eq!(
+            p.tracks[0].regions.len(),
+            1,
+            "the original stays on its track"
+        );
+        assert_eq!(p.tracks[0].regions[0].start_bar, 2.0);
+        let copy = &p.tracks[1].regions[1];
+        assert_eq!(copy.start_bar, 3.0);
+        same_content(copy, &p.tracks[0].regions[0]);
+        assert_eq!(s.tracks.selection(), vec![(1, 1)]);
+        assert_eq!(p.selected_track, 1);
+
+        // Without Option the region goes to the other track.
+        show(&mut h, &mut p, &mut s);
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        let none = Modifiers::NONE;
+        drag_with(&mut h, &mut p, &mut s, grab, vec2(0.0, down), &[none, none]);
+        assert!(p.tracks[0].regions.is_empty());
+        let names: Vec<&str> = p.tracks[1]
+            .regions
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Far", "Riff", "Riff"]);
+    }
+
+    #[test]
+    fn an_audio_region_is_not_copied_onto_a_midi_track() {
+        let (mut p, _) = drag_rig();
+        p.tracks[0].kind = TrackKind::Audio;
+        p.tracks[0].regions[0].audio = Some(test_audio());
+        let auto = crate::automation::AutoView::default();
+        let landed = drop_regions(&mut p, &auto, &[(0, 0, 4.0)], 4.0, 1, true, false);
+        assert_eq!(landed, vec![(0, 1)], "copied on its own track instead");
+        assert_eq!(p.tracks[1].regions.len(), 1);
+    }
+
+    #[test]
+    fn a_copied_audio_region_keeps_its_file_offset_gain_and_fades() {
+        let mut p = Project::empty();
+        p.tracks[0].kind = TrackKind::Audio;
+        p.add_track(TrackKind::Audio);
+        p.tracks[0].regions.push(Region {
+            name: "Take".into(),
+            start_bar: 1.0,
+            len_bars: 1.0,
+            notes: Vec::new(),
+            controls: Vec::new(),
+            folder: None,
+            audio: Some(test_audio()),
+            params: crate::model::RegionParams {
+                gain_db: -4.5,
+                fade_in: 0.5,
+                fade_out: 0.75,
+                fade_curve: prowave_engine::FadeCurve::SCurve,
+                offset_secs: 0.25,
+                reverse: true,
+                ..Default::default()
+            },
+            generated: None,
+        });
+        let auto = crate::automation::AutoView::default();
+        let landed = drop_regions(&mut p, &auto, &[(0, 0, 0.0)], 8.0, 1, true, false);
+        assert_eq!(landed, vec![(1, 0)]);
+        let (a, b) = (&p.tracks[0].regions[0], &p.tracks[1].regions[0]);
+        same_content(a, b);
+        assert_eq!((a.start_bar, b.start_bar), (1.0, 3.0));
+    }
+
+    #[test]
+    fn undo_takes_the_copy_away_in_one_step() {
+        let (mut p, mut s) = drag_rig();
+        let mut history = crate::undo::History::new(&p);
+        let mut h = Harness::new(1400.0, 600.0);
+        show(&mut h, &mut p, &mut s);
+        let grab = rect_of(&h, 0, 0).left_center() + vec2(20.0, 0.0);
+        let alt = Modifiers::ALT;
+        drag_with(
+            &mut h,
+            &mut p,
+            &mut s,
+            grab,
+            vec2(2.0 * BAR, 0.0),
+            &[alt, alt, alt],
+        );
+        assert_eq!(p.tracks[0].regions.len(), 2);
+        assert!(history.record(&p));
+        assert!(history.undo(&mut p));
+        assert_eq!(p.tracks[0].regions.len(), 1);
+        assert_eq!(p.tracks[0].regions[0].start_bar, 2.0);
+        assert!(!history.can_undo(), "one step");
     }
 }

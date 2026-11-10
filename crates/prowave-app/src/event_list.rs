@@ -4,19 +4,29 @@
 //! line moves down the list at the speed of the notes (fast passages go quickly, slow ones
 //! slowly) and the list pages along with it.
 
+use crate::hw::{self, Cap, Legend};
 use crate::i18n::tr;
 use crate::model::{Project, TrackKind, CHANNEL_PRESSURE, PITCH_BEND, SYSEX_BYTE};
-use crate::widgets::{BLUE, TEXT};
+use crate::piano_roll::caption;
+use crate::theme::{self, Face};
 use crate::UiState;
-use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Align2, Rect, Sense, Stroke, Ui};
 
-pub const WIDTH: f32 = 330.0;
-const ROW_H: f32 = 17.5;
+pub const WIDTH: f32 = 400.0;
+const ROW_H: f32 = 18.0;
 const TICKS_PER_BEAT: i64 = 960;
 const TICKS_PER_DIVISION: i64 = 240;
-
-const BG: Color32 = Color32::from_rgb(33, 33, 33);
-const TOOLBAR_BG: Color32 = Color32::from_rgb(55, 55, 55);
+/// The title row (a menu row with keys) and the column titles.
+const BAR_H: f32 = 46.0;
+const COLS_H: f32 = 24.0;
+/// The columns: right edges of the position, channel, number and value (right-aligned
+/// numbers), and the left edges of the status and the length or info, from the list's left.
+const COL_POS: f32 = 104.0;
+const COL_STATUS: f32 = 114.0;
+const COL_CH: f32 = 196.0;
+const COL_NUM: f32 = 240.0;
+const COL_VAL: f32 = 276.0;
+const COL_LEN: f32 = 290.0;
 
 /// The list's own state.
 pub struct ListView {
@@ -53,6 +63,8 @@ struct Event {
     /// A System Exclusive message as hex words; empty for the other events.
     text: String,
     len: f64,
+    /// The note's index in its region (notes of the region edited only).
+    note: Option<usize>,
 }
 
 /// The events to show: those of the selected MIDI region, with the other regions of its track
@@ -99,6 +111,7 @@ fn events(p: &Project, s: &UiState) -> Vec<Event> {
                     value: bytes.len() as u16,
                     text: crate::sysex::text(&bytes),
                     len: 0.0,
+                    note: None,
                 });
                 continue;
             }
@@ -111,10 +124,11 @@ fn events(p: &Project, s: &UiState) -> Vec<Event> {
                 value: c.val,
                 text: String::new(),
                 len: 0.0,
+                note: None,
             });
             i += 1;
         }
-        for n in &r.notes {
+        for (ni, n) in r.notes.iter().enumerate() {
             out.push(Event {
                 beats: offset + n.start as f64,
                 dim,
@@ -124,6 +138,7 @@ fn events(p: &Project, s: &UiState) -> Vec<Event> {
                 value: 0,
                 text: String::new(),
                 len: n.len as f64,
+                note: (!dim).then_some(ni),
             });
         }
     }
@@ -245,7 +260,7 @@ fn sysex_window(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
             let parsed = crate::sysex::parse(&text);
             if parsed.is_err() && !text.trim().is_empty() {
                 ui.colored_label(
-                    Color32::from_rgb(0xe0, 0x60, 0x50),
+                    theme::DANGER,
                     tr("The message must start with F0 and end with F7, in hex"),
                 );
             }
@@ -282,111 +297,126 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     sysex_window(ui.ctx(), p, s);
     let area = ui.max_rect();
     let g = ui.painter_at(area);
-    g.rect_filled(area, 0.0, BG);
+    hw::chassis(&g, area);
     let events = events(p, s);
 
-    // Title bar: "Event" and Catch Playhead (the Marker, Tempo and Signature lists, the
-    // local menus, the event-type filters and the list's Quantize are not built).
+    // Title bar: "EVENT", the playhead's position on a small LCD, SysEx and Catch Playhead
+    // (the Marker, Tempo and Signature lists, the local menus, the event-type filters and the
+    // list's Quantize are not built).
     let mut y = area.top();
-    let bar = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), 28.0));
-    g.rect_filled(bar, 0.0, TOOLBAR_BG);
-    g.text(
-        pos2(bar.left() + 12.0, bar.center().y),
+    let bar = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), BAR_H));
+    crate::piano_roll::menu_row(&g, bar);
+    let cy = bar.center().y - 1.0;
+    let title = hw::text(
+        &g,
+        pos2(bar.left() + 14.0, cy),
         Align2::LEFT_CENTER,
-        tr("Event"),
-        FontId::proportional(12.5),
-        TEXT,
+        &tr("Event").to_uppercase(),
+        Face::SilkX,
+        14.0,
+        theme::INK,
     );
-    let catch = Rect::from_center_size(pos2(bar.right() - 54.0, bar.center().y), vec2(28.0, 20.0));
-    let resp = ui.interact(
+    // Catch: a toggle key with the playhead-chasing icon.
+    let catch = Rect::from_min_size(pos2(bar.right() - 54.0, cy - 14.0), vec2(44.0, 28.0));
+    let resp = crate::piano_roll::icon_key(
+        ui,
+        &g,
         catch,
         egui::Id::unique(("event_list", "catch")),
-        Sense::click(),
+        s.lists.follow,
+        false,
+        crate::piano_roll::draw_catch,
     );
-    if resp.clicked() {
+    if resp.on_hover_text(tr("Catch Playhead")).clicked() {
         s.lists.follow = !s.lists.follow;
     }
-    g.rect_filled(
-        catch,
-        4.0,
-        if s.lists.follow {
-            BLUE
-        } else {
-            Color32::from_gray(0x58)
-        },
-    );
-    g.text(
-        catch.center(),
-        Align2::CENTER_CENTER,
-        ">T<",
-        FontId::proportional(11.0),
-        Color32::WHITE,
-    );
     // Add a System Exclusive message at the playhead (see `sysex.rs`).
-    let sysex_btn =
-        Rect::from_center_size(pos2(catch.left() - 42.0, bar.center().y), vec2(64.0, 18.0));
-    let sysex_resp = ui.interact(
+    // The key's legend without the dots the menu entry has.
+    let label = tr("SysEx…").trim_end_matches(['…', '.']);
+    let w = hw::galley(&g, &label.to_uppercase(), Face::Bold, 12.0, theme::INK)
+        .size()
+        .x
+        + 26.0;
+    let sysex_btn = Rect::from_min_size(pos2(catch.left() - 8.0 - w, cy - 14.0), vec2(w, 28.0));
+    let (sysex_resp, _) = hw::key(
+        ui,
+        &g,
         sysex_btn,
         egui::Id::unique(("event_list", "sysex")),
-        Sense::click(),
+        Cap::Bone,
+        false,
+        None,
+        Legend::Text(label),
     );
     if sysex_resp.clicked() {
         s.sysex_entry.get_or_insert_with(String::new);
     }
-    g.rect_filled(
-        sysex_btn,
+    // Where the playhead is, in bars and beats, on LCD glass.
+    let chip = Rect::from_min_max(
+        pos2(title.right() + 14.0, cy - 15.0),
+        pos2(sysex_btn.left() - 10.0, cy + 15.0),
+    );
+    if chip.width() >= 90.0 {
+        let ([bar_n, beat, div], tick) = position_in(p, p.position_beats);
+        hw::lcd_readout(
+            &g,
+            chip,
+            caption(tr("Position")),
+            &format!("{bar_n} {beat} {div} {tick:>3}"),
+        );
+    }
+    y += BAR_H;
+
+    // Column titles, silkscreened on a strip with a seam under it; the numbers' titles are
+    // right-aligned over their numbers.
+    let cols = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), COLS_H));
+    hw::seam_h(&g, cols.x_range(), cols.bottom() - 2.0);
+    let lx = area.left() + 8.0;
+    let head = |x: f32, align: Align2, text: &str, room: f32| {
+        let shown = hw::fit(&g, &text.to_uppercase(), Face::Silk, 10.0, room);
+        hw::text(
+            &g,
+            pos2(lx + x, cols.center().y - 1.0),
+            align,
+            &shown,
+            Face::Silk,
+            10.0,
+            theme::INK2,
+        );
+    };
+    head(COL_POS, Align2::RIGHT_CENTER, tr("Position"), 90.0);
+    head(COL_STATUS, Align2::LEFT_CENTER, tr("Status"), 70.0);
+    head(COL_CH, Align2::RIGHT_CENTER, tr("Ch"), 30.0);
+    head(COL_NUM, Align2::RIGHT_CENTER, tr("Num"), 40.0);
+    head(COL_VAL, Align2::RIGHT_CENTER, tr("Val"), 34.0);
+    head(
+        COL_LEN,
+        Align2::LEFT_CENTER,
+        tr("Length/Info"),
+        area.right() - (lx + COL_LEN) - 8.0,
+    );
+    y += COLS_H;
+
+    // The rows, bone print on the dark field material, in whole rows.
+    let well = Rect::from_min_max(pos2(area.left() + 4.0, y + 2.0), area.max - vec2(4.0, 4.0));
+    let rows_fit = ((well.height() - 6.0) / ROW_H).floor().max(0.0);
+    let well = Rect::from_min_size(well.min, vec2(well.width(), rows_fit * ROW_H + 6.0));
+    g.rect_filled(well.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI);
+    hw::gradient(
+        &g,
+        well,
         3.0,
-        if sysex_resp.hovered() {
-            Color32::from_gray(0x4a)
-        } else {
-            Color32::from_gray(0x33)
-        },
+        egui::Color32::from_rgb(0x25, 0x23, 0x21),
+        egui::Color32::from_rgb(0x15, 0x14, 0x13),
     );
-    g.text(
-        sysex_btn.center(),
-        Align2::CENTER_CENTER,
-        tr("SysEx…"),
-        FontId::proportional(11.0),
-        TEXT,
+    hw::inner_shadow(&g, well, 3.0, 0.5);
+    g.rect_stroke(
+        well,
+        3.0,
+        Stroke::new(1.0, theme::CAP_EDGE),
+        egui::StrokeKind::Inside,
     );
-    y += 28.0;
-
-    // Column titles.
-    let cols = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), 20.0));
-    g.rect_filled(cols, 0.0, Color32::from_rgb(47, 47, 47));
-    let f = FontId::proportional(10.5);
-    let dim = Color32::from_gray(0xc0);
-    let cx = |v: f32| area.left() + v;
-    for (v, label) in [(6.0, "L"), (20.0, "M")] {
-        g.text(
-            pos2(cx(v), cols.center().y),
-            Align2::CENTER_CENTER,
-            label,
-            f.clone(),
-            dim,
-        );
-    }
-    for (v, label) in [
-        (68.0, tr("Position")),
-        (133.0, tr("Status")),
-        (170.0, tr("Ch")),
-        (200.0, tr("Num")),
-        (232.0, tr("Val")),
-        (290.0, tr("Length/Info")),
-    ] {
-        let t = crate::mixer::elide(&g, label, &f, 60.0);
-        g.text(
-            pos2(cx(v), cols.center().y),
-            Align2::CENTER_CENTER,
-            t,
-            f.clone(),
-            dim,
-        );
-    }
-    y += 20.0;
-
-    // The rows.
-    let list = Rect::from_min_max(pos2(area.left(), y), area.max);
+    let list = well.shrink2(vec2(0.0, 3.0));
     let content_h = events.len() as f32 * ROW_H;
     let max_scroll = (content_h - list.height() + ROW_H).max(0.0);
     let resp = ui.interact(
@@ -404,62 +434,99 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         s.lists.scroll = followed_scroll(s.lists.scroll, line_y, list.height(), max_scroll);
     }
     s.lists.scroll = s.lists.scroll.clamp(0.0, max_scroll);
+    // Scrolled by whole rows, so no row is cut.
+    let scroll = (s.lists.scroll / ROW_H).round() * ROW_H;
 
     let gl = ui.painter_at(list);
-    let first = (s.lists.scroll / ROW_H).floor() as usize;
-    let last = (((s.lists.scroll + list.height()) / ROW_H).ceil() as usize).min(events.len());
-    let font = FontId::monospace(11.0);
-    let ink = Color32::from_gray(0xde);
+    let first = (scroll / ROW_H).floor() as usize;
+    let last = (((scroll + list.height()) / ROW_H).floor() as usize).min(events.len());
+    let cx = |v: f32| lx + v;
+    let size = 10.5;
     for (i, e) in events.iter().enumerate().take(last).skip(first) {
-        let cy = list.top() + i as f32 * ROW_H - s.lists.scroll + ROW_H / 2.0;
+        let row = Rect::from_min_size(
+            pos2(list.left(), list.top() + i as f32 * ROW_H - scroll),
+            vec2(list.width(), ROW_H),
+        );
+        let cy = row.center().y;
+        let selected = e.note.is_some_and(|n| s.piano.selected.contains(&n));
+        if selected {
+            gl.rect_filled(row, 0.0, theme::ORANGE.gamma_multiply(0.25));
+            gl.rect_filled(
+                Rect::from_min_size(row.min, vec2(4.0, ROW_H)),
+                0.0,
+                theme::ORANGE,
+            );
+        } else if i % 2 == 1 {
+            gl.rect_filled(row, 0.0, theme::ON_DARK.gamma_multiply(0.035));
+        }
         let ([bar, beat, div], tick) = position_in(p, e.beats);
         let l = length_parts(e.len, p.bar_len_at(e.beats));
-        let color = if e.dim { Color32::from_gray(0x76) } else { ink };
-        let at = |x: f32, align: Align2, text: String| {
-            gl.text(pos2(cx(x), cy), align, text, font.clone(), color);
+        // The other regions' events print faintly.
+        let color = if e.dim {
+            theme::ON_DARK_DIM.gamma_multiply(0.7)
+        } else {
+            theme::ON_DARK
         };
-        at(80.0, Align2::RIGHT_CENTER, format!("{bar} {beat} {div}"));
-        at(103.0, Align2::RIGHT_CENTER, format!("{tick}"));
-        at(173.0, Align2::RIGHT_CENTER, "1".to_string());
+        let at = |x: f32, align: Align2, text: &str, room: f32| {
+            let shown = hw::fit(&gl, &text.to_uppercase(), Face::Bold, size, room);
+            hw::text(&gl, pos2(cx(x), cy), align, &shown, Face::Bold, size, color);
+        };
+        at(
+            COL_POS,
+            Align2::RIGHT_CENTER,
+            &format!("{bar:>3} {beat} {div} {tick:>3}"),
+            100.0,
+        );
+        at(COL_CH, Align2::RIGHT_CENTER, "1", 24.0);
         let value = if e.control { e.value } else { u16::from(e.vel) };
-        at(241.0, Align2::RIGHT_CENTER, format!("{value}"));
+        at(COL_VAL, Align2::RIGHT_CENTER, &format!("{value}"), 34.0);
+        let info_room = list.right() - cx(COL_LEN) - 6.0;
         if e.control {
-            at(115.0, Align2::LEFT_CENTER, control_type(e.pitch));
+            at(
+                COL_STATUS,
+                Align2::LEFT_CENTER,
+                &control_type(e.pitch),
+                COL_CH - COL_STATUS - 26.0,
+            );
             match e.pitch {
                 SYSEX_BYTE => {
-                    // The message's bytes, cut to what the Info column can show.
-                    let shown: String = e.text.chars().take(40).collect();
-                    at(250.0, Align2::LEFT_CENTER, shown);
+                    // The message's bytes, as many as the Info column shows.
+                    at(COL_LEN, Align2::LEFT_CENTER, &e.text, info_room);
                 }
                 PITCH_BEND | CHANNEL_PRESSURE => {}
                 num => {
-                    at(200.0, Align2::CENTER_CENTER, format!("{num}"));
-                    at(250.0, Align2::LEFT_CENTER, controller_name(num));
+                    at(COL_NUM, Align2::RIGHT_CENTER, &format!("{num}"), 40.0);
+                    at(
+                        COL_LEN,
+                        Align2::LEFT_CENTER,
+                        &controller_name(num),
+                        info_room,
+                    );
                 }
             }
         } else {
-            at(115.0, Align2::LEFT_CENTER, tr("Note").to_string());
-            at(200.0, Align2::CENTER_CENTER, note_name(e.pitch));
             at(
-                323.0,
-                Align2::RIGHT_CENTER,
-                format!("{} {} {} {}", l[0], l[1], l[2], l[3]),
+                COL_STATUS,
+                Align2::LEFT_CENTER,
+                tr("Note"),
+                COL_CH - COL_STATUS - 26.0,
+            );
+            at(COL_NUM, Align2::RIGHT_CENTER, &note_name(e.pitch), 40.0);
+            at(
+                COL_LEN,
+                Align2::LEFT_CENTER,
+                &format!("{} {} {} {:>3}", l[0], l[1], l[2], l[3]),
+                info_room,
             );
         }
     }
     // The playhead line, between the notes that have sounded and those still to come.
-    let ly = list.top() + line_y - s.lists.scroll;
+    let ly = list.top() + line_y - scroll;
     if ly >= list.top() && ly <= list.bottom() && !events.is_empty() {
-        gl.line_segment(
-            [pos2(list.left(), ly), pos2(list.right(), ly)],
-            Stroke::new(1.5, crate::tracks_area::playhead_colors(p.recording).0),
-        );
+        gl.hline(list.x_range(), ly, Stroke::new(2.0, theme::ORANGE));
     }
-    // The edge towards the tracks.
-    g.line_segment(
-        [area.left_top(), area.left_bottom()],
-        Stroke::new(1.5, Color32::from_rgb(70, 96, 140)),
-    );
+    // The seam towards the tracks.
+    hw::seam_v(&g, area.left(), area.y_range());
 }
 
 #[cfg(test)]
@@ -501,6 +568,7 @@ mod tests {
             pitch: 60,
             vel: 100,
             len: 1.0,
+            note: None,
         };
         let events = [ev(0.0), ev(1.0), ev(1.0), ev(2.0)];
         assert_eq!(playhead_row(&events, -0.5), 0);
@@ -532,6 +600,7 @@ mod tests {
             pitch: 60,
             vel: 100,
             len: 0.25,
+            note: None,
         };
         let fast: Vec<Event> = (0..32).map(|i| ev(i as f64 * 0.25)).collect();
         let slow: Vec<Event> = (0..32).map(|i| ev(i as f64 * 1.0)).collect();

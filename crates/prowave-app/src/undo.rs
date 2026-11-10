@@ -4,6 +4,7 @@
 //! kept for Undo. Everything that is saved can be undone (tracks, regions, notes, mixer, tempo,
 //! signature, locators); the playhead and the selection are not, as in Logic.
 use crate::file_commands::content;
+use crate::flex_edit::{self, FlexState};
 use crate::model::Project;
 use prowave_project::ProjectDoc;
 
@@ -94,6 +95,41 @@ impl History {
 
     pub fn clear(&mut self, p: &Project) {
         self.reset(p);
+    }
+
+    /// [`History::record`] with the Follow Tempo markers made for the tempo first, so a step
+    /// never holds a new tempo with markers made for the old one.
+    pub fn record_followed(&mut self, p: &mut Project, flex: &mut FlexState) -> bool {
+        flex_edit::follow_now(p, flex);
+        self.record(p)
+    }
+
+    /// [`History::undo`] the same way; the state it goes back to has its markers made for its
+    /// tempo too (made again if not, without a step of its own).
+    pub fn undo_followed(&mut self, p: &mut Project, flex: &mut FlexState) -> bool {
+        flex_edit::follow_now(p, flex);
+        let done = self.undo(p);
+        if done && flex_edit::follow_now(p, flex) {
+            self.rebase(p);
+        }
+        done
+    }
+
+    /// [`History::redo`] the same way.
+    pub fn redo_followed(&mut self, p: &mut Project, flex: &mut FlexState) -> bool {
+        flex_edit::follow_now(p, flex);
+        let done = self.redo(p);
+        if done && flex_edit::follow_now(p, flex) {
+            self.rebase(p);
+        }
+        done
+    }
+
+    /// Takes `p` as the state last recorded, without a step (it differs from it only by what
+    /// follows from it).
+    fn rebase(&mut self, p: &Project) {
+        self.base = p.clone();
+        self.base_doc = content(p);
     }
 
     /// Puts `state` in place of `p`, keeping what is not part of an edit (playhead, transport)

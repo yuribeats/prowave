@@ -58,8 +58,9 @@ impl LoopTags {
         }
     }
 
-    /// One line for the browser: tempo, key and category, for example "128 BPM · Am · Bass".
-    pub fn summary(&self) -> String {
+    /// What the browser shows on its chips: tempo, key and category, for example
+    /// ["128 BPM", "Am", "Bass"].
+    pub fn parts(&self) -> Vec<String> {
         let mut parts = Vec::new();
         if let Some(tempo) = self.tempo {
             parts.push(format!("{tempo:.0} BPM"));
@@ -71,7 +72,13 @@ impl LoopTags {
         if !self.category.is_empty() {
             parts.push(self.category.clone());
         }
-        parts.join(" · ")
+        parts
+    }
+
+    /// The parts on one line, for example "128 BPM · Am · Bass".
+    #[cfg(test)]
+    pub fn summary(&self) -> String {
+        self.parts().join(" · ")
     }
 
     /// Whether `needle` (lower case) appears in the tags: category, subcategory, genre,

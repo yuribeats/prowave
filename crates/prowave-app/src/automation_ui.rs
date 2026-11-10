@@ -15,25 +15,24 @@
 //!   paste at the playhead and duplicate it, Delete removes it (§25.5.7, "Edit Menu Commands").
 //! - The toolbar has Automation Arm and Re-Enable Automation (§25.1 and §25.4).
 use crate::automation::{self, AutoView, Automation, ParamDesc, Strip};
+use crate::hw::{self, Cap, Legend};
 use crate::i18n::tr;
 use crate::model::{Project, Track, TrackKind};
-use crate::widgets::{popup_button, TEXT, TEXT_DIM};
-use egui::{
-    pos2, vec2, Align2, Color32, FontId, Key, Modifiers, Painter, Pos2, Rect, Sense, Stroke, Ui,
-};
+use crate::theme::{self, Face};
+use crate::widgets::popup_button;
+use egui::{pos2, vec2, Color32, Key, Modifiers, Painter, Pos2, Rect, Sense, Stroke, Ui};
 use prowave_engine::{curve_shape, lane_value, AutoPoint, AutoTarget};
 use std::collections::HashMap;
 
 /// The strip under a track's header with its choosers, in Automation Mode.
-pub const CHOOSER_H: f32 = 22.0;
+pub const CHOOSER_H: f32 = 28.0;
 /// A lane under a track (Show Automation in New Lane).
-pub const LANE_H: f32 = 46.0;
+pub const LANE_H: f32 = 40.0;
 /// An envelope line (Live draws them red) and an overridden one (grey, dimmed).
-pub const ENVELOPE: Color32 = Color32::from_rgb(0xff, 0x4a, 0x3d);
-pub const OVERRIDDEN: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
-/// The LED of an automated control, and of an overridden one.
-pub const LED_ON: Color32 = Color32::from_rgb(0xf0, 0x3c, 0x30);
-pub const LED_OFF: Color32 = Color32::from_rgb(0x8c, 0x8c, 0x8c);
+pub const ENVELOPE: Color32 = theme::ORANGE;
+pub const OVERRIDDEN: Color32 = theme::SEAM_DK;
+/// The LED of an automated control.
+pub const LED_ON: Color32 = theme::ORANGE;
 /// How far from a breakpoint a click still takes it, and from a line, in points.
 const GRAB: f32 = 6.0;
 const LINE_GRAB: f32 = 5.0;
@@ -506,6 +505,49 @@ pub fn follow_moves(p: &mut Project, v: &AutoView, moved: &[(usize, usize, f64)]
     }
 }
 
+/// Regions dropped on other tracks or copied by an Option-drag: (track before, start before,
+/// length, track now, start now) in quarter notes. The automation under each is copied to where
+/// it landed, or with `lift` moved there (the envelope closes over the hole it left).
+pub fn follow_drops(
+    p: &mut Project,
+    v: &AutoView,
+    drops: &[(usize, f64, f64, usize, f64)],
+    lift: bool,
+) {
+    if !v.with_regions {
+        return;
+    }
+    // Lift every piece first, so regions dropped over each other do not carry each other's.
+    let mut taken = Vec::new();
+    for &(from, was, len, to, now) in drops {
+        let Some(track) = p.tracks.get_mut(from) else {
+            continue;
+        };
+        let pieces = pieces_of(&track.auto, was, was + len);
+        if lift {
+            for piece in &pieces {
+                let pts = track.auto.lane_mut(piece.target);
+                pts.retain(|x| x.beat < was - 1e-9 || x.beat > was + len + 1e-9);
+            }
+            track.auto.prune();
+        }
+        taken.push((from, to, now, pieces));
+    }
+    for (from, to, now, pieces) in taken {
+        let Some(track) = p.tracks.get_mut(to) else {
+            continue;
+        };
+        for piece in &pieces {
+            // A plug-in's lane only makes sense on the track the plug-in is on.
+            if matches!(piece.target, AutoTarget::Plugin { .. }) && from != to {
+                continue;
+            }
+            paste_piece(track.auto.lane_mut(piece.target), piece, now);
+        }
+        track.auto.prune();
+    }
+}
+
 /// Repeat Regions: each repeated region's automation is repeated after it.
 pub fn follow_repeats(p: &mut Project, v: &AutoView, repeated: &[(usize, f64, f64)]) {
     if !v.with_regions {
@@ -639,13 +681,7 @@ pub fn led(g: &Painter, at: Pos2, a: &Automation, target: AutoTarget) {
     if a.lane(target).is_empty() {
         return;
     }
-    let c = if a.is_overridden(target) {
-        LED_OFF
-    } else {
-        LED_ON
-    };
-    g.circle_filled(at, 2.6, c);
-    g.circle_stroke(at, 2.6, Stroke::new(0.6, Color32::from_gray(0x20)));
+    hw::led_sized(g, at, 2.4, !a.is_overridden(target));
 }
 
 /// What the lanes need to know about the Tracks area.
@@ -699,12 +735,17 @@ pub fn lane(
 
     if over_regions {
         // The regions dim under the envelope, as in Live.
-        g.rect_filled(r, 0.0, Color32::from_black_alpha(70));
+        g.rect_filled(r, 0.0, theme::INK.gamma_multiply(0.28));
     } else {
-        g.rect_filled(r, 0.0, Color32::from_rgb(0x26, 0x26, 0x26));
-        g.line_segment(
-            [r.left_bottom(), r.right_bottom()],
-            Stroke::new(1.0, Color32::from_gray(0x1c)),
+        // A lane of its own: a well of deeper bone set into the arrange floor.
+        g.rect_filled(r, 0.0, theme::BONE3);
+        let well = r.shrink2(vec2(0.0, 2.0));
+        g.rect_filled(well, 2.0, hw::lerp(theme::BONE2, theme::BONE3, 0.55));
+        hw::inner_shadow(g, well, 2.0, 0.28);
+        g.hline(
+            well.x_range(),
+            well.bottom() + 0.5,
+            Stroke::new(1.0, theme::BONE_HI),
         );
     }
     // The selected range.
@@ -714,34 +755,40 @@ pub fn lane(
         .filter(|s| s.strip == strip && s.target == target);
     if let Some(s) = sel {
         let sr = Rect::from_x_y_ranges(x_of(s.from)..=x_of(s.to), r.y_range());
-        g.rect_filled(sr, 0.0, Color32::from_white_alpha(28));
+        g.rect_filled(sr, 0.0, theme::ORANGE.gamma_multiply(0.1));
         g.rect_stroke(
             sr,
             0.0,
-            Stroke::new(1.0, Color32::from_white_alpha(90)),
+            Stroke::new(1.0, theme::ORANGE.gamma_multiply(0.7)),
             egui::StrokeKind::Inside,
         );
     }
     let line = line_points(r, target, &pts, own, x_of);
     let colour = if pts.is_empty() {
-        Color32::from_rgba_unmultiplied(0xff, 0x4a, 0x3d, 110)
+        ENVELOPE.gamma_multiply(0.45)
     } else if overridden {
         OVERRIDDEN.gamma_multiply(0.7)
     } else {
         ENVELOPE
     };
-    g.add(egui::Shape::line(line.clone(), Stroke::new(1.5, colour)));
+    // The envelope: an orange line with a thin ink edge, so it reads on the bone floor and on
+    // the black regions alike.
+    g.add(egui::Shape::line(
+        line.clone(),
+        Stroke::new(3.0, theme::INK.gamma_multiply(0.35)),
+    ));
+    g.add(egui::Shape::line(line.clone(), Stroke::new(1.8, colour)));
     let selected = |b: f64| sel.is_some_and(|s| b >= s.from - 1e-9 && b <= s.to + 1e-9);
     for pt in &pts {
         let c = pos2(x_of(pt.beat), y_of(r, target, pt.value));
         if r.expand(4.0).contains(c) {
             let fill = if selected(pt.beat) {
-                Color32::WHITE
+                theme::BONE_HI
             } else {
                 colour
             };
-            g.circle_filled(c, 3.2, fill);
-            g.circle_stroke(c, 3.2, Stroke::new(1.0, Color32::from_gray(0x18)));
+            g.circle_filled(c, 3.4, fill);
+            g.circle_stroke(c, 3.4, Stroke::new(1.0, theme::INK));
         }
     }
     // The selection's handles: right edge stretches, top edge scales.
@@ -751,8 +798,15 @@ pub fn lane(
             pos2((x_of(s.from) + x_of(s.to)) / 2.0, r.top() + 4.0),
             vec2(12.0, 7.0),
         );
-        g.rect_filled(right, 1.5, Color32::from_gray(0xe0));
-        g.rect_filled(top, 1.5, Color32::from_gray(0xe0));
+        for h in [right, top] {
+            g.rect_filled(h, 1.5, theme::BONE_HI);
+            g.rect_stroke(
+                h,
+                1.5,
+                Stroke::new(1.0, theme::INK),
+                egui::StrokeKind::Inside,
+            );
+        }
         (right, top)
     });
 
@@ -1143,15 +1197,15 @@ fn plugin_ready(
 
 /// A value tag next to a breakpoint.
 fn tag(g: &Painter, lane: Rect, at: Pos2, text: &str) {
-    let font = FontId::proportional(11.0);
-    let galley = g.layout_no_wrap(text.to_string(), font, TEXT);
-    let size = galley.size() + vec2(8.0, 4.0);
+    // A small dark field, like the inspector's values.
+    let galley = hw::galley(g, text, Face::Bold, 10.5, theme::ON_DARK);
+    let size = galley.size() + vec2(10.0, 6.0);
     let mut r = Rect::from_min_size(at + vec2(6.0, -size.y - 4.0), size);
     if r.top() < lane.top() {
         r = r.translate(vec2(0.0, size.y + 8.0));
     }
-    g.rect_filled(r, 3.0, Color32::from_rgb(0x1e, 0x1e, 0x1e));
-    g.galley(r.min + vec2(4.0, 2.0), galley, TEXT);
+    hw::paint_field(g, r, "", false, false);
+    g.galley(r.min + vec2(5.0, 3.0), galley, theme::ON_DARK);
 }
 
 // ------------------------------------------------------------------ headers
@@ -1192,15 +1246,43 @@ pub fn choosers(
         .unwrap_or((0, devices[0].params[0].clone()));
     let automated = a.automated();
     let base = egui::Id::unique(("auto_choosers", strip, extra));
-    let w = r.width() - 34.0;
-    let dev_r = Rect::from_min_size(
-        pos2(r.left() + 4.0, r.top() + 2.0),
-        vec2(w * 0.42, r.height() - 4.0),
-    );
-    let par_r = Rect::from_min_size(
-        pos2(dev_r.right() + 4.0, dev_r.top()),
-        vec2(w * 0.58 - 4.0, dev_r.height()),
-    );
+    // Device and parameter fields, an LED for the lane's state (lit: the automation plays;
+    // dark: overridden), the value at the playhead on an LCD chip, then the + or − key.
+    let fh = (r.height() - 6.0).min(22.0);
+    let fy = r.center().y - fh / 2.0;
+    let key_w = 27.0;
+    let chip_w = if r.width() > 300.0 { 66.0 } else { 0.0 };
+    let w = r.width() - 4.0 - key_w - 6.0 - chip_w - if chip_w > 0.0 { 6.0 } else { 0.0 } - 18.0;
+    let dev_r = Rect::from_min_size(pos2(r.left() + 4.0, fy), vec2(w * 0.42, fh));
+    let par_r = Rect::from_min_size(pos2(dev_r.right() + 18.0, fy), vec2(w * 0.58, fh));
+    if automated.contains(&target) {
+        led(g, pos2(par_r.left() - 9.0, par_r.center().y), a, target);
+    }
+    if chip_w > 0.0 {
+        let chip = Rect::from_min_size(pos2(par_r.right() + 6.0, fy), vec2(chip_w, fh));
+        let own = match strip {
+            Strip::Track(i) => p
+                .tracks
+                .get(i)
+                .and_then(|t| automation::own_value(t, target)),
+            Strip::Master => automation::master_value(p, target),
+        };
+        let now = lane_value(a.lane(target), p.position_beats).or(own);
+        hw::lcd_glass(g, chip);
+        if let Some(value) = now {
+            let text = automation::value_text(&desc, value).to_uppercase();
+            let shown = hw::fit(g, &text, Face::Lcd, 10.0, chip.width() - 8.0);
+            hw::text(
+                g,
+                pos2(chip.right() - 5.0, chip.center().y),
+                egui::Align2::RIGHT_CENTER,
+                &shown,
+                Face::Lcd,
+                10.0,
+                theme::LCD_INK,
+            );
+        }
+    }
     let mut pick: Option<AutoTarget> = None;
     let resp = popup_button(ui, g, dev_r, base.with("dev"), &devices[dev_i].name);
     egui::Popup::menu(&resp).show(|ui| {
@@ -1226,10 +1308,6 @@ pub fn choosers(
         }
     });
     let resp = popup_button(ui, g, par_r, base.with("par"), &desc.name);
-    let red = automated.contains(&target);
-    if red {
-        led(g, pos2(par_r.right() - 20.0, par_r.center().y), a, target);
-    }
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(200.0);
         egui::ScrollArea::vertical()
@@ -1252,26 +1330,26 @@ pub fn choosers(
     });
     // "+" shows another parameter in a lane of its own; "−" takes this lane away.
     let btn = Rect::from_min_size(
-        pos2(r.right() - 26.0, r.top() + 2.0),
-        vec2(22.0, r.height() - 4.0),
+        pos2(r.right() - key_w - 2.0, r.center().y - 11.0),
+        vec2(key_w, 22.0_f32.min(r.height() - 2.0)),
     );
-    let b = ui.interact(btn, base.with("btn"), Sense::click());
-    g.rect_filled(
+    let (b, face) = hw::key(
+        ui,
+        g,
         btn,
-        4.0,
-        if b.hovered() {
-            Color32::from_gray(0x66)
-        } else {
-            Color32::from_gray(0x58)
-        },
+        base.with("btn"),
+        Cap::Bone,
+        false,
+        None,
+        Legend::Custom,
     );
-    g.text(
-        btn.center(),
-        Align2::CENTER_CENTER,
-        if extra.is_some() { "−" } else { "+" },
-        FontId::proportional(14.0),
-        TEXT,
-    );
+    // A plus or a minus printed as bars (the font's minus sits off centre).
+    let c = face.center();
+    let st = Stroke::new(1.6, theme::INK);
+    g.hline(c.x - 4.0..=c.x + 4.0, c.y, st);
+    if extra.is_none() {
+        g.vline(c.x, c.y - 4.0..=c.y + 4.0, st);
+    }
     let b = b.on_hover_text(if extra.is_some() {
         tr("Remove Lane")
     } else {
@@ -1328,6 +1406,9 @@ fn chooser_text(name: &str, automated: bool) -> egui::RichText {
 
 // ------------------------------------------------------------------ toolbar and keys
 
+/// A key of the automation toolbar: latched while on, with an LED at its left when it has one
+/// (`led`); `orange` gives it the signal cap while on (Automation Arm). Greyed and inert when
+/// not `enabled`. Returns whether it was clicked.
 #[allow(clippy::too_many_arguments)]
 fn toggle(
     ui: &Ui,
@@ -1335,47 +1416,38 @@ fn toggle(
     r: Rect,
     id: &str,
     on: bool,
-    on_colour: Color32,
+    orange: bool,
+    led: bool,
     text: &str,
     tip: &str,
     enabled: bool,
 ) -> bool {
-    let resp = ui.interact(
+    if !enabled {
+        let face = hw::paint_key(g, r, Cap::Bone, false, false);
+        if led {
+            hw::led_sized(g, pos2(face.left() + 8.0, face.center().y), 2.5, false);
+        }
+        let _ = ui
+            .interact(r, egui::Id::unique(("auto_tool", id)), Sense::hover())
+            .on_hover_text(tip);
+        return false;
+    }
+    let cap = if on && orange { Cap::Orange } else { Cap::Bone };
+    let (resp, _) = hw::key(
+        ui,
+        g,
         r,
         egui::Id::unique(("auto_tool", id)),
-        if enabled {
-            Sense::click()
+        cap,
+        on,
+        led.then_some(on),
+        if text.is_empty() {
+            Legend::Custom
         } else {
-            Sense::hover()
+            Legend::Text(text)
         },
     );
-    let fill = if on {
-        on_colour
-    } else if resp.hovered() && enabled {
-        Color32::from_gray(0x60)
-    } else {
-        Color32::from_gray(0x52)
-    };
-    g.rect_filled(r, 4.0, fill);
-    // Light text on the grey and on the colours (all of them are mid-dark).
-    let text_colour = if enabled {
-        if on {
-            Color32::WHITE
-        } else {
-            TEXT
-        }
-    } else {
-        TEXT_DIM
-    };
-    g.text(
-        r.center(),
-        Align2::CENTER_CENTER,
-        text,
-        FontId::proportional(12.0),
-        text_colour,
-    );
-    let resp = resp.on_hover_text(tip);
-    enabled && resp.clicked()
+    resp.on_hover_text(tip).clicked()
 }
 
 /// The automation buttons of the Tracks area's toolbar, from `x`: Automation Mode (A), Draw
@@ -1383,46 +1455,49 @@ fn toggle(
 pub fn toolbar(ui: &Ui, g: &Painter, p: &mut Project, v: &mut AutoView, x: f32, cy: f32) -> f32 {
     let mut at = x;
     let mut next = |w: f32| {
-        let r = Rect::from_min_size(pos2(at, cy - 10.0), vec2(w, 20.0));
-        at += w + 4.0;
+        let r = Rect::from_min_size(pos2(at, cy - 14.0), vec2(w, 28.0));
+        at += w + 6.0;
         r
     };
-    let r = next(26.0);
+    let r = next(44.0);
     if toggle(
         ui,
         g,
         r,
         "mode",
         v.mode,
-        Color32::from_rgb(0xb2, 0x3a, 0x30),
+        false,
+        true,
         "A",
         tr("Automation Mode (A)"),
         true,
     ) {
         set_mode(p, v, !v.mode);
     }
-    let r = next(26.0);
+    let r = next(44.0);
     if toggle(
         ui,
         g,
         r,
         "draw",
         v.draw,
-        Color32::from_rgb(0x2f, 0x6f, 0xd8),
+        false,
+        true,
         "B",
         tr("Draw Mode (B)"),
         true,
     ) {
         v.draw = !v.draw;
     }
-    let r = next(40.0);
+    let r = next(58.0);
     if toggle(
         ui,
         g,
         r,
         "arm",
         v.arm,
-        Color32::from_rgb(0xb8, 0x26, 0x1e),
+        true,
+        true,
         "ARM",
         tr("Automation Arm"),
         true,
@@ -1430,23 +1505,25 @@ pub fn toolbar(ui: &Ui, g: &Painter, p: &mut Project, v: &mut AutoView, x: f32, 
         v.arm = !v.arm;
     }
     let any = automation::any_overridden(p);
-    let r = next(28.0);
-    if toggle(
+    // A normal key whose LED is lit while some envelope is overridden; it does nothing
+    // otherwise.
+    let r = next(44.0);
+    let (resp, _) = hw::key(
         ui,
         g,
         r,
-        "reenable",
-        any,
-        Color32::from_rgb(0xc2, 0x6a, 0x14),
-        "",
-        tr("Re-Enable Automation"),
-        any,
-    ) {
+        egui::Id::unique(("auto_tool", "reenable")),
+        Cap::Bone,
+        false,
+        Some(any),
+        Legend::Custom,
+    );
+    if resp.on_hover_text(tr("Re-Enable Automation")).clicked() && any {
         automation::reenable(p);
     }
     // Live's Re-Enable Automation icon: an arrow turning back.
-    let c = if any { Color32::WHITE } else { TEXT_DIM };
-    let (centre, rad) = (r.center(), 5.5);
+    let c = theme::INK;
+    let (centre, rad) = (r.center() + vec2(4.0, 0.5), 6.0);
     let arc: Vec<Pos2> = (0..=12)
         .map(|k| {
             let a = std::f32::consts::PI * (0.15 + 1.45 * k as f32 / 12.0);
@@ -1708,9 +1785,15 @@ mod tests {
     /// The Tracks area in a 1400 x 600 window, with its first track's own lane: where it is,
     /// and the y of `value` on it.
     fn main_lane() -> Rect {
-        // Toolbar 30, ruler 26; a 56-point track and the 22-point chooser strip; the lane
-        // starts under the regions' name strips.
-        Rect::from_min_max(pos2(340.0, 56.0 + 15.0), pos2(1400.0, 56.0 + 78.0 - 1.0))
+        // The menu row and the ruler, then a 70-point track and the 22-point chooser strip;
+        // regions sit 4 points in from the row edges and the lane starts under their
+        // 15-point name strips.
+        use crate::tracks_area::{HEADER_W, RULER_H, TOOLBAR_H};
+        let top = TOOLBAR_H + RULER_H;
+        Rect::from_min_max(
+            pos2(HEADER_W, top + 4.0 + 15.0),
+            pos2(1400.0, top + 70.0 + 22.0 - 4.0),
+        )
     }
 
     #[test]

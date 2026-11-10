@@ -4,11 +4,18 @@
 //! into. The spectrum is measured on a worker thread (`prowave_engine::spectrogram`, 2048-point
 //! Hann frames); the frequency axis (logarithmic or linear), the colours and the range shown
 //! are changed at once, from the measurement already made.
+use crate::hw::{self, Cap, Legend};
 use crate::i18n::{tr, trf};
 use crate::model::Project;
-use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke};
+use crate::theme::{self, Face};
+use egui::{pos2, vec2, Align2, Color32, Pos2, Rect, Sense, Stroke};
 use prowave_engine::Spectrogram;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
+
+/// The Hardware panel parts the vocal windows share (declared here: this is the one of them in
+/// both builds).
+#[path = "hw_vocal.rs"]
+pub(crate) mod hw_vocal;
 
 /// Rows of the drawn picture (it is stretched to the window).
 const ROWS: usize = 512;
@@ -83,6 +90,10 @@ struct Window {
     error: Option<String>,
     look: Look,
     texture: Option<(Look, egui::TextureHandle)>,
+    /// The region's length and its file's rate, known before it is measured: the scales are
+    /// printed from them meanwhile.
+    secs: f64,
+    rate: u32,
 }
 
 /// The Spectrogram window, while one is open.
@@ -184,6 +195,7 @@ pub fn open(p: &Project, s: &mut crate::UiState, t: usize, r: usize) {
         return;
     };
     let file = audio.file.clone();
+    let rate = file.sample_rate;
     let map = p.tempo_map();
     let len_secs =
         map.seconds_at(p.region_end_beats(region)) - map.seconds_at(p.region_start_beats(region));
@@ -221,6 +233,8 @@ pub fn open(p: &Project, s: &mut crate::UiState, t: usize, r: usize) {
                 error: None,
                 look,
                 texture: None,
+                secs: len_secs.max(0.0),
+                rate,
             })
         }
         Err(e) => s.status = Some(trf("Spectrogram failed: {}", &[&e])),
@@ -255,24 +269,60 @@ fn hz_label(hz: f32) -> String {
     }
 }
 
-/// Draws the spectrogram with its frequency axis on the left and time along the bottom.
-fn plot(ui: &mut egui::Ui, spec: &Spectrogram, look: Look, tex: &egui::TextureHandle) {
-    let size = ui.available_size().max(vec2(480.0, 260.0));
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    let g = ui.painter_at(rect);
-    let plot = Rect::from_min_max(rect.min + vec2(44.0, 4.0), rect.max - vec2(6.0, 20.0));
-    g.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
-    g.image(
-        tex.id(),
-        plot,
-        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-        Color32::WHITE,
+/// The scope the spectrogram is shown on: a black bezel and a dark screen; returns the screen.
+fn scope(g: &egui::Painter, rect: Rect) -> Rect {
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 7.0, theme::BONE_HI);
+    hw::gradient(
+        g,
+        rect,
+        7.0,
+        Color32::from_rgb(0x2a, 0x28, 0x26),
+        Color32::from_rgb(0x12, 0x11, 0x10),
     );
-    let text = ui.visuals().text_color();
-    let font = FontId::proportional(10.0);
-    let tick = Stroke::new(1.0, text.gamma_multiply(0.6));
-    let (low, high) = axis(spec, look.log);
-    let marks: Vec<f32> = if look.log {
+    let screen = rect.shrink(7.0);
+    g.rect_filled(screen, 2.0, theme::METER_WELL);
+    screen
+}
+
+/// The scope's place in the plot area: the frequency scale left of it, the time scale under it.
+fn scope_rect(rect: Rect) -> Rect {
+    Rect::from_min_max(rect.min + vec2(46.0, 0.0), rect.max - vec2(0.0, 22.0))
+}
+
+/// A message on a small piece of LCD glass in the middle of the screen (with a chaser running
+/// under it while `busy`).
+fn screen_message(g: &egui::Painter, screen: Rect, text: &str, busy: bool, time: f64) {
+    let glass = Rect::from_center_size(
+        screen.center(),
+        vec2(
+            260.0_f32.min(screen.width() - 20.0),
+            if busy { 58.0 } else { 48.0 },
+        ),
+    );
+    hw::lcd_glass(g, glass);
+    let inner = glass.shrink2(vec2(12.0, 9.0));
+    if busy {
+        let (text_rect, run) = inner.split_top_bottom_at_y(inner.bottom() - 10.0);
+        hw_vocal::lcd_text(g, text_rect, text, 11.0, 1, theme::LCD_INK);
+        hw_vocal::lcd_chaser(g, run.shrink2(vec2(0.0, 1.0)), time);
+    } else {
+        hw_vocal::lcd_text(g, inner, text, 11.0, 2, theme::LCD_INK);
+    }
+}
+
+/// A number in the scales' mono face, set tight (no letter spacing).
+fn scale_text(g: &egui::Painter, pos: Pos2, anchor: Align2, text: &str) -> Rect {
+    g.text(pos, anchor, text, theme::font(Face::Bold, 9.5), theme::INK2)
+}
+
+/// The printed scales and the faint graticule of a screen showing `low`..`high` Hz over
+/// `secs` seconds: the frequencies left of the bezel (unit "HZ" under them), the seconds under
+/// it (unit "S" at its end), with a closing tick at the end of the clip.
+#[allow(clippy::too_many_arguments)]
+fn scales(g: &egui::Painter, bezel: Rect, plot: Rect, low: f32, high: f32, log: bool, secs: f64) {
+    let tick = Stroke::new(1.0, theme::INK2);
+    let graticule = Stroke::new(1.0, Color32::from_white_alpha(16));
+    let marks: Vec<f32> = if log {
         [
             20.0, 50.0, 100.0, 200.0, 500.0, 1e3, 2e3, 5e3, 1e4, 2e4, 5e4,
         ]
@@ -287,17 +337,27 @@ fn plot(ui: &mut egui::Ui, spec: &Spectrogram, look: Look, tex: &egui::TextureHa
             .collect()
     };
     for hz in marks {
-        let y = plot.bottom() - height_of(low, high, look.log, hz) * plot.height();
-        g.line_segment([pos2(plot.left() - 4.0, y), pos2(plot.left(), y)], tick);
-        g.text(
-            pos2(plot.left() - 6.0, y),
+        let y = plot.bottom() - height_of(low, high, log, hz) * plot.height();
+        if y > plot.top() + 1.0 && y < plot.bottom() - 1.0 {
+            g.hline(plot.x_range(), y, graticule);
+        }
+        g.hline(bezel.left() - 6.0..=bezel.left() - 1.0, y, tick);
+        scale_text(
+            g,
+            pos2(bezel.left() - 9.0, y),
             Align2::RIGHT_CENTER,
-            hz_label(hz),
-            font.clone(),
-            text,
+            &hz_label(hz).to_uppercase(),
         );
     }
-    let secs = spec.frame_secs(spec.frames.saturating_sub(1)).max(1e-3);
+    hw::silk(
+        g,
+        pos2(bezel.left() - 9.0, bezel.bottom() + 8.0),
+        Align2::RIGHT_TOP,
+        "Hz",
+        10.0,
+        theme::PRINT,
+    );
+    let secs = secs.max(1e-3);
     let step = tick_step(
         secs,
         8.0,
@@ -305,42 +365,257 @@ fn plot(ui: &mut egui::Ui, spec: &Spectrogram, look: Look, tex: &egui::TextureHa
             0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
         ],
     );
+    let decimals = if (step * 10.0).fract().abs() > 1e-6 {
+        2
+    } else if step < 1.0 {
+        1
+    } else {
+        0
+    };
+    let unit = hw::silk(
+        g,
+        pos2(bezel.right(), bezel.bottom() + 8.0),
+        Align2::RIGHT_TOP,
+        "s",
+        10.0,
+        theme::PRINT,
+    );
+    let x_at = |t: f64| plot.left() + (t / secs) as f32 * plot.width();
     for i in 0.. {
         let t = i as f64 * step;
         if t > secs + 1e-9 {
             break;
         }
-        let x = plot.left() + (t / secs) as f32 * plot.width();
-        g.line_segment([pos2(x, plot.bottom()), pos2(x, plot.bottom() + 4.0)], tick);
-        g.text(
-            pos2(x, plot.bottom() + 5.0),
-            Align2::CENTER_TOP,
-            format!("{} s", (t * 100.0).round() / 100.0),
-            font.clone(),
-            text,
-        );
+        let x = x_at(t);
+        if x > plot.left() + 1.0 && x < plot.right() - 1.0 {
+            g.vline(x, plot.y_range(), graticule);
+        }
+        g.vline(x, bezel.bottom() + 1.0..=bezel.bottom() + 6.0, tick);
+        let label = format!("{t:.decimals$}");
+        let w = g
+            .layout_no_wrap(label.clone(), theme::font(Face::Bold, 9.5), theme::INK2)
+            .size()
+            .x;
+        // A label that would run into the unit is left off (its tick stays).
+        if x + w / 2.0 < unit.left() - 6.0 {
+            scale_text(g, pos2(x, bezel.bottom() + 8.0), Align2::CENTER_TOP, &label);
+        }
     }
-    // What is under the pointer.
+    // The end of the clip.
+    g.vline(
+        plot.right(),
+        bezel.bottom() + 1.0..=bezel.bottom() + 4.0,
+        tick,
+    );
+}
+
+/// Draws the spectrogram on the scope in `rect`, its frequency scale printed on the panel at
+/// the left and its time scale under it.
+fn plot(ui: &mut egui::Ui, rect: Rect, spec: &Spectrogram, look: Look, tex: &egui::TextureHandle) {
+    let resp = ui.interact(rect, ui.scope_id().with("spectrogram-plot"), Sense::hover());
+    let g = ui.painter_at(rect.expand(2.0));
+    let bezel = scope_rect(rect);
+    let screen = scope(&g, bezel);
+    let plot = screen.shrink(1.0);
+    g.image(
+        tex.id(),
+        plot,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    hw::inner_shadow(&g, plot, 2.0, 0.5);
+    let (low, high) = axis(spec, look.log);
+    let secs = spec.frame_secs(spec.frames.saturating_sub(1));
+    scales(&g, bezel, plot, low, high, look.log, secs);
+    // What is under the pointer, on a strip of LCD glass in the screen's corner.
     if let Some(at) = resp.hover_pos().filter(|p| plot.contains(*p)) {
         let fx = (at.x - plot.left()) / plot.width();
         let fy = (plot.bottom() - at.y) / plot.height();
         let m = ((fx * spec.frames as f32) as usize).min(spec.frames.saturating_sub(1));
         let hz = hz_at(low, high, look.log, fy);
         let k = (spec.hz_bin(hz).round() as usize).min(spec.bins - 1);
+        let cross = Stroke::new(1.0, Color32::from_white_alpha(70));
+        g.vline(at.x, plot.y_range(), cross);
+        g.hline(plot.x_range(), at.y, cross);
         let label = format!(
-            "{:.2} s   {} Hz   {:.0} dB",
+            "{:.2} S   {} HZ   {:.0} DB",
             spec.frame_secs(m),
             hz.round(),
             spec.at(m, k)
         );
-        g.text(
-            plot.right_top() + vec2(-6.0, 6.0),
-            Align2::RIGHT_TOP,
-            label,
-            FontId::proportional(11.0),
-            Color32::WHITE,
+        let w = hw::galley(&g, &label, Face::Lcd, 10.0, theme::LCD_INK)
+            .size()
+            .x
+            + 16.0;
+        let glass = Rect::from_min_size(plot.right_top() + vec2(-8.0 - w, 8.0), vec2(w, 22.0));
+        hw::lcd_glass(&g, glass);
+        hw::text(
+            &g,
+            glass.left_center() + vec2(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            &label,
+            Face::Lcd,
+            10.0,
+            theme::LCD_INK,
         );
     }
+}
+
+/// The scope with its scales but no picture yet (measuring, or failed), and `text` on the
+/// screen: the frame stays as it will be once the picture is there.
+fn empty_plot(ui: &egui::Ui, rect: Rect, look: Look, rate: u32, secs: f64, text: &str, busy: bool) {
+    let g = ui.painter_at(rect.expand(2.0));
+    let bezel = scope_rect(rect);
+    let screen = scope(&g, bezel);
+    let plot = screen.shrink(1.0);
+    let top = rate.max(2) as f32 / 2.0;
+    let (low, high) = if look.log {
+        (LOG_LOW_HZ.min(top / 2.0), top)
+    } else {
+        (0.0, top)
+    };
+    scales(&g, bezel, plot, low, high, look.log, secs);
+    screen_message(&g, screen, text, busy, ui.input(|i| i.time));
+    if busy {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(80));
+    }
+}
+
+/// The toolbar: the frequency axis keys, the colour list and the range knob, wrapped onto a
+/// second line when the window is narrow. Returns its height.
+fn toolbar(ui: &mut egui::Ui, look: &mut Look) -> f32 {
+    let top = ui.cursor().min;
+    let width = ui.available_width();
+    let g = ui.painter().clone();
+    let id = ui.scope_id().with("spectrogram-toolbar");
+    let silk = |at: Pos2, label: &str| {
+        hw::text(
+            &g,
+            at,
+            Align2::LEFT_CENTER,
+            &label.to_uppercase(),
+            Face::Silk,
+            11.0,
+            theme::INK2,
+        )
+        .width()
+    };
+    let key_w = |label: &str| {
+        hw::galley(&g, &label.to_uppercase(), Face::Bold, 11.0, theme::INK)
+            .size()
+            .x
+            + 30.0
+    };
+    let (log_w, lin_w) = (key_w(tr("Logarithmic")), key_w(tr("Linear")));
+    let groups = [
+        hw::silk_width(&g, tr("Frequency axis"), 11.0) + 10.0 + log_w + 4.0 + lin_w,
+        hw::silk_width(&g, tr("Colours"), 11.0) + 10.0 + 120.0,
+        hw::silk_width(&g, tr("Range"), 11.0) + 10.0 + 30.0 + 8.0 + 64.0,
+    ];
+    // The groups go on as few rows as fit, each kept whole; a row's groups are spread from
+    // its left edge to its right one.
+    let row_h = 38.0;
+    let gap = 26.0;
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut used = 0.0;
+    for (i, w) in groups.iter().enumerate() {
+        let full = rows
+            .last()
+            .is_some_and(|row| !row.is_empty() && used + gap + w > width);
+        if full {
+            rows.push(Vec::new());
+            used = 0.0;
+        }
+        if let Some(row) = rows.last_mut() {
+            if !row.is_empty() {
+                used += gap;
+            }
+            used += w;
+            row.push(i);
+        }
+    }
+    let mut starts = [top; 3];
+    for (r, row) in rows.iter().enumerate() {
+        let y = top.y + row_h / 2.0 + r as f32 * row_h;
+        let total: f32 = row.iter().map(|i| groups[*i]).sum();
+        let between = if row.len() > 1 {
+            ((width - total) / (row.len() - 1) as f32).max(gap)
+        } else {
+            0.0
+        };
+        // A group alone on a later row sits at the right, under the end of the row above.
+        let mut x = if r > 0 && row.len() == 1 {
+            top.x + width - total
+        } else {
+            top.x
+        };
+        for i in row {
+            starts[*i] = pos2(x, y);
+            x += groups[*i] + between;
+        }
+    }
+    let place = |i: usize| starts[i];
+    // Frequency axis.
+    let p = place(0);
+    let x = p.x + silk(p, tr("Frequency axis")) + 10.0;
+    for (on, label, w, dx) in [
+        (true, tr("Logarithmic"), log_w, 0.0),
+        (false, tr("Linear"), lin_w, log_w + 4.0),
+    ] {
+        let r = Rect::from_min_size(pos2(x + dx, p.y - 13.0), vec2(w, 26.0));
+        let lit = look.log == on;
+        let (resp, _) = hw::key(
+            ui,
+            &g,
+            r,
+            id.with(label),
+            Cap::Bone,
+            lit,
+            Some(lit),
+            Legend::Text(label),
+        );
+        if resp.clicked() {
+            look.log = on;
+        }
+    }
+    // Colours.
+    let p = place(1);
+    let x = p.x + silk(p, tr("Colours")) + 10.0;
+    let names: Vec<&str> = Colors::ALL.iter().map(|c| c.name()).collect();
+    let field = Rect::from_min_size(pos2(x, p.y - 12.0), vec2(120.0, 24.0));
+    let now = Colors::ALL.iter().position(|c| *c == look.colors);
+    if let Some(i) = hw_vocal::dropdown(
+        ui,
+        id.with("colors"),
+        field,
+        look.colors.name(),
+        &names,
+        now,
+    ) {
+        look.colors = Colors::ALL[i];
+    }
+    // Range.
+    let p = place(2);
+    let x = p.x + silk(p, tr("Range")) + 10.0;
+    let label = format!("{} (dB)", tr("Range"));
+    hw_vocal::inline_dial(
+        ui,
+        pos2(x + 13.0, p.y + 1.0),
+        11.0,
+        Rect::from_min_size(pos2(x + 38.0, p.y - 12.0), vec2(64.0, 24.0)),
+        id.with("range"),
+        &mut hw_vocal::Dial {
+            label: &label,
+            value: &mut look.range_db,
+            range: 30.0..=140.0,
+            default: DEFAULT_LOOK.range_db,
+            decimals: 0,
+            unit: "",
+            enabled: true,
+        },
+    );
+    rows.len() as f32 * row_h
 }
 
 /// Once per frame: the Spectrogram window, if one is open.
@@ -367,41 +642,26 @@ pub fn show(ctx: &egui::Context, s: &mut crate::UiState) {
             }
         }
     }
-    let mut open = true;
-    egui::Window::new(w.title.clone())
-        .id(egui::Id::unique("spectrogram-window"))
-        .open(&mut open)
-        .default_size([760.0, 420.0])
-        .min_size([520.0, 320.0])
-        .resizable(true)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(tr("Frequency axis"));
-                ui.radio_value(&mut w.look.log, true, tr("Logarithmic"));
-                ui.radio_value(&mut w.look.log, false, tr("Linear"));
-                ui.separator();
-                ui.label(tr("Colours"));
-                egui::ComboBox::from_id_salt("spectrogram-colors")
-                    .selected_text(w.look.colors.name())
-                    .show_ui(ui, |ui| {
-                        for c in Colors::ALL {
-                            ui.selectable_value(&mut w.look.colors, c, c.name());
-                        }
-                    });
-                ui.separator();
-                ui.label(tr("Range"));
-                ui.add(egui::Slider::new(&mut w.look.range_db, 30.0..=140.0).suffix(" dB"));
-            });
-            ui.separator();
+    let title = w.title.clone();
+    let (open, _) = hw_vocal::window(
+        ctx,
+        egui::Id::unique("spectrogram-window"),
+        &title,
+        "",
+        760.0,
+        Some((vec2(760.0, 420.0), vec2(520.0, 320.0))),
+        |ui| {
+            let h = toolbar(ui, &mut w.look);
+            hw_vocal::gap(ui, h + 8.0);
+            let size = ui.available_size().max(vec2(480.0, 240.0));
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
             if let Some(e) = &w.error {
-                ui.label(trf("Spectrogram failed: {}", &[e]));
+                let text = trf("Spectrogram failed: {}", &[e]);
+                empty_plot(ui, rect, w.look, w.rate, w.secs, &text, false);
                 return;
             }
             let Some(spec) = &w.spec else {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(tr("Analysing…"));
-                });
+                empty_plot(ui, rect, w.look, w.rate, w.secs, tr("Analysing…"), true);
                 return;
             };
             let stale = w.texture.as_ref().is_none_or(|(l, _)| *l != w.look);
@@ -411,9 +671,10 @@ pub fn show(ctx: &egui::Context, s: &mut crate::UiState) {
                 w.texture = Some((w.look, tex));
             }
             if let Some((_, tex)) = &w.texture {
-                plot(ui, spec, w.look, tex);
+                plot(ui, rect, spec, w.look, tex);
             }
-        });
+        },
+    );
     if !open {
         s.spectrogram.window = None;
     }
@@ -436,6 +697,64 @@ mod tests {
         (0..img.size[1])
             .max_by_key(|r| img.pixels[r * w + x].r())
             .unwrap()
+    }
+
+    /// A sung line: a gliding fundamental with vibrato and twelve harmonics, in syllables.
+    fn voice(rate: u32, secs: f32) -> Vec<f32> {
+        let mut phase = 0.0f32;
+        (0..(rate as f32 * secs) as usize)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                let f0 = 196.0 * (1.0 + 0.35 * (t * 0.9).sin()) + 4.0 * (t * 34.0).sin();
+                phase += std::f32::consts::TAU * f0 / rate as f32;
+                let gate = if (t * 2.0).fract() < 0.82 { 1.0 } else { 0.0 };
+                let tone: f32 = (1..=12).map(|k| (phase * k as f32).sin() / k as f32).sum();
+                tone * 0.2 * gate
+            })
+            .collect()
+    }
+
+    fn window_with(spec: Option<Spectrogram>) -> crate::UiState {
+        let mut s = crate::UiState::new();
+        s.spectrogram.window = Some(Window {
+            title: trf("Spectrogram: {}", &[&"Lead Vocal"]),
+            pending: None,
+            spec,
+            error: None,
+            look: DEFAULT_LOOK,
+            texture: None,
+            secs: 4.0,
+            rate: 44_100,
+        });
+        s
+    }
+
+    /// Pictures of the window, measured and while measuring:
+    /// `MANUAL_PNG_DIR=… cargo test -p prowave-app spectrogram_pictures -- --ignored`.
+    #[test]
+    #[ignore = "pictures of the window"]
+    fn spectrogram_pictures() {
+        let rate = 44_100;
+        let spec = measure(&voice(rate, 4.0), rate);
+        for (name, spec, w, h) in [
+            ("spectrogram.png", Some(spec.clone()), 800.0, 470.0),
+            ("spectrogram-narrow.png", Some(spec), 560.0, 380.0),
+            ("spectrogram-analysing.png", None, 800.0, 470.0),
+        ] {
+            let mut s = window_with(spec);
+            crate::ui_test::render_png(
+                w,
+                h,
+                2.0,
+                theme::BONE3,
+                |ui| {
+                    theme::apply(ui.ctx());
+                    show(ui.ctx(), &mut s)
+                },
+                &hw_vocal::picture_path(name),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

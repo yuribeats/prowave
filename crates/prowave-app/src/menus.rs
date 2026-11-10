@@ -1,17 +1,23 @@
 //! Top menu bar with the same menus and entries as Logic Pro. Each entry is drawn like a macOS
 //! menu item: check-mark column, title, key command on the right; entries that are not built
 //! are not shown (see [`implemented`]) and entries that do not apply now are greyed out (see
-//! [`enabled`]). Where the bar is in the window, the appearance button in the control bar
-//! switches it and its menus between the dark look and the light (white) macOS look
-//! (`UiState::light_menus`).
+//! [`enabled`]). Drawn in the Hardware look: a chassis strip with the PW-1 wordmark and the
+//! menu titles in silkscreen caps (the open one pressed in like a black key), and drop-down
+//! menus in the black field material or a bone faceplate (the entry under the pointer pressed
+//! into the panel with an orange edge, an LED on every entry that can be checked). Where the
+//! bar is in the window, the MENUS key in the control bar switches the drop-downs between the
+//! two (`UiState::light_menus`).
 use crate::file_commands::FileCmd;
+use crate::hw;
 use crate::i18n::{self, tr, trf, Lang};
 use crate::model::{Project, TrackKind};
 use crate::project_settings::SettingsTab;
+use crate::theme::{self, Face};
 use crate::track_dialogs;
+use crate::transport::hw_transport;
 use crate::undo::UndoCmd;
 use crate::Bottom;
-use egui::{pos2, vec2, Align2, Color32, FontId, Key, KeyboardShortcut, Modifiers, Sense, Stroke};
+use egui::{pos2, vec2, Align2, Color32, Key, KeyboardShortcut, Modifiers, Sense, Stroke};
 
 const FILE: &[&str] = &[
     "New…",
@@ -83,6 +89,8 @@ const SUBMENUS: &[(&str, &[&str])] = &[
             "MIDI File…",
             "Paint Image to Audio…",
             "Other Projects…",
+            "-",
+            "Fit to Grid on Drop",
         ],
     ),
     (
@@ -392,6 +400,7 @@ pub(crate) const CHECKABLE: &[&str] = &[
     "Check for Updates Automatically",
     "Software Monitoring",
     "Low Latency Mode",
+    "Fit to Grid on Drop",
     "Channel Rack",
     "Pitch Editor",
     "MIDI Monitor",
@@ -427,33 +436,47 @@ struct Look {
     bar_text: Color32,
     menu: Color32,
     text: Color32,
+    /// Entries that do not apply now.
     dim: Color32,
+    /// Key commands.
+    key: Color32,
+    /// The entry under the pointer: a recessed bar and how deep its shadow is.
     hover: Color32,
+    hover_shade: f32,
     hover_text: Color32,
+    /// A seam between groups: its dark line and the light line under it.
     separator: Color32,
+    separator_hi: Color32,
 }
 
+/// Drop-downs in the black field material of the value fields.
 const DARK: Look = Look {
-    bar: Color32::from_rgb(0x3a, 0x3a, 0x3c),
-    bar_text: Color32::from_rgb(0xdc, 0xdc, 0xdc),
-    menu: Color32::from_rgb(0x4a, 0x4a, 0x4c),
-    text: Color32::from_rgb(0xe6, 0xe6, 0xe6),
-    dim: Color32::from_rgb(0x8a, 0x8a, 0x8c),
-    hover: Color32::from_rgb(0x2f, 0x6f, 0xd8),
-    hover_text: Color32::WHITE,
-    separator: Color32::from_rgb(0x5e, 0x5e, 0x60),
+    bar: theme::BONE,
+    bar_text: theme::INK,
+    menu: theme::CAP,
+    text: theme::ON_DARK,
+    dim: theme::ON_DARK_DIM,
+    key: theme::ON_DARK_DIM,
+    hover: Color32::from_rgb(0x12, 0x11, 0x10),
+    hover_shade: 0.5,
+    hover_text: theme::ON_DARK,
+    separator: Color32::from_rgb(0x0b, 0x0b, 0x0a),
+    separator_hi: Color32::from_rgb(0x3a, 0x38, 0x35),
 };
 
-/// macOS light menu bar and menus, as in Logic with the system in light mode.
+/// Drop-downs in a bone faceplate, printed in ink.
 const LIGHT: Look = Look {
-    bar: Color32::from_rgb(0xf5, 0xf5, 0xf5),
-    bar_text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
-    menu: Color32::from_rgb(0xec, 0xec, 0xec),
-    text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
-    dim: Color32::from_rgb(0xa8, 0xa8, 0xaa),
-    hover: Color32::from_rgb(0x2f, 0x7b, 0xf6),
-    hover_text: Color32::WHITE,
-    separator: Color32::from_rgb(0xd2, 0xd2, 0xd4),
+    bar: theme::BONE,
+    bar_text: theme::INK,
+    menu: theme::PANEL,
+    text: theme::INK,
+    dim: theme::PRINT,
+    key: theme::INK2,
+    hover: theme::BONE2,
+    hover_shade: 0.22,
+    hover_text: theme::INK,
+    separator: theme::SEAM,
+    separator_hi: theme::BONE_HI,
 };
 
 fn look(light: bool) -> &'static Look {
@@ -654,6 +677,7 @@ const ALWAYS: &[&str] = &[
     "Check for Updates Automatically",
     "Software Monitoring",
     "Low Latency Mode",
+    "Fit to Grid on Drop",
     "Record / Mix Mode",
     "Switch to Record Mode When Arming",
     "Show Tempo Track",
@@ -770,6 +794,7 @@ pub(crate) fn checked(label: &str, p: &Project, s: &crate::UiState) -> bool {
         "Check for Updates Automatically" => s.update_auto,
         "Software Monitoring" => s.software_monitoring,
         "Low Latency Mode" => s.low_latency,
+        "Fit to Grid on Drop" => s.fit.on_drop,
         "Channel Rack" => s.bottom == Bottom::ChannelRack,
         "Pitch Editor" => s.bottom == Bottom::PitchEditor,
         "MIDI Monitor" => s.show_midi_monitor,
@@ -843,6 +868,10 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         "Check for Updates Automatically" => {
             s.update_auto = !s.update_auto;
             crate::updater::set_auto_enabled(s.update_auto);
+        }
+        "Fit to Grid on Drop" => {
+            s.fit.on_drop = !s.fit.on_drop;
+            crate::fit_grid::save_on_drop(s.fit.on_drop);
         }
         "Software Monitoring" => {
             s.software_monitoring = !s.software_monitoring;
@@ -989,7 +1018,7 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
                 .tracks
                 .iter()
                 .flat_map(|t| t.regions.iter())
-                .map(|r| p.region_end_beats(r))
+                .map(|r| p.region_loop_end_beats(r))
                 .fold(0.0, f64::max);
         }
         "Go to Left Locator" => p.position_beats = p.cycle_start,
@@ -1045,47 +1074,55 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
     }
 }
 
-/// One menu entry that is always enabled (the Open Recent list).
-/// Height of a menu entry and size of its text, in points (macOS menus).
-const ROW_H: f32 = 19.0;
-const FONT: f32 = 13.0;
-/// Left column (check mark) and right padding of an entry.
-const CHECK_W: f32 = 22.0;
+/// Height of a menu entry and size of its text, in points.
+const ROW_H: f32 = 24.0;
+const FONT: f32 = 12.0;
+/// Size of the key commands' text.
+const KEY_FONT: f32 = 11.0;
+/// Left column (LED) and right padding of an entry.
+const CHECK_W: f32 = 24.0;
 const RIGHT_PAD: f32 = 10.0;
 /// Gap between an entry's title and its key command or arrow.
 const KEY_GAP: f32 = 28.0;
+/// Height of the in-window menu bar, its left inset and the menu titles' size.
+pub const BAR_H: f32 = 30.0;
+const BAR_INSET: f32 = 16.0;
+const TITLE_SIZE: f32 = 13.5;
+
+/// Whether key commands are printed with the Mac's signs.
+fn mac(ctx: &egui::Context) -> bool {
+    ctx.os() == egui::os::OperatingSystem::Mac
+}
 
 /// Width of a menu holding `labels` (and their key commands), so it is as wide as its longest
 /// entry, like a macOS menu, instead of stretching across the window.
 fn menu_width(ui: &egui::Ui, labels: &[String]) -> f32 {
-    let font = FontId::proportional(FONT);
-    let width = |t: &str| {
-        ui.painter()
-            .layout_no_wrap(t.to_owned(), font.clone(), Color32::WHITE)
-            .size()
-            .x
-    };
+    let g = ui.painter();
+    let width = |t: &str, face: Face, size: f32| hw::galley(g, t, face, size, theme::INK).size().x;
+    let mac = mac(ui.ctx());
     let (mut title, mut key) = (0.0f32, 0.0f32);
     for it in labels.iter().filter(|l| *l != "-") {
-        title = title.max(width(tr(it)));
+        title = title.max(width(&tr(it).to_uppercase(), Face::Bold, FONT));
         if let Some(k) = shortcut(it) {
-            key = key.max(width(&ui.ctx().format_shortcut(&k)));
+            key = key.max(hw_transport::shortcut_width(g, &k, mac, KEY_FONT));
         }
         if submenu(it).is_some() || it == "Open Recent" {
             key = key.max(8.0);
         }
     }
     let gap = if key > 0.0 { KEY_GAP } else { 12.0 };
-    (CHECK_W + title + gap + key + RIGHT_PAD).max(120.0)
+    (CHECK_W + title + gap + key + RIGHT_PAD).max(140.0)
 }
 
-/// One entry: check-mark column, title, then the key command or a submenu arrow on the right.
+/// One entry: the LED column (an LED on every entry that can be checked, lit when it is),
+/// the title, then the key command or a submenu arrow on the right. The entry under the
+/// pointer is pressed into the panel: a recessed bar with an orange edge.
 fn row(
     ui: &mut egui::Ui,
     label: &str,
     enabled: bool,
-    check: bool,
-    key: Option<String>,
+    check: Option<bool>,
+    key: Option<KeyboardShortcut>,
     arrow: bool,
     look: &Look,
 ) -> egui::Response {
@@ -1095,31 +1132,38 @@ fn row(
         Sense::hover()
     };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
-    let hot = enabled && resp.hovered();
+    let hot = enabled && (resp.hovered() || resp.has_focus());
     let g = ui.painter();
     if hot {
-        g.rect_filled(rect.shrink2(vec2(0.0, 1.0)), 4.0, look.hover);
+        let bar = rect.shrink2(vec2(0.0, 1.0));
+        g.rect_filled(bar, 2.0, look.hover);
+        hw::inner_shadow(g, bar, 2.0, look.hover_shade);
+        g.rect_filled(
+            egui::Rect::from_min_size(bar.min, vec2(3.0, bar.height())),
+            egui::CornerRadius {
+                nw: 2,
+                sw: 2,
+                ne: 0,
+                se: 0,
+            },
+            theme::ORANGE,
+        );
     }
     let color = match (enabled, hot) {
         (false, _) => look.dim,
         (true, true) => look.hover_text,
         (true, false) => look.text,
     };
-    let font = FontId::proportional(FONT);
-    if check {
-        g.text(
-            pos2(rect.left() + 7.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            "✔",
-            FontId::proportional(11.0),
-            color,
-        );
+    if let Some(on) = check {
+        hw::led_sized(g, pos2(rect.left() + 12.0, rect.center().y), 2.6, on);
     }
-    g.text(
+    hw::text(
+        g,
         pos2(rect.left() + CHECK_W, rect.center().y),
         Align2::LEFT_CENTER,
-        label,
-        font.clone(),
+        &label.to_uppercase(),
+        Face::Bold,
+        FONT,
         color,
     );
     let right = pos2(rect.right() - RIGHT_PAD, rect.center().y);
@@ -1135,19 +1179,20 @@ fn row(
             Stroke::NONE,
         ));
     } else if let Some(key) = key {
-        let key_color = if hot { look.hover_text } else { look.dim };
-        g.text(right, Align2::RIGHT_CENTER, key, font, key_color);
+        let key_color = if enabled { look.key } else { look.dim };
+        hw_transport::shortcut(g, right, &key, mac(ui.ctx()), KEY_FONT, key_color);
     }
     resp
 }
 
 fn separator(ui: &mut egui::Ui, look: &Look) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
-    let y = rect.center().y;
-    ui.painter().line_segment(
-        [pos2(rect.left() + 10.0, y), pos2(rect.right() - 10.0, y)],
-        Stroke::new(1.0, look.separator),
-    );
+    let y = rect.center().y.round();
+    let x = rect.left() + 10.0..=rect.right() - 10.0;
+    ui.painter()
+        .hline(x.clone(), y + 0.5, Stroke::new(1.0, look.separator));
+    ui.painter()
+        .hline(x, y + 1.5, Stroke::new(1.0, look.separator_hi));
 }
 
 /// How a remembered project is listed: "Night Drive  (Music)", so equal names in different
@@ -1173,7 +1218,7 @@ fn recent_items(ui: &mut egui::Ui, s: &mut crate::UiState, look: &Look) {
     ui.spacing_mut().item_spacing.y = 0.0;
     let mut picked = None;
     for (label, path) in labels.iter().zip(s.recent.paths()) {
-        if row(ui, label, true, false, None, false, look).clicked() {
+        if row(ui, label, true, None, None, false, look).clicked() {
             picked = Some(path.clone());
         }
     }
@@ -1184,7 +1229,7 @@ fn recent_items(ui: &mut egui::Ui, s: &mut crate::UiState, look: &Look) {
         ui,
         tr("Clear Menu"),
         !labels.is_empty(),
-        false,
+        None,
         None,
         false,
         look,
@@ -1199,9 +1244,28 @@ fn recent_items(ui: &mut egui::Ui, s: &mut crate::UiState, look: &Look) {
     }
 }
 
+/// `items` as drawn: a group left with a single entry joins the group after it, so a menu
+/// does not end up with one-line groups between separators.
+fn grouped(items: &[&'static str]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    let mut run = 0;
+    for &it in items {
+        if it == "-" {
+            if run > 1 {
+                out.push(it);
+                run = 0;
+            }
+        } else {
+            out.push(it);
+            run += 1;
+        }
+    }
+    out
+}
+
 /// The entries of one menu or submenu.
 fn entries(ui: &mut egui::Ui, items: &[&'static str], p: &mut Project, s: &mut crate::UiState) {
-    let items = &shown(items)[..];
+    let items = &grouped(&shown(items))[..];
     let look = look(s.light_menus);
     let labels: Vec<String> = items.iter().map(|it| it.to_string()).collect();
     ui.set_width(menu_width(ui, &labels));
@@ -1212,61 +1276,131 @@ fn entries(ui: &mut egui::Ui, items: &[&'static str], p: &mut Project, s: &mut c
             continue;
         }
         if it == "Open Recent" {
-            let resp = row(ui, tr(it), true, false, None, true, look);
+            let resp = row(ui, tr(it), true, None, None, true, look);
             egui::containers::menu::SubMenu::new().show(ui, &resp, |ui| recent_items(ui, s, look));
             continue;
         }
         if let Some(children) = submenu(it) {
             let on = children.iter().any(|c| enabled(c, p, s));
-            let resp = row(ui, tr(it), on, false, None, true, look);
+            let resp = row(ui, tr(it), on, None, None, true, look);
             if on {
                 egui::containers::menu::SubMenu::new()
                     .show(ui, &resp, |ui| entries(ui, children, p, s));
             }
             continue;
         }
-        let key = shortcut(it).map(|k| ui.ctx().format_shortcut(&k));
-        let (on, check) = (enabled(it, p, s), checked(it, p, s));
-        if row(ui, tr(it), on, check, key, false, look).clicked() {
+        let on = enabled(it, p, s);
+        let check = is_checkable(it).then(|| checked(it, p, s));
+        if row(ui, tr(it), on, check, shortcut(it), false, look).clicked() {
             apply(it, p, s);
             ui.close();
         }
     }
 }
 
+/// Key under which a picture can ask for a menu to be drawn open.
+fn force_open_id() -> egui::Id {
+    egui::Id::unique("prowave_menu_bar_force_open")
+}
+
+/// One menu title on the bar: silkscreen caps that press in like a key while its menu is
+/// open (a black key with bone print), its drop-down under its left edge. Hovering another
+/// title while a menu is open moves to that menu, as in a system menu bar. Returns the
+/// title's right edge.
+#[allow(clippy::too_many_arguments)]
 fn menu(
     ui: &mut egui::Ui,
-    title: &str,
+    g: &egui::Painter,
+    left: f32,
+    bar: egui::Rect,
+    title: &'static str,
     items: &[&'static str],
     p: &mut Project,
     s: &mut crate::UiState,
-) {
-    let title = egui::RichText::new(tr(title)).color(look(s.light_menus).bar_text);
-    ui.menu_button(title, |ui| entries(ui, items, p, s));
+) -> f32 {
+    use egui::containers::menu::MenuConfig;
+    use egui::{Popup, SetOpenCommand, UiKind, UiStackInfo};
+    let light = s.light_menus;
+    let text = tr(title).to_uppercase();
+    let tw = hw::silk_width(g, &text, TITLE_SIZE);
+    let r = egui::Rect::from_min_size(pos2(left, bar.center().y - 11.0), vec2(tw + 20.0, 22.0));
+    let resp = ui.interact(
+        r,
+        egui::Id::unique(("menu_bar_title", title)),
+        Sense::click(),
+    );
+    let open_menu_id = egui::Id::unique("prowave_menu_bar_open");
+    let mut menu = Popup::menu(&resp);
+    let popup_id = menu.get_id();
+    let forced = ui.data(|d| d.get_temp::<&'static str>(force_open_id())) == Some(title);
+    let other_open = ui
+        .data(|d| d.get_temp::<egui::Id>(open_menu_id))
+        .is_some_and(|id| id != popup_id && Popup::is_id_open(ui.ctx(), id));
+    if forced || (other_open && resp.hovered() && !resp.clicked()) {
+        menu = menu.open_memory(Some(SetOpenCommand::Bool(true)));
+    }
+    let open = forced || Popup::is_id_open(ui.ctx(), popup_id) || resp.clicked();
+    let ink = if open {
+        let face = hw::paint_key(g, r, hw::Cap::Dark, true, false);
+        hw::silk(
+            g,
+            face.center(),
+            Align2::CENTER_CENTER,
+            &text,
+            TITLE_SIZE,
+            theme::ON_DARK,
+        );
+        None
+    } else {
+        if resp.hovered() {
+            hw::paint_key(g, r, hw::Cap::Bone, false, true);
+        }
+        Some(theme::INK)
+    };
+    if let Some(ink) = ink {
+        hw::silk(
+            g,
+            r.center() + vec2(0.0, 0.5),
+            Align2::CENTER_CENTER,
+            &text,
+            TITLE_SIZE,
+            ink,
+        );
+    }
+    let config = MenuConfig::new().style(menu_style(light));
+    let shown = menu
+        .close_behavior(config.close_behavior)
+        .style(menu_style(light))
+        .info(UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, config))
+        .show(|ui| entries(ui, items, p, s));
+    if shown.is_some() {
+        ui.data_mut(|d| d.insert_temp(open_menu_id, popup_id));
+    }
+    r.right()
 }
 
-/// Style of the bar buttons and of the drop-down menus for the current look.
+/// Style of the drop-down menus for the current look.
 fn menu_style(light: bool) -> impl Fn(&mut egui::Style) + Send + Sync + 'static {
     move |style: &mut egui::Style| {
         egui::containers::menu::menu_style(style);
         let l = look(light);
-        let hover_fill = if light {
-            Color32::from_rgb(0xdc, 0xdc, 0xdc)
-        } else {
-            Color32::from_rgb(0x55, 0x55, 0x58)
-        };
         let v = &mut style.visuals;
         v.window_fill = l.menu;
-        v.window_stroke = Stroke::new(1.0, l.separator);
-        v.menu_corner_radius = egui::CornerRadius::same(6);
+        v.window_stroke = Stroke::new(
+            1.0,
+            if light {
+                theme::SEAM_DK
+            } else {
+                theme::CAP_EDGE
+            },
+        );
+        v.menu_corner_radius = egui::CornerRadius::same(3);
         v.override_text_color = None;
         v.widgets.noninteractive.fg_stroke.color = l.text;
-        v.widgets.inactive.fg_stroke.color = l.bar_text;
-        v.widgets.hovered.weak_bg_fill = hover_fill;
-        v.widgets.hovered.fg_stroke.color = l.bar_text;
-        v.widgets.open.weak_bg_fill = hover_fill;
-        v.widgets.open.fg_stroke.color = l.bar_text;
-        v.widgets.active.fg_stroke.color = l.bar_text;
+        v.widgets.inactive.fg_stroke.color = l.text;
+        v.widgets.hovered.fg_stroke.color = l.text;
+        v.widgets.open.fg_stroke.color = l.text;
+        v.widgets.active.fg_stroke.color = l.text;
     }
 }
 
@@ -1324,29 +1458,74 @@ pub fn handle_keys(ctx: &egui::Context, p: &mut Project, s: &mut crate::UiState)
     }
 }
 
-/// The menu bar. Returns where its contents end, so the rest of the row can be used (on Linux
-/// it holds the window buttons and moves the window, see `window_chrome`).
+/// The app's name split into the wordmark and the edition ("Pro Wave", "Private").
+fn name_parts() -> (&'static str, Option<&'static str>) {
+    match crate::APP_NAME.split_once(" (") {
+        Some((name, rest)) => (name, Some(rest.trim_end_matches(')'))),
+        None => (crate::APP_NAME, None),
+    }
+}
+
+/// The menu bar: a strip of the chassis with a seam under it, the PW-1 wordmark, the menu
+/// titles, the last error or warning, and at the right the project's track count and the
+/// edition in small silkscreen. Returns where its contents end, so the rest of the row can be
+/// used (on Linux it holds the window buttons and moves the window, see `window_chrome`).
 pub fn menu_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) -> f32 {
-    let light = s.light_menus;
-    let bar = egui::MenuBar::new()
-        .style(menu_style(light))
-        .config(egui::containers::menu::MenuConfig::new().style(menu_style(light)));
-    bar.ui(ui, |ui| {
-        ui.label(
-            egui::RichText::new(crate::APP_NAME)
-                .strong()
-                .color(look(light).bar_text),
-        );
-        for (title, items) in MENUS {
-            let items = shown(items);
-            if !items.is_empty() {
-                menu(ui, title, &items, p, s);
-            }
+    let (strip, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
+    // The whole panel, under its frame's margins too.
+    let panel = egui::Rect::from_x_y_ranges(
+        ui.clip_rect().x_range(),
+        strip.top() - 2.0..=strip.bottom() + 2.0,
+    );
+    let bar = egui::Rect::from_x_y_ranges(panel.x_range(), strip.y_range());
+    let g = ui.painter_at(panel);
+    hw::chassis(&g, panel);
+    hw::seam_h(&g, panel.x_range(), panel.bottom() - 2.0);
+    let (name, edition) = name_parts();
+    let mut x = hw_transport::wordmark(
+        &g,
+        bar.left() + BAR_INSET,
+        bar.center().y,
+        name,
+        "PW-1 Digital Audio Workstation",
+    ) + 22.0;
+    for (title, items) in MENUS {
+        let items = shown(items);
+        if !items.is_empty() {
+            x = menu(ui, &g, x, bar, title, &items, p, s) + 2.0;
         }
-        status_line(ui, p, s);
-        ui.cursor().left()
-    })
-    .inner
+    }
+    // The right end: tracks and edition, clear of the window buttons where the app draws them.
+    let right = bar.right()
+        - if crate::window_chrome::CUSTOM {
+            3.0 * 40.0 + 14.0
+        } else {
+            BAR_INSET
+        };
+    let mut info = format!("{:02} TRK", p.tracks.len());
+    if let Some(e) = edition {
+        info.push_str(" / ");
+        info.push_str(e);
+    }
+    let info_r = hw::text(
+        &g,
+        pos2(right, bar.center().y + 0.5),
+        Align2::RIGHT_CENTER,
+        &info.to_uppercase(),
+        Face::Bold,
+        9.5,
+        theme::PRINT,
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_max(
+                pos2(x + 10.0, bar.top()),
+                pos2((info_r.left() - 10.0).max(x + 10.0), bar.bottom()),
+            ))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    status_line(&mut child, p, s);
+    child.min_rect().right().max(x)
 }
 
 /// Colour of the menu bar's text, for things drawn on the bar.
@@ -1362,11 +1541,8 @@ pub fn has_status(p: &Project, s: &crate::UiState) -> bool {
 /// The last error or warning, after the menus (or on its own line on macOS, where the menus
 /// are in the system menu bar).
 pub fn status_line(ui: &mut egui::Ui, p: &Project, s: &crate::UiState) {
-    let warn = if s.light_menus {
-        Color32::from_rgb(0xb0, 0x5a, 0x00)
-    } else {
-        Color32::from_rgb(0xff, 0xb0, 0x40)
-    };
+    // The bar is bone in both looks: a dark orange print reads on it.
+    let warn = theme::ORANGE_DK;
     if let Some(msg) = &s.status {
         ui.colored_label(warn, msg);
     }
@@ -1388,6 +1564,11 @@ mod tests {
     use super::*;
     use crate::file_commands::content;
 
+    /// Help > Check for Updates… and Check for Updates Automatically.
+    fn updates(s: &crate::UiState) -> (bool, bool) {
+        (s.update_check, s.update_auto)
+    }
+
     /// Everything a menu entry can change, to compare before and after.
     fn state(p: &Project, s: &crate::UiState) -> String {
         format!(
@@ -1399,10 +1580,9 @@ mod tests {
                 p.recording,
                 (s.show_mixer, s.show_inspector, s.show_lists),
                 (
-                    s.update_check,
-                    s.update_auto,
+                    updates(s),
                     s.show_midi_fx,
-                    s.software_monitoring,
+                    (s.software_monitoring, s.fit.on_drop),
                     s.low_latency,
                     (s.io_buffer, s.process_buffer, s.modes.clone()),
                     s.bottom == Bottom::ChannelRack,
@@ -1750,5 +1930,46 @@ mod tests {
         let mut out = ctx.run_ui(press(Key::P), |ui| handle_keys(ui.ctx(), &mut p, &mut s));
         out.textures_delta.clear();
         assert!(s.bottom == Bottom::Mixer);
+    }
+
+    /// Pictures of the menu bar and of the View menu in both looks (`PROWAVE_UI_PNG_DIR`, else
+    /// the temp folder).
+    #[test]
+    #[ignore = "pictures"]
+    fn pictures_menus() {
+        let dir = std::env::var_os("PROWAVE_UI_PNG_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("prowave-transport"));
+        let _ = std::fs::create_dir_all(&dir);
+        for light in [false, true] {
+            let mut p = Project::demo();
+            let mut s = crate::UiState::new();
+            s.light_menus = light;
+            s.show_inspector = true;
+            s.show_mixer = true;
+            let name = if light {
+                "menu-view-light.png"
+            } else {
+                "menu-view.png"
+            };
+            crate::ui_test::render_png(
+                1470.0,
+                620.0,
+                2.0,
+                crate::theme::BONE,
+                |ui| {
+                    crate::theme::apply(ui.ctx());
+                    // The View menu drawn open, under its title, as in the app's top panel.
+                    ui.data_mut(|d| d.insert_temp(force_open_id(), "View"));
+                    let frame =
+                        egui::Frame::side_top_panel(ui.style()).fill(bar_fill(s.light_menus));
+                    egui::Panel::top("menu")
+                        .frame(frame)
+                        .show(ui, |ui| menu_bar(ui, &mut p, &mut s));
+                },
+                &dir.join(name),
+            )
+            .unwrap();
+        }
     }
 }

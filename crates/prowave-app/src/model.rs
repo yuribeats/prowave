@@ -145,6 +145,9 @@ impl Generated {
     }
 }
 
+/// Most repeats one looped region plays (a guard against a tiny region looped for hours).
+pub const MAX_LOOP_REPEATS: usize = 4096;
+
 /// Most bars the notes of a generated region are made for.
 const MAX_GENERATED_BARS: usize = 1024;
 
@@ -171,6 +174,10 @@ pub struct RegionParams {
     /// Crossfade with the audio region this one overlaps (Logic: Drag > X-Fade): it fades in
     /// over the overlap while the earlier region fades out, with the region's curve.
     pub crossfade: bool,
+    /// Loop (Logic: drag the upper half of the region's right edge): the region plays again
+    /// and again after its end for this many quarter notes; the last repeat may be cut short.
+    /// 0 = no loop.
+    pub loop_beats: f32,
 }
 
 /// Project Settings > Metronome: the click's level range in dB, and where it starts (the
@@ -398,14 +405,14 @@ impl Track {
     /// instrument track starts with no instrument (silent until one is loaded).
     pub fn new(name: impl Into<String>, kind: TrackKind) -> Self {
         let color = match kind {
-            TrackKind::Instrument => Color32::from_rgb(0x4e, 0xb0, 0x4a),
-            TrackKind::Drummer => Color32::from_rgb(0xd9, 0xaa, 0x2a),
-            TrackKind::Audio => Color32::from_rgb(0x3f, 0x5f, 0xc0),
-            TrackKind::Aux => Color32::from_rgb(0x2a, 0xa8, 0xa8),
-            TrackKind::Folder => Color32::from_rgb(0x88, 0x8c, 0x98),
-            TrackKind::Vca => Color32::from_rgb(0x9a, 0x6c, 0xd0),
-            TrackKind::ExternalMidi => Color32::from_rgb(0xd0, 0x84, 0x3c),
-            TrackKind::Bus | TrackKind::Output => Color32::from_rgb(0x7a, 0x4f, 0xc0),
+            TrackKind::Instrument => crate::theme::TRACK_PALETTE[1],
+            TrackKind::Drummer => crate::theme::TRACK_PALETTE[9],
+            TrackKind::Audio => crate::theme::TRACK_PALETTE[2],
+            TrackKind::Aux => crate::theme::TRACK_PALETTE[5],
+            TrackKind::Folder => crate::theme::TRACK_PALETTE[10],
+            TrackKind::Vca => crate::theme::TRACK_PALETTE[7],
+            TrackKind::ExternalMidi => crate::theme::TRACK_PALETTE[4],
+            TrackKind::Bus | TrackKind::Output => crate::theme::TRACK_PALETTE[0],
         };
         Self {
             name: name.into(),
@@ -507,14 +514,14 @@ impl HeaderPart {
 }
 
 pub const MARKER_COLORS: [Color32; 8] = [
-    Color32::from_rgb(0x3f, 0x8f, 0xd8),
-    Color32::from_rgb(0x4e, 0xb0, 0x4a),
-    Color32::from_rgb(0xd9, 0xaa, 0x2a),
-    Color32::from_rgb(0xd8, 0x6a, 0x2c),
-    Color32::from_rgb(0xc8, 0x3c, 0x3c),
-    Color32::from_rgb(0xb0, 0x4f, 0xb8),
-    Color32::from_rgb(0x7a, 0x4f, 0xc0),
-    Color32::from_rgb(0x3c, 0xa8, 0xa0),
+    crate::theme::TRACK_PALETTE[0],
+    crate::theme::TRACK_PALETTE[1],
+    crate::theme::TRACK_PALETTE[3],
+    crate::theme::TRACK_PALETTE[4],
+    crate::theme::TRACK_PALETTE[5],
+    crate::theme::TRACK_PALETTE[6],
+    crate::theme::TRACK_PALETTE[2],
+    crate::theme::TRACK_PALETTE[11],
 ];
 
 /// Logic Pro's tempo range.
@@ -690,7 +697,7 @@ impl Project {
         p.tracks = vec![Track {
             name: "Inst 1".into(),
             kind: TrackKind::Instrument,
-            color: Color32::from_rgb(0x4e, 0xb0, 0x4a),
+            color: crate::theme::TRACK_PALETTE[1],
             mute: false,
             solo: false,
             rec: false,
@@ -726,10 +733,10 @@ impl Project {
     }
 
     pub fn demo() -> Self {
-        let green = Color32::from_rgb(0x4e, 0xb0, 0x4a);
-        let blue = Color32::from_rgb(0x3f, 0x5f, 0xc0);
-        let yellow = Color32::from_rgb(0xd9, 0xaa, 0x2a);
-        let purple = Color32::from_rgb(0x7a, 0x4f, 0xc0);
+        // Hardware tones: signal orange for the lead, black caps for the other instruments,
+        // graphite for the Drummer, warm grey for audio.
+        let [orange, black, grey] = [0, 1, 2].map(|i| crate::theme::TRACK_PALETTE[i]);
+        let graphite = crate::theme::TRACK_PALETTE[9];
         let mk = |name: &str, kind, color, ins: Vec<&'static str>, seed, vol| Track {
             name: name.into(),
             kind,
@@ -780,7 +787,7 @@ impl Project {
             mk(
                 "Classic Electric Piano",
                 TrackKind::Instrument,
-                green,
+                orange,
                 vec!["Tape Delay", "Channel EQ"],
                 1,
                 -3.2,
@@ -788,7 +795,7 @@ impl Project {
             mk(
                 "Steinway Grand Piano",
                 TrackKind::Instrument,
-                green,
+                black,
                 vec!["Channel EQ", "Compressor"],
                 2,
                 -2.7,
@@ -796,7 +803,7 @@ impl Project {
             mk(
                 "Analog Pad",
                 TrackKind::Instrument,
-                green,
+                black,
                 vec!["Chorus", "Space D"],
                 3,
                 -5.6,
@@ -804,7 +811,7 @@ impl Project {
             mk(
                 "Drummer",
                 TrackKind::Drummer,
-                yellow,
+                graphite,
                 vec!["Compressor"],
                 4,
                 -4.0,
@@ -812,7 +819,7 @@ impl Project {
             mk(
                 "Electric Bass",
                 TrackKind::Audio,
-                blue,
+                grey,
                 vec!["Channel EQ"],
                 5,
                 -8.2,
@@ -820,7 +827,7 @@ impl Project {
             mk(
                 "Lead Vocal",
                 TrackKind::Audio,
-                purple,
+                grey,
                 vec!["Channel EQ", "Compressor", "Space D"],
                 6,
                 -7.8,
@@ -1167,6 +1174,18 @@ impl Project {
         edit
     }
 
+    /// The audio edits of one repeat of a looped region that starts at `at` and plays `span`
+    /// quarter notes: the region's own gain, fades and offset, played from the top again. A
+    /// repeat cut short by the loop's end has no fade out.
+    pub fn repeat_clip_edit(&self, r: &Region, at: f64, span: f64) -> prowave_engine::ClipEdit {
+        let mut edit = r.params.clip_edit();
+        if span < self.region_len_beats(r) - 1e-6 {
+            edit.fade_out_beats = 0.0;
+        }
+        edit.length_secs = self.seconds_between(at, at + span).max(0.0);
+        edit
+    }
+
     /// Where a region starts, in quarter notes.
     pub fn region_start_beats(&self, r: &Region) -> f64 {
         self.bar_to_beats(r.start_bar as f64 - 1.0)
@@ -1180,6 +1199,29 @@ impl Project {
     /// How long a region is, in quarter notes.
     pub fn region_len_beats(&self, r: &Region) -> f64 {
         self.region_end_beats(r) - self.region_start_beats(r)
+    }
+
+    /// Where a region's loop ends (its own end when it does not loop), in quarter notes.
+    pub fn region_loop_end_beats(&self, r: &Region) -> f64 {
+        self.region_end_beats(r) + f64::from(r.params.loop_beats.max(0.0))
+    }
+
+    /// The repeats of a looped region after its end (Logic: Loop), each as (start, how long it
+    /// plays) in quarter notes. Every repeat is the region again; the last one is cut where the
+    /// loop ends. Empty when the region does not loop.
+    pub fn loop_repeats(&self, r: &Region) -> Vec<(f64, f64)> {
+        let len = self.region_len_beats(r);
+        let stop = self.region_loop_end_beats(r);
+        let mut at = self.region_end_beats(r);
+        let mut out = Vec::new();
+        if len < 1.0 / 960.0 {
+            return out;
+        }
+        while at < stop - 1e-6 && out.len() < MAX_LOOP_REPEATS {
+            out.push((at, (stop - at).min(len)));
+            at += len;
+        }
+        out
     }
 
     /// Seconds between two positions in quarter notes, through the tempo map.
@@ -1241,6 +1283,8 @@ impl Project {
                 ..*c
             })
             .collect();
+        // The loop now follows the right half.
+        left.params.loop_beats = 0.0;
         if r.audio.is_some() {
             right.params.offset_secs = r.params.offset_secs + secs;
             left.params.fade_out = 0.0;

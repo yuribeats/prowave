@@ -1,11 +1,9 @@
-//! Track icons: small shaded instrument illustrations in the style of Logic Pro's track icons
-//! (drum kit, Drummer tile, electric guitar and bass, synth on an X stand, wooden vintage keys,
-//! black piano, condenser microphone, audio waveform, violin, default note tile).
-//!
-//! Original vector drawings (no Apple artwork): every icon is designed on a 36Ã—36 box and
-//! scaled to the target rect; gradients come from per-vertex mesh colours.
+//! Track icons (Logic Pro: Track > Assign Track Icon) as Hardware pictograms: line drawings on a
+//! 24×24 grid in 2-unit strokes of one ink, the way a panel's silkscreen prints them (keyboard,
+//! grand piano, electric piano, synth, waveform, Drummer's snare, drum kit, guitar and bass,
+//! microphone, violin, aux, folder, VCA, MIDI socket). Original drawings, no Apple artwork.
 use crate::model::{Track, TrackKind};
-use egui::{epaint::Mesh, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
+use egui::{vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconKind {
@@ -94,6 +92,12 @@ pub fn track_icon(t: &Track) -> IconKind {
         IconKind::ExternalMidi
     } else if t.kind == TrackKind::Instrument {
         IconKind::Note
+    } else if t.kind == TrackKind::Audio {
+        // A recording shows its material: the microphone for a voice, else the waveform.
+        match icon_kind(t) {
+            IconKind::Mic => IconKind::Mic,
+            _ => IconKind::Waveform,
+        }
     } else {
         icon_kind(t)
     }
@@ -162,145 +166,98 @@ pub fn icon_kind(t: &Track) -> IconKind {
     }
 }
 
-/// Drawing context: design coordinates are a 36Ã—36 box centred on `c`, scaled by `s`.
+/// Drawing context: a 24×24 design grid (origin at its top left) scaled into a square around
+/// `c`; every glyph is drawn in 2-unit strokes of one colour, as the Hardware pictograms are.
 struct Pen<'a> {
     g: &'a Painter,
     c: Pos2,
     s: f32,
-}
-
-/// Width (points) of the hairline drawn around gradient meshes: egui does not anti-alias mesh
-/// edges, so without it shapes look jagged; the feathered stroke smooths them.
-const EDGE_AA: f32 = 0.75;
-
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-    a.lerp_to_gamma(b, t.clamp(0.0, 1.0))
+    col: Color32,
 }
 
 impl Pen<'_> {
     fn p(&self, x: f32, y: f32) -> Pos2 {
-        self.c + vec2(x, y) * self.s
+        self.c + vec2((x - 12.0) * self.s, (y - 12.0) * self.s)
     }
 
-    /// Convex or star-shaped polygon with a vertical gradient.
-    fn poly(&self, pts: &[(f32, f32)], top: Color32, bottom: Color32) {
-        if pts.len() < 3 {
-            return;
-        }
-        let (ymin, ymax) = pts
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
-        let col = |y: f32| mix(top, bottom, (y - ymin) / (ymax - ymin).max(1e-3));
-        let (cx, cy) = pts.iter().fold((0.0, 0.0), |(a, b), p| (a + p.0, b + p.1));
-        let (cx, cy) = (cx / pts.len() as f32, cy / pts.len() as f32);
-        let mut m = Mesh::default();
-        m.colored_vertex(self.p(cx, cy), col(cy));
-        for (x, y) in pts {
-            m.colored_vertex(self.p(*x, *y), col(*y));
-        }
-        let n = pts.len() as u32;
-        for i in 0..n {
-            m.add_triangle(0, 1 + i, 1 + (i + 1) % n);
-        }
-        self.g.add(Shape::mesh(m));
-        let outline: Vec<Pos2> = pts.iter().map(|(x, y)| self.p(*x, *y)).collect();
-        self.g.add(Shape::closed_line(
-            outline,
-            Stroke::new(EDGE_AA, mix(top, bottom, 0.5)),
-        ));
+    fn stroke(&self) -> Stroke {
+        Stroke::new((2.0 * self.s).max(1.2), self.col)
     }
 
-    fn rect(&self, x0: f32, y0: f32, x1: f32, y1: f32, top: Color32, bottom: Color32) {
-        self.poly(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)], top, bottom);
+    /// An open polyline.
+    fn line(&self, pts: &[(f32, f32)]) {
+        let pts: Vec<Pos2> = pts.iter().map(|&(x, y)| self.p(x, y)).collect();
+        self.g.add(Shape::line(pts, self.stroke()));
     }
 
-    /// Horizontal gradient (left â†’ right), for metal and cylinders.
-    #[allow(clippy::too_many_arguments)]
-    fn rect_h(
-        &self,
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-        left: Color32,
-        mid: Color32,
-        right: Color32,
-    ) {
-        let mut m = Mesh::default();
-        let xm = (x0 + x1) * 0.4 + x0 * 0.2;
-        for (x, c) in [(x0, left), (xm, mid), (x1, right)] {
-            m.colored_vertex(self.p(x, y0), c);
-            m.colored_vertex(self.p(x, y1), c);
-        }
-        for i in 0..2u32 {
-            let a = i * 2;
-            m.add_triangle(a, a + 1, a + 2);
-            m.add_triangle(a + 1, a + 3, a + 2);
-        }
-        self.g.add(Shape::mesh(m));
+    /// A closed outline.
+    fn closed(&self, pts: &[(f32, f32)]) {
+        let pts: Vec<Pos2> = pts.iter().map(|&(x, y)| self.p(x, y)).collect();
+        self.g.add(Shape::closed_line(pts, self.stroke()));
     }
 
-    /// Ellipse with a radial gradient whose bright spot sits up and to the left.
-    fn ellipse(&self, cx: f32, cy: f32, rx: f32, ry: f32, inner: Color32, outer: Color32) {
-        let mut m = Mesh::default();
-        m.colored_vertex(self.p(cx - rx * 0.25, cy - ry * 0.3), inner);
-        let n = 28u32;
-        for i in 0..n {
-            let a = i as f32 / n as f32 * std::f32::consts::TAU;
-            m.colored_vertex(self.p(cx + a.cos() * rx, cy + a.sin() * ry), outer);
-        }
-        for i in 0..n {
-            m.add_triangle(0, 1 + i, 1 + (i + 1) % n);
-        }
-        self.g.add(Shape::mesh(m));
-        let outline: Vec<Pos2> = (0..n)
-            .map(|i| {
-                let a = i as f32 / n as f32 * std::f32::consts::TAU;
-                self.p(cx + a.cos() * rx, cy + a.sin() * ry)
-            })
-            .collect();
+    /// A filled convex shape.
+    fn fill(&self, pts: &[(f32, f32)]) {
+        let pts: Vec<Pos2> = pts.iter().map(|&(x, y)| self.p(x, y)).collect();
         self.g
-            .add(Shape::closed_line(outline, Stroke::new(EDGE_AA, outer)));
+            .add(Shape::convex_polygon(pts, self.col, Stroke::NONE));
     }
 
-    fn ellipse_stroke(&self, cx: f32, cy: f32, rx: f32, ry: f32, w: f32, col: Color32) {
-        let pts: Vec<Pos2> = (0..=28)
-            .map(|i| {
-                let a = i as f32 / 28.0 * std::f32::consts::TAU;
-                self.p(cx + a.cos() * rx, cy + a.sin() * ry)
+    fn rect(&self, x: f32, y: f32, w: f32, h: f32) {
+        self.closed(&[(x, y), (x + w, y), (x + w, y + h), (x, y + h)]);
+    }
+
+    fn fill_rect(&self, x: f32, y: f32, w: f32, h: f32) {
+        self.fill(&[(x, y), (x + w, y), (x + w, y + h), (x, y + h)]);
+    }
+
+    fn circle(&self, x: f32, y: f32, r: f32) {
+        self.g
+            .circle_stroke(self.p(x, y), r * self.s, self.stroke());
+    }
+
+    fn dot(&self, x: f32, y: f32, r: f32) {
+        self.g.circle_filled(self.p(x, y), r * self.s, self.col);
+    }
+
+    /// An elliptical arc from `a0` to `a1` degrees (0 = right, 90 = down).
+    fn arc(&self, cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32) -> Vec<(f32, f32)> {
+        let n = (((a1 - a0).abs() / 10.0).ceil() as usize).max(2);
+        (0..=n)
+            .map(|k| {
+                let a = (a0 + (a1 - a0) * k as f32 / n as f32).to_radians();
+                (cx + rx * a.cos(), cy + ry * a.sin())
             })
-            .collect();
-        self.g.add(Shape::line(pts, Stroke::new(w * self.s, col)));
+            .collect()
     }
 
-    fn line(&self, pts: &[(f32, f32)], w: f32, col: Color32) {
-        let pts: Vec<Pos2> = pts.iter().map(|(x, y)| self.p(*x, *y)).collect();
-        self.g.add(Shape::line(pts, Stroke::new(w * self.s, col)));
+    fn ellipse(&self, cx: f32, cy: f32, rx: f32, ry: f32) {
+        let mut pts = self.arc(cx, cy, rx, ry, 0.0, 360.0);
+        pts.pop();
+        self.closed(&pts);
     }
 }
 
-/// Rotates design points around `pivot` by `deg` (clockwise on screen) and scales by `k`.
-fn rot(pts: &[(f32, f32)], pivot: (f32, f32), deg: f32, k: f32) -> Vec<(f32, f32)> {
-    let (s, c) = deg.to_radians().sin_cos();
-    pts.iter()
-        .map(|(x, y)| (pivot.0 + (x * c - y * s) * k, pivot.1 + (x * s + y * c) * k))
-        .collect()
-}
-
-/// Draws a track icon scaled to `r`.
+/// Draws a track pictogram filling `r`, in ink (the Hardware print colour).
 pub fn draw_icon(g: &Painter, r: Rect, kind: IconKind) {
+    draw_icon_in(g, r, kind, crate::theme::INK);
+}
+
+/// Draws a track pictogram filling `r` in `col` (bone on dark caps and plates).
+pub fn draw_icon_in(g: &Painter, r: Rect, kind: IconKind, col: Color32) {
     let pen = Pen {
         g,
         c: r.center(),
-        s: (r.width().min(r.height()) / 36.0).max(0.2),
+        s: (r.width().min(r.height()) / 24.0).max(0.2),
+        col,
     };
     match kind {
-        IconKind::Note => note_tile(&pen),
+        IconKind::Note => keyboard(&pen),
         IconKind::Waveform => waveform(&pen),
         IconKind::DrumKit => drum_kit(&pen),
-        IconKind::DrummerTile => drummer_tile(&pen),
+        IconKind::DrummerTile => drummer(&pen),
         IconKind::Piano => piano(&pen),
-        IconKind::WoodKeys => wood_keys(&pen),
+        IconKind::WoodKeys => electric_piano(&pen),
         IconKind::Synth => synth(&pen),
         IconKind::Bass => guitar(&pen, true),
         IconKind::Guitar => guitar(&pen, false),
@@ -309,655 +266,172 @@ pub fn draw_icon(g: &Painter, r: Rect, kind: IconKind) {
         IconKind::Aux => aux(&pen),
         IconKind::Folder => folder(&pen),
         IconKind::Vca => vca(&pen),
-        IconKind::ExternalMidi => external_midi(&pen),
+        IconKind::ExternalMidi => midi_socket(&pen),
     }
 }
 
-const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
-    Color32::from_rgb(r, g, b)
-}
-
-/// Logic's generic software-instrument icon: a flat dark green tile (rgb 44,60,47, a little
-/// wider than tall) with a flat green (rgb 102,213,109) pair of beamed eighth notes. The
-/// geometry was fitted to the pixels of a Logic Pro track icon (units: tile height = 26).
-fn note_tile(p: &Pen) {
-    let tile = Rect::from_center_size(p.c, vec2(34.0, 26.0) * p.s);
-    p.g.rect_filled(tile, 1.6 * p.s, rgb(44, 60, 47));
-    let ink = rgb(102, 213, 109);
-    // Flat anti-aliased shapes (egui feathers convex polygons).
-    let fill = |pts: &[(f32, f32)]| {
-        let pts: Vec<Pos2> = pts.iter().map(|(x, y)| p.p(*x, *y)).collect();
-        p.g.add(Shape::convex_polygon(pts, ink, Stroke::NONE));
-    };
-    // Two identical oval heads tilted 29.1°.
-    for (hx, hy) in [(-6.082f32, 8.131f32), (3.958, 5.954)] {
-        let oval: Vec<(f32, f32)> = (0..48)
-            .map(|i| {
-                let a = i as f32 / 48.0 * std::f32::consts::TAU;
-                (a.cos() * 2.938, a.sin() * 2.44)
-            })
-            .collect();
-        let head: Vec<(f32, f32)> = rot(&oval, (0.0, 0.0), -29.1, 1.0)
-            .iter()
-            .map(|(x, y)| (x + hx, y + hy))
-            .collect();
-        fill(&head);
+/// A software instrument: an octave of keys.
+fn keyboard(p: &Pen) {
+    p.rect(3.0, 5.0, 18.0, 14.0);
+    for x in [7.5, 12.0, 16.5] {
+        p.line(&[(x, 5.0), (x, 19.0)]);
     }
-    // Stems on the heads' right edges, then the thick beam rising to the right.
-    fill(&[
-        (-4.532, -7.765),
-        (-3.279, -7.765),
-        (-3.279, 8.131),
-        (-4.532, 8.131),
-    ]);
-    fill(&[
-        (5.508, -10.33),
-        (6.761, -10.33),
-        (6.761, 5.954),
-        (5.508, 5.954),
-    ]);
-    // The beam's top corners are slightly rounded, as in Logic.
-    let (tl, tr) = ((-4.532f32, -8.229f32), (6.761f32, -10.795f32));
-    let mut beam = Vec::new();
-    for (corner, from, to) in [(tl, (-4.532, -3.256), tr), (tr, tl, (6.761, -5.56))] {
-        let r = 1.0;
-        let towards = |q: (f32, f32)| {
-            let (dx, dy) = (q.0 - corner.0, q.1 - corner.1);
-            let len = (dx * dx + dy * dy).sqrt();
-            (corner.0 + dx / len * r, corner.1 + dy / len * r)
-        };
-        let (a, b) = (towards(from), towards(to));
-        // Quadratic curve from `a` to `b` with the sharp corner as control point.
-        for i in 0..=6 {
-            let t = i as f32 / 6.0;
-            let u = 1.0 - t;
-            beam.push((
-                u * u * a.0 + 2.0 * u * t * corner.0 + t * t * b.0,
-                u * u * a.1 + 2.0 * u * t * corner.1 + t * t * b.1,
-            ));
-        }
-    }
-    beam.push((6.761, -5.56));
-    beam.push((-4.532, -3.256));
-    fill(&beam);
+    p.fill_rect(5.6, 5.0, 3.6, 8.0);
+    p.fill_rect(14.8, 5.0, 3.6, 8.0);
 }
 
-/// Aux: a dark teal tile with three bus lines that gather into one arrow.
-fn aux(p: &Pen) {
-    p.rect(
-        -16.0,
-        -12.0,
-        16.0,
-        12.0,
-        rgb(0x2a, 0x55, 0x58),
-        rgb(0x1a, 0x37, 0x3a),
-    );
-    let teal = rgb(0x4f, 0xd1, 0xd1);
-    for y in [-6.0, 0.0, 6.0] {
-        p.line(&[(-11.0, y), (3.0, y)], 1.6, teal);
-    }
-    p.line(&[(3.0, -6.0), (8.0, 0.0), (3.0, 6.0)], 1.6, teal);
-    p.line(&[(8.0, 0.0), (13.0, 0.0)], 1.6, teal);
-}
-
-/// VCA: a dark purple tile with three faders at different heights.
-fn vca(p: &Pen) {
-    p.rect(
-        -16.0,
-        -12.0,
-        16.0,
-        12.0,
-        rgb(0x4a, 0x38, 0x66),
-        rgb(0x32, 0x24, 0x48),
-    );
-    let ink = rgb(0xc2, 0x9a, 0xf0);
-    for (x, knob) in [(-8.0, -3.0), (0.0, 4.0), (8.0, -6.0)] {
-        p.line(&[(x, -9.0), (x, 9.0)], 1.2, rgb(0x7a, 0x62, 0xa0));
-        p.rect(
-            x - 3.5,
-            knob - 2.0,
-            x + 3.5,
-            knob + 2.0,
-            ink,
-            rgb(0x9c, 0x78, 0xd0),
-        );
-    }
-}
-
-/// External MIDI: a dark orange tile with a five-pin DIN socket.
-fn external_midi(p: &Pen) {
-    p.rect(
-        -16.0,
-        -12.0,
-        16.0,
-        12.0,
-        rgb(0x66, 0x40, 0x22),
-        rgb(0x48, 0x2c, 0x14),
-    );
-    let ink = rgb(0xf0, 0xa8, 0x5c);
-    let ring: Vec<(f32, f32)> = (0..=24)
-        .map(|k| {
-            let a = k as f32 / 24.0 * std::f32::consts::TAU;
-            (9.0 * a.cos(), 9.0 * a.sin())
-        })
-        .collect();
-    p.line(&ring, 1.4, ink);
-    // Five pins on the upper half of the socket.
-    for k in 0..5 {
-        let a = std::f32::consts::PI * (1.0 + k as f32 / 4.0);
-        let (x, y) = (5.2 * a.cos(), 5.2 * a.sin() + 1.5);
-        p.rect(x - 0.9, y - 0.9, x + 0.9, y + 0.9, ink, ink);
-    }
-    p.line(&[(-3.0, 7.0), (3.0, 7.0)], 1.4, ink);
-}
-
-/// Folder: a grey-blue folder with a tab.
-fn folder(p: &Pen) {
-    p.poly(
-        &[
-            (-15.0, -5.0),
-            (-15.0, -11.0),
-            (-5.0, -11.0),
-            (-2.0, -7.0),
-            (15.0, -7.0),
-            (15.0, -5.0),
-        ],
-        rgb(0xa9, 0xae, 0xbd),
-        rgb(0x8a, 0x8f, 0x9f),
-    );
-    p.rect(
-        -15.0,
-        -6.0,
-        15.0,
-        11.0,
-        rgb(0xc4, 0xc8, 0xd4),
-        rgb(0x7f, 0x84, 0x94),
-    );
-}
-
-fn waveform(p: &Pen) {
-    let blue = rgb(0x3a, 0x80, 0xf2);
-    let heights = [
-        2.0f32, 4.0, 3.0, 8.0, 5.0, 13.0, 7.0, 16.0, 10.0, 6.0, 12.0, 4.0, 9.0, 3.0, 5.0, 2.0,
-    ];
-    for (i, h) in heights.iter().enumerate() {
-        let x = -15.0 + i as f32 * 2.0;
-        p.line(
-            &[(x, -h), (x, *h)],
-            1.4,
-            mix(blue, rgb(0x8c, 0xbc, 0xff), (1.0 - h / 16.0) * 0.6),
-        );
-    }
-    p.line(&[(-17.0, 0.0), (17.0, 0.0)], 0.8, blue);
-}
-
-fn drummer_tile(p: &Pen) {
-    let yellow = rgb(0xec, 0xb8, 0x24);
-    let r = Rect::from_center_size(p.c, vec2(28.0, 28.0) * p.s);
-    p.g.rect_filled(r, 5.0 * p.s, rgb(0x2a, 0x26, 0x1c));
-    p.g.rect_stroke(
-        r,
-        5.0 * p.s,
-        Stroke::new(2.2 * p.s, yellow),
-        egui::StrokeKind::Middle,
-    );
-    // Drummer's beat lane: hits of different heights on a centre line.
-    p.line(&[(-10.0, 0.0), (10.0, 0.0)], 1.0, yellow);
-    for (x, h) in [
-        (-8.0f32, 3.0f32),
-        (-5.0, 6.5),
-        (-2.5, 2.5),
-        (0.5, 8.0),
-        (3.0, 3.0),
-        (5.5, 6.0),
-        (8.0, 2.5),
-    ] {
-        p.line(&[(x, -h), (x, h)], 1.6, yellow);
-    }
-}
-
-fn drum_kit(p: &Pen) {
-    let chrome = rgb(0x9a, 0x9a, 0x9e);
-    // Cymbal stands, then cymbals (gold, seen slightly from above).
-    p.line(&[(-12.0, -9.0), (-12.0, 9.0), (-15.0, 13.0)], 0.9, chrome);
-    p.line(&[(12.5, -11.0), (12.5, 8.0), (15.5, 13.0)], 0.9, chrome);
-    p.ellipse(
-        -12.0,
-        -9.5,
-        7.5,
-        1.9,
-        rgb(0xff, 0xe2, 0x8a),
-        rgb(0xb8, 0x8a, 0x26),
-    );
-    p.ellipse(
-        12.5,
-        -11.5,
-        6.5,
-        1.7,
-        rgb(0xff, 0xe2, 0x8a),
-        rgb(0xb8, 0x8a, 0x26),
-    );
-    // Rack toms.
-    for x in [-4.5f32, 4.5] {
-        p.rect_h(
-            x - 4.0,
-            -6.5,
-            x + 4.0,
-            -1.5,
-            rgb(0x8a, 0x8a, 0x8e),
-            rgb(0xf4, 0xf4, 0xf4),
-            rgb(0x9e, 0x9e, 0xa2),
-        );
-        p.ellipse(x, -6.5, 4.0, 1.4, Color32::WHITE, rgb(0xcf, 0xcf, 0xd2));
-        p.ellipse_stroke(x, -6.5, 4.0, 1.4, 0.6, rgb(0x55, 0x55, 0x58));
-    }
-    // Bass drum (front head facing us).
-    p.ellipse(0.0, 5.5, 9.0, 8.5, Color32::WHITE, rgb(0xc4, 0xc4, 0xc8));
-    p.ellipse_stroke(0.0, 5.5, 9.0, 8.5, 1.8, rgb(0x2c, 0x2c, 0x30));
-    p.ellipse(
-        0.0,
-        5.5,
-        3.2,
-        3.0,
-        rgb(0x55, 0x55, 0x5a),
-        rgb(0x22, 0x22, 0x26),
-    );
-    // Snare (left) and floor tom (right), chrome shells.
-    p.rect_h(
-        -17.0,
-        6.0,
-        -9.5,
-        10.5,
-        rgb(0x7c, 0x7c, 0x80),
-        rgb(0xf0, 0xf0, 0xf0),
-        rgb(0x8c, 0x8c, 0x90),
-    );
-    p.ellipse(
-        -13.25,
-        6.0,
-        3.75,
-        1.3,
-        Color32::WHITE,
-        rgb(0xd4, 0xd4, 0xd8),
-    );
-    p.rect_h(
-        9.5,
-        3.5,
-        17.0,
-        11.5,
-        rgb(0x7c, 0x7c, 0x80),
-        rgb(0xf0, 0xf0, 0xf0),
-        rgb(0x8c, 0x8c, 0x90),
-    );
-    p.ellipse(13.25, 3.5, 3.75, 1.3, Color32::WHITE, rgb(0xd4, 0xd4, 0xd8));
-    p.line(&[(-15.5, 10.5), (-16.5, 14.0)], 0.9, chrome);
-    p.line(&[(-11.0, 10.5), (-10.0, 14.0)], 0.9, chrome);
-}
-
+/// A grand piano seen from above, its keys along the front.
 fn piano(p: &Pen) {
-    // Black digital/upright piano seen slightly from the left.
-    p.rect(
-        -15.0,
-        -10.0,
-        15.0,
-        3.0,
-        rgb(0x55, 0x55, 0x58),
-        rgb(0x16, 0x16, 0x18),
-    );
-    p.rect(
-        -15.0,
-        -11.5,
-        15.0,
-        -10.0,
-        rgb(0x7a, 0x7a, 0x7e),
-        rgb(0x44, 0x44, 0x48),
-    );
-    // Keyboard.
-    p.rect(-14.0, 0.0, 14.0, 4.5, Color32::WHITE, rgb(0xd8, 0xd8, 0xd8));
-    for i in 0..15 {
-        let x = -14.0 + i as f32 * 1.87;
-        p.line(&[(x, 0.0), (x, 4.5)], 0.4, rgb(0x90, 0x90, 0x90));
+    let mut outline = vec![(4.0, 20.0), (4.0, 4.0), (9.0, 4.0)];
+    outline.extend(p.arc(9.0, 11.0, 11.0, 7.0, -90.0, 0.0));
+    outline.extend([(20.0, 20.0)]);
+    p.closed(&outline);
+    p.line(&[(4.0, 15.5), (20.0, 15.5)]);
+    for x in [7.2, 10.4, 13.6, 16.8] {
+        p.line(&[(x, 15.5), (x, 20.0)]);
     }
-    for i in [1, 2, 4, 5, 6, 8, 9, 11, 12, 13] {
-        let x = -14.0 + i as f32 * 1.87 - 0.55;
-        p.rect(
-            x,
-            0.0,
-            x + 1.1,
-            2.7,
-            rgb(0x30, 0x30, 0x30),
-            rgb(0x05, 0x05, 0x05),
-        );
-    }
-    p.rect(
-        -15.0,
-        4.5,
-        15.0,
-        6.5,
-        rgb(0x2c, 0x2c, 0x2e),
-        rgb(0x10, 0x10, 0x12),
-    );
-    // Legs and pedals.
-    p.rect(
-        -14.5,
-        6.5,
-        -12.5,
-        14.0,
-        rgb(0x3a, 0x3a, 0x3c),
-        rgb(0x12, 0x12, 0x14),
-    );
-    p.rect(
-        12.5,
-        6.5,
-        14.5,
-        14.0,
-        rgb(0x3a, 0x3a, 0x3c),
-        rgb(0x12, 0x12, 0x14),
-    );
-    p.line(&[(-1.5, 13.5), (1.5, 13.5)], 1.0, rgb(0xc8, 0xa8, 0x50));
 }
 
-fn wood_keys(p: &Pen) {
-    // Vintage keys in a wooden cabinet (organ / electric piano).
-    let (wood_hi, wood_lo) = (rgb(0xc4, 0x86, 0x4a), rgb(0x6a, 0x3c, 0x1c));
-    p.poly(
-        &[(-15.0, -9.0), (15.0, -9.0), (16.0, -6.0), (-16.0, -6.0)],
-        rgb(0xd8, 0x9c, 0x5c),
-        rgb(0xa4, 0x6a, 0x34),
-    );
-    p.rect(-16.0, -6.0, 16.0, 8.0, wood_hi, wood_lo);
-    // Grain.
-    for y in [-3.0f32, 4.5] {
-        p.line(&[(-14.0, y), (14.0, y + 0.4)], 0.4, rgb(0x8a, 0x52, 0x26));
+/// An electric piano: a keybed on a stand.
+fn electric_piano(p: &Pen) {
+    p.rect(2.5, 7.0, 19.0, 8.0);
+    for x in [6.3, 10.1, 13.9, 17.7] {
+        p.line(&[(x, 10.5), (x, 15.0)]);
     }
-    p.rect(
-        -13.5,
-        -2.0,
-        13.5,
-        2.5,
-        Color32::WHITE,
-        rgb(0xdc, 0xdc, 0xd8),
-    );
-    for i in 0..14 {
-        let x = -13.5 + i as f32 * 1.93;
-        p.line(&[(x, -2.0), (x, 2.5)], 0.4, rgb(0x96, 0x96, 0x90));
-    }
-    for i in [1, 2, 4, 5, 6, 8, 9, 11, 12, 13] {
-        let x = -13.5 + i as f32 * 1.93 - 0.55;
-        p.rect(
-            x,
-            -2.0,
-            x + 1.1,
-            0.6,
-            rgb(0x2a, 0x2a, 0x2a),
-            rgb(0x08, 0x08, 0x08),
-        );
-    }
-    p.rect(-14.5, 8.0, -12.0, 14.0, wood_lo, rgb(0x3e, 0x22, 0x10));
-    p.rect(12.0, 8.0, 14.5, 14.0, wood_lo, rgb(0x3e, 0x22, 0x10));
+    p.line(&[(2.5, 10.5), (21.5, 10.5)]);
+    p.line(&[(5.0, 15.0), (5.0, 21.0)]);
+    p.line(&[(19.0, 15.0), (19.0, 21.0)]);
 }
 
+/// A synthesizer: knobs over a short keyboard.
 fn synth(p: &Pen) {
-    // Chrome X stand.
-    let chrome_a = rgb(0xe8, 0xe8, 0xec);
-    p.line(&[(-10.0, 2.0), (10.0, 14.0)], 1.6, chrome_a);
-    p.line(&[(10.0, 2.0), (-10.0, 14.0)], 1.6, rgb(0xb4, 0xb4, 0xb8));
-    p.line(&[(-12.0, 14.0), (-8.0, 14.0)], 1.4, rgb(0x60, 0x60, 0x64));
-    p.line(&[(8.0, 14.0), (12.0, 14.0)], 1.4, rgb(0x60, 0x60, 0x64));
-    // Red body in slight perspective.
-    p.poly(
-        &[(-15.0, -7.0), (15.0, -7.0), (17.0, 2.5), (-17.0, 2.5)],
-        rgb(0xf0, 0x55, 0x48),
-        rgb(0x9a, 0x1e, 0x18),
-    );
-    p.rect(
-        -14.0,
-        -6.0,
-        14.0,
-        -4.2,
-        rgb(0x3a, 0x12, 0x10),
-        rgb(0x22, 0x0a, 0x08),
-    );
-    for i in 0..6 {
-        p.ellipse(
-            -12.0 + i as f32 * 2.2,
-            -5.1,
-            0.6,
-            0.6,
-            Color32::WHITE,
-            rgb(0xb0, 0xb0, 0xb0),
-        );
+    p.rect(3.0, 4.0, 18.0, 16.0);
+    p.line(&[(3.0, 11.0), (21.0, 11.0)]);
+    for x in [7.0, 12.0, 17.0] {
+        p.dot(x, 7.5, 1.6);
     }
-    // Keybed.
-    p.poly(
-        &[(-14.5, -3.0), (14.5, -3.0), (15.6, 1.8), (-15.6, 1.8)],
-        Color32::WHITE,
-        rgb(0xd6, 0xd6, 0xd6),
-    );
-    for i in 0..16 {
-        let t = i as f32 / 16.0;
-        let (xt, xb) = (-14.5 + 29.0 * t, -15.6 + 31.2 * t);
-        p.line(&[(xt, -3.0), (xb, 1.8)], 0.35, rgb(0x90, 0x90, 0x90));
+    for x in [7.5, 12.0, 16.5] {
+        p.line(&[(x, 11.0), (x, 20.0)]);
     }
-    for i in [1, 2, 4, 5, 6, 8, 9, 11, 12, 13, 15] {
-        let t = i as f32 / 16.0;
-        let x = -14.5 + 29.0 * t;
-        p.poly(
-            &[
-                (x - 0.55, -3.0),
-                (x + 0.55, -3.0),
-                (x + 0.6, -0.4),
-                (x - 0.6, -0.4),
-            ],
-            rgb(0x2c, 0x2c, 0x2c),
-            rgb(0x06, 0x06, 0x06),
-        );
-    }
+    p.fill_rect(5.8, 11.0, 3.4, 4.5);
+    p.fill_rect(14.8, 11.0, 3.4, 4.5);
 }
 
+/// Audio: a row of waveform columns.
+fn waveform(p: &Pen) {
+    p.line(&[(3.0, 12.0), (4.5, 12.0)]);
+    for (x, h) in [
+        (4.5, 2.0),
+        (7.0, 5.0),
+        (9.5, 3.0),
+        (12.0, 7.0),
+        (14.5, 4.0),
+        (17.0, 6.0),
+        (19.5, 2.5),
+    ] {
+        p.line(&[(x, 12.0 - h), (x, 12.0 + h)]);
+    }
+    p.line(&[(19.5, 12.0), (21.0, 12.0)]);
+}
+
+/// Drummer: a snare drum with a stick across it.
+fn drummer(p: &Pen) {
+    p.ellipse(12.0, 10.0, 8.0, 3.0);
+    let mut side = vec![(4.0, 10.0), (4.0, 16.0)];
+    // Round the bottom: from the left side, under the drum, to the right side.
+    side.extend(p.arc(12.0, 16.0, 8.0, 3.0, 180.0, 0.0));
+    side.push((20.0, 10.0));
+    p.line(&side);
+    for x in [8.0, 12.0, 16.0] {
+        p.line(&[(x, 13.0), (x, 18.5)]);
+    }
+    p.line(&[(14.5, 2.5), (19.0, 7.0)]);
+}
+
+/// A drum kit: the bass drum from the front, a cymbal on its stand.
+fn drum_kit(p: &Pen) {
+    p.circle(14.0, 14.5, 6.5);
+    p.dot(14.0, 14.5, 1.6);
+    p.line(&[(2.5, 6.5), (10.0, 4.5)]);
+    p.line(&[(6.0, 5.5), (6.0, 21.0)]);
+    p.line(&[(3.5, 21.0), (8.5, 21.0)]);
+}
+
+/// A guitar (or, with `bass`, an electric bass: a longer neck and a pickup).
 fn guitar(p: &Pen, bass: bool) {
-    let pivot = (-5.0, 7.0);
-    let k = 0.82;
-    let (body_hi, body_lo) = if bass {
-        (rgb(0xf0, 0xa0, 0x3c), rgb(0x7a, 0x2c, 0x0c))
-    } else {
-        (rgb(0xff, 0xd6, 0x4a), rgb(0xd4, 0x8a, 0x18))
-    };
-    let neck_len = if bass { 27.0 } else { 22.0 };
-    let r = |pts: &[(f32, f32)]| rot(pts, pivot, 40.0, k);
-    // Neck + headstock (behind the body).
-    p.poly(
-        &r(&[
-            (-1.4, -3.0),
-            (1.4, -3.0),
-            (1.3, -neck_len),
-            (-1.3, -neck_len),
-        ]),
-        rgb(0xf0, 0xc8, 0x82),
-        rgb(0xc8, 0x94, 0x50),
-    );
-    for i in 1..9 {
-        let y = -3.0 - i as f32 * (neck_len - 3.0) / 9.0;
-        p.line(&r(&[(-1.3, y), (1.3, y)]), 0.35, rgb(0x9a, 0x9a, 0x9a));
+    let (neck_top, body_y) = if bass { (1.5, 17.0) } else { (3.0, 16.5) };
+    p.rect(11.0, neck_top, 2.0, body_y - 4.5 - neck_top);
+    for y in [neck_top + 1.5, neck_top + 4.0] {
+        p.line(&[(8.5, y), (11.0, y)]);
+        p.line(&[(13.0, y), (15.5, y)]);
     }
-    p.poly(
-        &r(&[
-            (-1.6, -neck_len),
-            (2.6, -neck_len - 1.0),
-            (2.2, -neck_len - 6.0),
-            (-0.8, -neck_len - 5.0),
-        ]),
-        rgb(0xf0, 0xc8, 0x82),
-        rgb(0xb8, 0x84, 0x44),
-    );
-    // Body.
-    let body = [
-        (-7.0, 2.0),
-        (-6.5, -3.0),
-        (-5.0, -6.0),
-        (-3.2, -5.2),
-        (-2.0, -3.0),
-        (2.0, -3.0),
-        (3.5, -7.5),
-        (5.2, -6.2),
-        (6.2, -2.0),
-        (7.2, 3.0),
-        (6.2, 6.5),
-        (3.0, 8.5),
-        (-3.0, 8.5),
-        (-6.3, 6.3),
-    ];
-    p.poly(&r(&body), body_hi, body_lo);
-    // Pickguard, pickups, bridge.
-    let guard_col = if bass {
-        rgb(0x20, 0x20, 0x20)
+    if bass {
+        p.ellipse(12.0, body_y, 5.0, 4.5);
+        p.fill_rect(10.0, body_y - 0.8, 4.0, 1.6);
     } else {
-        rgb(0xf6, 0xf2, 0xe8)
-    };
-    p.poly(
-        &r(&[
-            (-4.8, 0.5),
-            (-3.0, -3.0),
-            (2.4, -3.0),
-            (3.5, 1.0),
-            (2.4, 5.5),
-            (-3.2, 6.2),
-        ]),
-        guard_col,
-        guard_col,
-    );
-    let pickups: &[f32] = if bass { &[0.5, 3.5] } else { &[-1.5, 1.0, 3.5] };
-    for y in pickups {
-        p.poly(
-            &r(&[(-1.8, *y), (1.8, *y), (1.8, y + 0.9), (-1.8, y + 0.9)]),
-            rgb(0x1a, 0x1a, 0x1a),
-            rgb(0x40, 0x40, 0x40),
-        );
-    }
-    p.poly(
-        &r(&[(-1.7, 5.6), (1.7, 5.6), (1.7, 6.6), (-1.7, 6.6)]),
-        rgb(0xd8, 0xd8, 0xdc),
-        rgb(0x8a, 0x8a, 0x8e),
-    );
-    // Strings.
-    for x in [-0.8f32, -0.3, 0.3, 0.8] {
-        p.line(&r(&[(x, 6.0), (x, -neck_len)]), 0.25, rgb(0xe8, 0xe8, 0xe8));
+        p.ellipse(12.0, body_y, 6.0, 5.0);
+        p.circle(12.0, body_y - 0.5, 1.7);
     }
 }
 
+/// A studio microphone in its cradle.
 fn mic(p: &Pen) {
-    // Large-diaphragm condenser on a stand.
-    p.line(&[(0.0, 8.0), (0.0, 14.0)], 1.6, rgb(0x8c, 0x8c, 0x90));
-    p.ellipse(
-        0.0,
-        15.0,
-        6.0,
-        1.2,
-        rgb(0x9a, 0x9a, 0x9e),
-        rgb(0x4a, 0x4a, 0x4e),
-    );
-    // Body.
-    p.rect_h(
-        -3.8,
-        1.0,
-        3.8,
-        9.0,
-        rgb(0x70, 0x70, 0x74),
-        rgb(0xe6, 0xe6, 0xea),
-        rgb(0x80, 0x80, 0x84),
-    );
-    // Grille capsule (rounded top).
-    p.rect_h(
-        -5.0,
-        -10.0,
-        5.0,
-        1.5,
-        rgb(0x8a, 0x8a, 0x8e),
-        rgb(0xf6, 0xf6, 0xf8),
-        rgb(0x96, 0x96, 0x9a),
-    );
-    p.ellipse(
-        0.0,
-        -10.0,
-        5.0,
-        4.5,
-        rgb(0xff, 0xff, 0xff),
-        rgb(0x9a, 0x9a, 0x9e),
-    );
-    for i in 0..6 {
-        let y = -11.0 + i as f32 * 2.2;
-        p.line(&[(-4.6, y), (4.6, y)], 0.45, rgb(0x6a, 0x6a, 0x6e));
-    }
-    p.rect_h(
-        -5.2,
-        1.0,
-        5.2,
-        2.6,
-        rgb(0x5a, 0x5a, 0x5e),
-        rgb(0xc8, 0xc8, 0xcc),
-        rgb(0x60, 0x60, 0x64),
-    );
+    let mut capsule = p.arc(12.0, 6.5, 3.5, 3.5, 180.0, 360.0);
+    capsule.extend(p.arc(12.0, 10.5, 3.5, 3.5, 0.0, 180.0));
+    p.closed(&capsule);
+    p.line(&p.arc(12.0, 11.0, 6.5, 6.5, 0.0, 180.0));
+    p.line(&[(12.0, 17.5), (12.0, 21.0)]);
+    p.line(&[(8.5, 21.0), (15.5, 21.0)]);
 }
 
+/// A violin with its bow.
 fn violin(p: &Pen) {
-    let pivot = (-2.0, 5.0);
-    let r = |pts: &[(f32, f32)]| rot(pts, pivot, 25.0, 0.85);
-    let (hi, lo) = (rgb(0xd8, 0x7a, 0x2c), rgb(0x6a, 0x26, 0x08));
-    p.poly(
-        &r(&[(-1.0, -5.0), (1.0, -5.0), (0.9, -19.0), (-0.9, -19.0)]),
-        rgb(0x2a, 0x1a, 0x10),
-        rgb(0x10, 0x08, 0x04),
-    );
-    p.poly(
-        &r(&[
-            (-1.2, -19.0),
-            (1.2, -19.0),
-            (1.6, -22.0),
-            (0.0, -23.5),
-            (-1.6, -22.0),
-        ]),
-        hi,
-        lo,
-    );
-    // Upper bout, waist, lower bout.
-    p.poly(
-        &r(&[
-            (-5.0, -6.0),
-            (-3.0, -8.5),
-            (3.0, -8.5),
-            (5.0, -6.0),
-            (4.5, -2.5),
-            (2.5, -0.5),
-            (-2.5, -0.5),
-            (-4.5, -2.5),
-        ]),
-        hi,
-        lo,
-    );
-    p.poly(
-        &r(&[
-            (-6.5, 2.5),
-            (-4.5, -0.8),
-            (4.5, -0.8),
-            (6.5, 2.5),
-            (6.0, 7.0),
-            (3.0, 9.5),
-            (-3.0, 9.5),
-            (-6.0, 7.0),
-        ]),
-        hi,
-        lo,
-    );
-    p.line(&r(&[(-2.2, 0.5), (-2.0, 4.5)]), 0.6, rgb(0x20, 0x10, 0x08));
-    p.line(&r(&[(2.2, 0.5), (2.0, 4.5)]), 0.6, rgb(0x20, 0x10, 0x08));
-    p.poly(
-        &r(&[(-1.6, 5.5), (1.6, 5.5), (1.6, 6.3), (-1.6, 6.3)]),
-        rgb(0xe0, 0xc8, 0x90),
-        rgb(0xa0, 0x80, 0x50),
-    );
-    for x in [-0.6f32, -0.2, 0.2, 0.6] {
-        p.line(&r(&[(x, 8.0), (x, -19.0)]), 0.25, rgb(0xe0, 0xe0, 0xe0));
+    p.ellipse(11.0, 10.5, 3.6, 3.0);
+    p.ellipse(11.0, 16.5, 4.6, 4.0);
+    p.line(&[(11.0, 2.5), (11.0, 7.5)]);
+    p.line(&[(15.0, 3.0), (20.5, 21.0)]);
+}
+
+/// An aux: three lines running into a bus.
+fn aux(p: &Pen) {
+    for y in [6.0, 12.0, 18.0] {
+        p.line(&[(3.0, y), (10.0, 12.0)]);
     }
+    p.circle(15.5, 12.0, 5.0);
+    p.dot(15.5, 12.0, 1.6);
+}
+
+/// A folder.
+fn folder(p: &Pen) {
+    p.closed(&[
+        (3.0, 6.0),
+        (9.0, 6.0),
+        (11.0, 8.5),
+        (21.0, 8.5),
+        (21.0, 19.0),
+        (3.0, 19.0),
+    ]);
+    p.line(&[(3.0, 11.0), (21.0, 11.0)]);
+}
+
+/// A VCA: three fader slots with their caps.
+fn vca(p: &Pen) {
+    for x in [6.0, 12.0, 18.0] {
+        p.line(&[(x, 4.0), (x, 20.0)]);
+    }
+    p.fill_rect(3.5, 12.0, 5.0, 3.5);
+    p.fill_rect(9.5, 6.5, 5.0, 3.5);
+    p.fill_rect(15.5, 14.0, 5.0, 3.5);
+}
+
+/// External MIDI: a five-pin DIN socket.
+fn midi_socket(p: &Pen) {
+    p.circle(12.0, 12.0, 8.5);
+    for deg in [180.0f32, 225.0, 270.0, 315.0, 0.0] {
+        let a = deg.to_radians();
+        p.dot(12.0 + 4.8 * a.cos(), 12.5 + 4.8 * a.sin(), 1.2);
+    }
+    p.fill_rect(10.8, 17.5, 2.4, 2.0);
 }
 
 #[cfg(test)]
@@ -1003,14 +477,19 @@ mod tests {
         // Drummer and audio tracks keep their own icons.
         assert_eq!(track_icon(&p.tracks[3]), IconKind::DrummerTile);
         assert_eq!(track_icon(&p.tracks[5]), IconKind::Mic);
+        // An audio track other than a voice shows the waveform, whatever its name says.
+        assert_eq!(track_icon(&p.tracks[4]), IconKind::Waveform);
     }
 
     #[test]
-    fn rotation_keeps_distances() {
-        let pts = rot(&[(0.0, -10.0)], (0.0, 0.0), 90.0, 1.0);
-        assert!(
-            (pts[0].0 - 10.0).abs() < 1e-4 && pts[0].1.abs() < 1e-4,
-            "{pts:?}"
-        );
+    fn every_icon_draws() {
+        let mut h = crate::ui_test::Harness::new(400.0, 40.0);
+        h.settle(|ui| {
+            let g = ui.painter().clone();
+            for (i, kind) in IconKind::ALL.into_iter().enumerate() {
+                let at = egui::pos2(i as f32 * 26.0, 0.0);
+                draw_icon(&g, Rect::from_min_size(at, vec2(24.0, 24.0)), kind);
+            }
+        });
     }
 }

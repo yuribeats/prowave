@@ -20,7 +20,7 @@
 use crate::i18n::tr;
 use crate::model::{Project, Track, TrackKind};
 use crate::piano_tools::Tool;
-use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Response, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Response, Sense, Stroke, Ui};
 use prowave_engine::tune::{self, TargetNote, TuneRemote, TuneTargets};
 use prowave_engine::{AutoPoint, AutoTarget};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -28,11 +28,20 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
-/// The detected pitch's colour, the drawn override's, the Amount curve's.
-pub const CURVE: Color32 = Color32::from_rgb(0xf4, 0xf4, 0xf4);
-pub const LIVE: Color32 = Color32::from_rgb(0xff, 0xe0, 0x80);
-pub const OVERRIDE: Color32 = Color32::from_rgb(0x50, 0xd8, 0xff);
-pub const AMOUNT: Color32 = Color32::from_rgb(0x50, 0xd8, 0xff);
+/// The detected pitch's colour, the drawn override's, the Amount curve's. The grids are bone
+/// (as the Piano Roll's): the analysed pitch is printed in ink with a bone edge, what the
+/// effect heard live in print grey, what it made in deep LCD green, and what the user drew
+/// (the override) in the signal orange.
+pub const CURVE: Color32 = crate::theme::INK;
+pub const LIVE: Color32 = crate::theme::PRINT;
+/// What the effect made while playing.
+pub const MADE: Color32 = crate::theme::LCD_INK;
+pub const OVERRIDE: Color32 = crate::theme::ORANGE;
+pub const AMOUNT: Color32 = crate::theme::ORANGE;
+/// The width at a note's left kept for its name.
+const LABEL_W: f32 = 26.0;
+/// The Amount lane's scale, at the well's left.
+const SCALE_W: f32 = 30.0;
 /// The analysis hop, seconds.
 const ANALYSIS_HOP: f64 = 0.005;
 /// Live history kept per effect.
@@ -681,10 +690,44 @@ pub fn edit_grid(
     }
 }
 
+/// Where a note's name is printed on a note `r` (its left end), or None when the note is too
+/// small to carry one. The pitch curve leaves this spot clear so the name stays readable.
+fn label_spot(r: Rect) -> Option<Rect> {
+    (r.height() >= 10.0 && r.width() >= 28.0)
+        .then(|| Rect::from_min_max(r.min, pos2(r.left() + LABEL_W, r.bottom())))
+}
+
+/// The notes the effect follows (its MIDI target), if it follows any.
+fn target_notes(p: &Project, link: Link) -> Vec<TargetNote> {
+    let Some(slot) = p
+        .tracks
+        .get(link.track)
+        .and_then(|t| t.au_effects.get(link.slot))
+    else {
+        return Vec::new();
+    };
+    let vals = values(slot);
+    midi_source(p, link.track, &vals).map_or_else(Vec::new, |src| notes_of(p, src))
+}
+
 /// Draws the detected pitch, what the effect heard live, and the override, on the grid.
+/// The pitch is printed ink with a bone edge, so it reads on the bone floor and on the black
+/// note caps alike; it stays clear of the notes' names.
 pub fn draw_grid(g: &Painter, p: &Project, link: Link, geom: &Geom) {
     let clip = geom.grid;
-    let line = |pts: &[(f64, f32)], stroke: Stroke, gap: f64| {
+    let kh = ((geom.y_of)(0.0) - (geom.y_of)(1.0)).abs();
+    let spots: Vec<Rect> = target_notes(p, link)
+        .iter()
+        .filter_map(|n| {
+            let y = (geom.y_of)(f32::from(n.pitch));
+            label_spot(Rect::from_min_max(
+                pos2((geom.x_of)(n.start), y - kh / 2.0),
+                pos2((geom.x_of)(n.end), y + kh / 2.0),
+            ))
+        })
+        .collect();
+    let line = |pts: &[(f64, f32)], strokes: &[Stroke], gap: f64, avoid: bool| {
+        let mut runs: Vec<Vec<Pos2>> = Vec::new();
         let mut run: Vec<Pos2> = Vec::new();
         let mut last_b = f64::NAN;
         for (b, m) in pts {
@@ -695,25 +738,34 @@ pub fn draw_grid(g: &Painter, p: &Project, link: Link, geom: &Geom) {
             };
             let inside = x >= clip.left() - 50.0 && x <= clip.right() + 50.0;
             let joined = (b - last_b).abs() <= gap;
-            if !m.is_finite() || !inside || !joined {
+            let pt = pos2(x, (geom.y_of)(*m));
+            let hidden = avoid && m.is_finite() && spots.iter().any(|s| s.contains(pt));
+            if !m.is_finite() || !inside || !joined || hidden {
                 if run.len() > 1 {
-                    g.add(egui::Shape::line(std::mem::take(&mut run), stroke));
+                    runs.push(std::mem::take(&mut run));
                 }
                 run.clear();
             }
             last_b = if m.is_finite() { *b } else { f64::NAN };
-            if m.is_finite() && inside {
-                run.push(pos2(x, (geom.y_of)(*m)));
+            if m.is_finite() && inside && !hidden {
+                run.push(pt);
             }
         }
         if run.len() > 1 {
-            g.add(egui::Shape::line(run, stroke));
+            runs.push(run);
+        }
+        // Every run's edge first, then every run's core, so crossings stay clean.
+        for st in strokes {
+            for r in &runs {
+                g.add(egui::Shape::line(r.clone(), *st));
+            }
         }
     };
+    let edge = |w: f32| Stroke::new(w, crate::theme::BONE_HI.gamma_multiply(0.85));
     // The track's audio, as analysed.
     let c = curve(p, link.track);
     if !c.is_empty() {
-        line(&c, Stroke::new(1.8, CURVE), 0.25);
+        line(&c, &[edge(3.6), Stroke::new(1.6, CURVE)], 0.25, true);
     }
     // What the effect heard and made while playing (instrument tracks, and fresh takes).
     if let Some(uid) = p
@@ -727,25 +779,32 @@ pub fn draw_grid(g: &Painter, p: &Project, link: Link, geom: &Geom) {
             let heard: Vec<(f64, f32)> = h.iter().map(|(b, i, _)| (*b, *i)).collect();
             let made: Vec<(f64, f32)> = h.iter().map(|(b, _, o)| (*b, *o)).collect();
             if c.is_empty() {
-                line(&heard, Stroke::new(1.2, LIVE), 0.25);
+                line(&heard, &[edge(3.0), Stroke::new(1.2, LIVE)], 0.25, true);
             }
-            line(
-                &made,
-                Stroke::new(1.0, Color32::from_rgb(0x9a, 0xff, 0x9a)),
-                0.25,
-            );
+            line(&made, &[edge(3.2), Stroke::new(1.4, MADE)], 0.25, true);
         }
     }
-    // The override, thick.
+    // The override, thick, with an ink edge and a handle where it starts.
     for span in override_spans(lane(p, link, tune::OVERRIDE)) {
-        line(&span, Stroke::new(3.0, OVERRIDE), f64::INFINITY);
+        line(
+            &span,
+            &[
+                Stroke::new(4.6, crate::theme::INK.gamma_multiply(0.7)),
+                Stroke::new(3.0, OVERRIDE),
+            ],
+            f64::INFINITY,
+            false,
+        );
         if let Some((b, m)) = span.first() {
-            g.circle_filled(pos2((geom.x_of)(*b), (geom.y_of)(*m)), 3.0, OVERRIDE);
+            let c = pos2((geom.x_of)(*b), (geom.y_of)(*m));
+            g.circle(c, 3.5, OVERRIDE, Stroke::new(1.0, crate::theme::INK));
         }
     }
 }
 
-/// The Correction Amount lane in `rect`: drawn with the Pencil, erased with the Eraser.
+/// The Correction Amount lane in `rect`: drawn with the Pencil, erased with the Eraser. A
+/// recessed well with a 0/50/100 scale, the bars, and the amount as an orange line with its
+/// points as handles. Its name goes in the lane's header column, outside the well.
 #[allow(clippy::too_many_arguments)]
 pub fn amount_lane(
     ui: &mut Ui,
@@ -757,11 +816,14 @@ pub fn amount_lane(
     beat_at: &dyn Fn(f32) -> f64,
     tool: Tool,
 ) {
-    let resp = ui.interact(
-        rect,
-        egui::Id::unique("tune_amount").with((link.track, link.slot)),
-        Sense::click_and_drag(),
-    );
+    let resp = ui
+        .interact(
+            rect,
+            egui::Id::unique("tune_amount").with((link.track, link.slot)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_text(tr("Correction Amount"));
+    let r = rect.shrink2(vec2(0.0, 8.0));
     let erase = tool == Tool::Eraser;
     if matches!(tool, Tool::Pencil | Tool::Eraser) {
         if resp.drag_started() {
@@ -778,7 +840,6 @@ pub fn amount_lane(
         }
         if let (Some(st), Some(pt)) = (v.stroke.as_mut(), resp.interact_pointer_pos()) {
             if st.kind == Kind::Amount && (resp.dragged() || resp.drag_started()) {
-                let r = rect.shrink2(vec2(0.0, 3.0));
                 let pos = ((r.bottom() - pt.y) / r.height()).clamp(0.0, 1.0);
                 st.add(beat_at(pt.x), pos);
                 st.apply(p);
@@ -790,9 +851,36 @@ pub fn amount_lane(
             }
         }
     }
-    let g = ui.painter_at(rect);
-    let r = rect.shrink2(vec2(0.0, 3.0));
+    let g = ui.painter_at(rect.expand(1.0));
+    let ink = |a: f32| crate::theme::INK.gamma_multiply(a);
+    crate::hw::recess(&g, rect, 3.0);
     let y_of = |pos: f32| r.bottom() - pos * r.height();
+    let left = rect.left() + SCALE_W;
+    // The scale's lines, and the bars.
+    for (f, a) in [(0.0f32, 0.14), (0.5, 0.08), (1.0, 0.14)] {
+        g.hline(left..=rect.right(), y_of(f), Stroke::new(1.0, ink(a)));
+    }
+    let first = p.beats_to_bar(beat_at(left)).floor().max(0.0) as i64;
+    let last = p.beats_to_bar(beat_at(rect.right())).ceil() as i64;
+    for bar in first..=last {
+        let x = x_of(p.bar_to_beats(bar as f64));
+        if x > left && x < rect.right() - 1.0 {
+            g.vline(
+                x,
+                rect.top() + 2.0..=rect.bottom() - 1.0,
+                Stroke::new(1.0, ink(0.16)),
+            );
+        }
+    }
+    crate::hw::scale_v(
+        &g,
+        Rect::from_min_max(
+            pos2(rect.left() + 3.0, r.top()),
+            pos2(left - 2.0, r.bottom()),
+        ),
+        &[(0.0, "0"), (0.5, "50"), (1.0, "100")],
+        true,
+    );
     let pts = lane(p, link, tune::AMOUNT);
     let knob = p
         .tracks
@@ -801,35 +889,69 @@ pub fn amount_lane(
         .map_or(1.0, |s| {
             values(s).get(tune::AMOUNT).copied().unwrap_or(100.0) / 100.0
         });
+    let gl = g.with_clip_rect(Rect::from_min_max(
+        pos2(left, rect.top()),
+        rect.max + vec2(1.0, 1.0),
+    ));
     if pts.is_empty() {
-        g.line_segment(
-            [
-                pos2(rect.left(), y_of(knob)),
-                pos2(rect.right(), y_of(knob)),
-            ],
-            Stroke::new(1.0, AMOUNT.gamma_multiply(0.5)),
+        gl.hline(
+            left..=rect.right(),
+            y_of(knob),
+            Stroke::new(1.5, AMOUNT.gamma_multiply(0.6)),
         );
     } else {
         let mut line: Vec<Pos2> = Vec::new();
-        line.push(pos2(rect.left(), y_of(pts[0].value)));
+        let mut handles: Vec<Pos2> = Vec::new();
+        line.push(pos2(left, y_of(pts[0].value)));
         for q in pts {
             let x = x_of(q.beat);
-            if x > rect.left() - 2.0 && x < rect.right() + 2.0 {
+            if x > left - 2.0 && x < rect.right() + 2.0 {
                 line.push(pos2(x, y_of(q.value)));
+                handles.push(pos2(x, y_of(q.value)));
             }
         }
         if let Some(l) = pts.last() {
             line.push(pos2(rect.right(), y_of(l.value)));
         }
         line.sort_by(|a, b| a.x.total_cmp(&b.x));
-        g.add(egui::Shape::line(line, Stroke::new(1.8, AMOUNT)));
+        gl.add(egui::Shape::line(line, Stroke::new(2.0, AMOUNT)));
+        for h in handles {
+            let hr = Rect::from_center_size(h, vec2(6.0, 6.0));
+            gl.rect_filled(hr, 1.0, AMOUNT);
+            gl.rect_stroke(
+                hr,
+                1.0,
+                Stroke::new(1.0, crate::theme::INK),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
-    g.text(
-        rect.left_top() + vec2(6.0, 4.0),
-        Align2::LEFT_TOP,
-        tr("Correction Amount"),
-        FontId::proportional(10.5),
-        crate::widgets::TEXT,
+}
+
+/// The name of a lane in its header column `r` (left of the lane): a silkscreened word and,
+/// under it, what the lane holds.
+pub fn lane_header(g: &Painter, r: Rect, name: &str, holds: &str) {
+    use crate::hw;
+    use crate::theme::{Face, INK2, PRINT};
+    let n = hw::fit(g, &name.to_uppercase(), Face::Silk, 11.0, r.width() - 8.0);
+    hw::text(
+        g,
+        r.center() - vec2(0.0, 7.0),
+        Align2::CENTER_CENTER,
+        &n,
+        Face::Silk,
+        11.0,
+        INK2,
+    );
+    let h = hw::fit(g, &holds.to_uppercase(), Face::Silk, 9.0, r.width() - 6.0);
+    hw::text(
+        g,
+        r.center() + vec2(0.0, 7.0),
+        Align2::CENTER_CENTER,
+        &h,
+        Face::Silk,
+        9.0,
+        PRINT,
     );
 }
 
@@ -856,8 +978,13 @@ fn in_scale(p: &Project, link: Link, note: i32) -> bool {
 }
 
 /// With no MIDI region to show: the Pitch Correction of the selected audio track, if it has
-/// Pro Wave Tune, on a grid of its own. Returns whether it was shown.
+/// Pro Wave Tune, on a grid of its own. Built from the Piano Roll's parts (inspector, keys,
+/// ruler, region strip, bone grid, black note caps, playhead) so the two editors match.
+/// Returns whether it was shown.
 pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: Rect) -> bool {
+    use crate::hw;
+    use crate::piano_roll as pr;
+    use crate::theme::{self, Face};
     let ti = p.selected_track;
     let Some(t) = p.tracks.get(ti) else {
         return false;
@@ -872,7 +999,7 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
     if v.for_track != Some(ti) || v.beat_px <= 0.0 {
         v.for_track = Some(ti);
         v.beat_px = 60.0;
-        v.key_h = 9.0;
+        v.key_h = 12.0;
         v.scroll_beat = p.tracks[ti]
             .regions
             .first()
@@ -883,31 +1010,43 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
         ms.sort_by(|a, b| a.total_cmp(b));
         v.mid_pitch = ms.get(ms.len() / 2).copied().unwrap_or(60.0);
     }
-    const KEYS: f32 = 48.0;
+    // The Piano Roll's measures.
+    const INSP_W: f32 = 248.0;
+    const KEYS: f32 = 60.0;
+    const RULER: f32 = 24.0;
+    const STRIP: f32 = 18.0;
     const LANE: f32 = 76.0;
-    const RULER: f32 = 20.0;
     let g = ui.painter_at(body);
-    g.rect_filled(body, 0.0, Color32::from_rgb(0x3a, 0x3a, 0x3a));
+    hw::chassis(&g, body);
+    let insp = Rect::from_min_size(body.min, vec2(INSP_W, body.height()));
+    let editor = Rect::from_min_max(pos2(insp.right(), body.top()), body.max);
+    let lane_r = Rect::from_min_max(
+        pos2(editor.left() + KEYS, editor.bottom() - LANE - 6.0),
+        pos2(editor.right() - 8.0, editor.bottom() - 6.0),
+    );
+    // Keys, grid and lane share one bottom edge with one seam between them.
+    let lower = lane_r.top() - 6.0;
     let keys = Rect::from_min_max(
-        pos2(body.left(), body.top() + RULER),
-        pos2(body.left() + KEYS, body.bottom() - LANE - 4.0),
+        pos2(editor.left(), editor.top() + RULER + STRIP),
+        pos2(editor.left() + KEYS, lower),
     );
-    let grid = Rect::from_min_max(
-        pos2(keys.right(), keys.top()),
-        pos2(body.right(), keys.bottom()),
-    );
+    let grid = Rect::from_min_max(pos2(keys.right(), keys.top()), pos2(lane_r.right(), lower));
     let ruler = Rect::from_min_max(
-        pos2(grid.left(), body.top()),
+        pos2(grid.left(), editor.top()),
+        pos2(grid.right(), editor.top() + RULER),
+    );
+    let strip = Rect::from_min_max(
+        pos2(grid.left(), ruler.bottom()),
         pos2(grid.right(), grid.top()),
     );
-    let lane_r = Rect::from_min_max(
-        pos2(grid.left(), grid.bottom() + 4.0),
-        pos2(grid.right(), body.bottom()),
+    let lane_head = Rect::from_min_max(
+        pos2(editor.left(), lane_r.top()),
+        pos2(lane_r.left(), lane_r.bottom()),
     );
     // Wheel: scroll; Command: zoom in time; Shift: sideways.
     if ui
         .input(|i| i.pointer.hover_pos())
-        .is_some_and(|pt| body.contains(pt))
+        .is_some_and(|pt| editor.contains(pt))
     {
         let (d, m) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
         if m.command && d.y != 0.0 {
@@ -931,77 +1070,50 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
         y_of: &y_of,
         pitch_at: &pitch_at,
     };
-    // Rows: the scale's notes lit, the others dark; note names on the keys.
+    let black = |n: i32| matches!(n.rem_euclid(12), 1 | 3 | 6 | 8 | 10);
+
+    // ---- The grid: key rows on the recess (the scale's notes lit, the others a shade
+    // deeper), octave lines, beat and bar lines.
     let gg = ui.painter_at(grid);
-    gg.rect_filled(grid, 0.0, Color32::from_rgb(20, 20, 20));
-    let gk = ui.painter_at(keys);
+    gg.rect_filled(grid, 0.0, theme::BONE2);
     let lo = pitch_at(grid.bottom()).floor() as i32;
     let hi = pitch_at(grid.top()).ceil() as i32;
     for n in lo..=hi {
         let y = y_of(n as f32);
         let row = Rect::from_center_size(pos2(grid.center().x, y), vec2(grid.width(), kh));
-        if in_scale(p, link, n) {
-            gg.rect_filled(row, 0.0, Color32::from_rgb(34, 34, 34));
-            gg.line_segment(
-                [pos2(grid.left(), y), pos2(grid.right(), y)],
-                Stroke::new(1.0, Color32::from_gray(0x4a)),
-            );
-        }
-        let black = matches!(n.rem_euclid(12), 1 | 3 | 6 | 8 | 10);
-        let kr = Rect::from_center_size(pos2(keys.center().x, y), vec2(KEYS, kh));
-        gk.rect_filled(
-            kr.shrink2(vec2(0.0, 0.5)),
-            0.0,
-            if black {
-                Color32::from_gray(0x30)
-            } else {
-                Color32::from_gray(0xd8)
-            },
-        );
-        if n.rem_euclid(12) == 0 || kh >= 11.0 {
-            gk.text(
-                kr.right_center() - vec2(3.0, 0.0),
-                Align2::RIGHT_CENTER,
-                tune::scale::note_name(n),
-                FontId::proportional(9.5),
-                if black {
-                    Color32::WHITE
-                } else {
-                    Color32::from_gray(0x20)
-                },
+        let fill = if !in_scale(p, link, n) {
+            hw::lerp(theme::BONE3, theme::SEAM, 0.45)
+        } else if black(n) {
+            hw::lerp(theme::BONE2, theme::BONE3, 0.62)
+        } else {
+            theme::BONE2
+        };
+        gg.rect_filled(row, 0.0, fill);
+        if n.rem_euclid(12) == 0 {
+            gg.hline(
+                grid.x_range(),
+                row.bottom() - 0.5,
+                Stroke::new(1.0, pr::ink(0.2)),
             );
         }
     }
-    // Bars.
-    let gr = ui.painter_at(ruler);
-    gr.rect_filled(ruler, 0.0, Color32::from_gray(0x2c));
+    let b0 = beat_at(grid.left()).floor() as i64;
+    let b1 = beat_at(grid.right()).ceil() as i64;
+    for b in b0..=b1 {
+        gg.vline(
+            x_of(b as f64),
+            grid.y_range(),
+            Stroke::new(1.0, pr::ink(0.09)),
+        );
+    }
     let first = p.beats_to_bar(beat_at(grid.left())).floor().max(0.0) as i64;
     let last = p.beats_to_bar(beat_at(grid.right())).ceil() as i64;
     for bar in first..=last {
-        let b = p.bar_to_beats(bar as f64);
-        let x = x_of(b);
-        gg.line_segment(
-            [pos2(x, grid.top()), pos2(x, grid.bottom())],
-            Stroke::new(1.0, Color32::from_gray(0x44)),
-        );
-        gr.text(
-            pos2(x + 3.0, ruler.center().y),
-            Align2::LEFT_CENTER,
-            (bar + 1).to_string(),
-            FontId::proportional(10.0),
-            crate::widgets::TEXT,
-        );
+        let x = x_of(p.bar_to_beats(bar as f64));
+        gg.vline(x, grid.y_range(), Stroke::new(1.0, pr::ink(0.26)));
     }
-    // The regions' extent.
-    for r in &p.tracks[ti].regions {
-        let (a, b) = (x_of(p.region_start_beats(r)), x_of(p.region_end_beats(r)));
-        gr.rect_filled(
-            Rect::from_min_max(pos2(a, ruler.bottom() - 4.0), pos2(b, ruler.bottom())),
-            0.0,
-            p.tracks[ti].color,
-        );
-    }
-    // The notes it follows in MIDI mode, as bars under the curve.
+
+    // ---- The notes it follows in MIDI mode: black caps named at their left end.
     let vals = values(&p.tracks[ti].au_effects[k]);
     if vals.get(tune::TARGET).copied().unwrap_or(0.0).round() as i32 == tune::TARGET_MIDI {
         if let Some(src) = midi_source(p, ti, &vals) {
@@ -1011,23 +1123,36 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
                     continue;
                 }
                 let y = y_of(f32::from(n.pitch));
-                let r = Rect::from_min_max(pos2(a, y - kh * 0.45), pos2(b, y + kh * 0.45));
-                gg.rect_filled(r, 2.0, Color32::from_rgb(0x8a, 0x3a, 0x60));
-                gg.rect_stroke(
-                    r,
-                    2.0,
-                    Stroke::new(1.0, Color32::from_rgb(0xe0, 0x7a, 0xb0)),
-                    egui::StrokeKind::Inside,
+                let r = Rect::from_min_max(
+                    pos2(a.round() + 0.5, (y - kh / 2.0).round() + 1.0),
+                    pos2(b.round() - 0.5, (y + kh / 2.0).round() - 1.0),
                 );
+                let print = pr::paint_note(&gg, r, 100, false, false, false);
+                if label_spot(r).is_some() {
+                    hw::text(
+                        &gg.with_clip_rect(r.intersect(grid)),
+                        pos2(r.left() + 4.0, r.center().y - 0.5),
+                        Align2::LEFT_CENTER,
+                        &tune::scale::note_name(i32::from(n.pitch)),
+                        Face::Bold,
+                        (kh * 0.75).clamp(7.5, 9.5),
+                        print,
+                    );
+                }
             }
         }
     }
-    // Drawing on the grid: the Pencil draws the override, the Eraser (or Option) erases it.
-    let resp = ui.interact(
-        grid,
-        egui::Id::unique("tune_grid").with(ti),
-        Sense::click_and_drag(),
-    );
+
+    // ---- Drawing on the grid: the Pencil draws the override, the Eraser (or Option) erases.
+    let resp = ui
+        .interact(
+            grid,
+            egui::Id::unique("tune_grid").with(ti),
+            Sense::click_and_drag(),
+        )
+        .on_hover_text(tr(
+            "Pitch Correction: draw a pitch with the Pencil; Option or the Eraser erases",
+        ));
     let alt = ui.input(|i| i.modifiers.alt);
     if matches!(tool, Tool::Pencil | Tool::Eraser | Tool::Pointer) {
         edit_grid(
@@ -1041,29 +1166,132 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
         );
     }
     draw_grid(&gg, p, link, &geom);
-    let px = x_of(p.position_beats);
-    if px >= grid.left() && px <= grid.right() {
-        gg.line_segment(
-            [pos2(px, ruler.top()), pos2(px, grid.bottom())],
-            Stroke::new(1.0, Color32::WHITE),
-        );
-    }
     if curve(p, ti).is_empty() {
-        gg.text(
+        hw::text(
+            &gg,
             grid.center(),
             Align2::CENTER_CENTER,
             tr("Analysing the pitch of this track…"),
-            FontId::proportional(13.0),
-            crate::widgets::TEXT,
+            Face::Bold,
+            12.0,
+            theme::INK2,
         );
     }
-    gg.text(
-        grid.left_top() + vec2(8.0, 6.0),
-        Align2::LEFT_TOP,
-        tr("Pitch Correction: draw a pitch with the Pencil; Option or the Eraser erases"),
-        FontId::proportional(11.0),
-        crate::widgets::TEXT,
+
+    // ---- The keyboard: bone keys with seams, black caps; the Cs named.
+    let gk = ui.painter_at(keys);
+    gk.rect_filled(keys, 0.0, theme::SEAM);
+    for n in lo..=hi {
+        let r = Rect::from_center_size(pos2(keys.center().x, y_of(n as f32)), vec2(KEYS, kh));
+        // Two white keys meet (E over F, B over C): the row under is a white key too.
+        let seam_below = !black(n) && !black(n - 1);
+        pr::paint_piano_key(&gk, r, black(n), false, seam_below);
+        if n.rem_euclid(12) == 0 {
+            hw::text(
+                &gk,
+                pos2(keys.right() - 5.0, r.center().y),
+                Align2::RIGHT_CENTER,
+                &tune::scale::note_name(n),
+                Face::Bold,
+                (kh * 0.75).clamp(7.5, 9.0),
+                theme::INK2,
+            );
+        }
+    }
+    hw::seam_v(&gk, keys.right() - 2.0, keys.y_range());
+
+    // ---- Ruler and region strip.
+    let head = Rect::from_min_max(
+        pos2(editor.left(), editor.top()),
+        pos2(editor.right(), grid.top()),
     );
+    let gr = ui.painter_at(head);
+    hw::chassis(&gr, head);
+    let gr = gr.with_clip_rect(Rect::from_min_max(ruler.min, strip.max));
+    let regions: Vec<(f32, f32, String, bool)> = p.tracks[ti]
+        .regions
+        .iter()
+        .map(|r| {
+            (
+                x_of(p.region_start_beats(r)),
+                x_of(p.region_end_beats(r)),
+                r.name.clone(),
+                r.params.mute,
+            )
+        })
+        .collect();
+    for (a, b, _, _) in &regions {
+        let span = Rect::from_min_max(
+            pos2(a.max(ruler.left()), ruler.top()),
+            pos2(b.min(ruler.right()), ruler.bottom()),
+        );
+        if span.width() > 0.0 {
+            gr.rect_filled(span, 0.0, theme::BONE_HI);
+            gr.hline(
+                span.x_range(),
+                span.bottom() - 1.0,
+                Stroke::new(2.0, theme::INK2),
+            );
+        }
+    }
+    if bpx >= 6.0 {
+        for b in b0..=b1 {
+            let x = x_of(b as f64);
+            gr.vline(
+                x,
+                ruler.bottom() - 6.0..=ruler.bottom(),
+                Stroke::new(1.0, pr::ink(0.4)),
+            );
+        }
+    }
+    for bar in first..=last {
+        let x = x_of(p.bar_to_beats(bar as f64));
+        gr.vline(
+            x,
+            ruler.top() + 4.0..=ruler.bottom(),
+            Stroke::new(1.0, theme::INK2),
+        );
+        hw::text(
+            &gr,
+            pos2(x + 4.0, ruler.top() + 10.0),
+            Align2::LEFT_CENTER,
+            &pr::bar_label(bar.max(0) as u32 + 1),
+            Face::Lcd,
+            11.0,
+            theme::INK,
+        );
+    }
+    hw::seam_h(&gr, head.x_range(), strip.top() - 1.0);
+    let color = p.tracks[ti].color;
+    for (a, b, name, muted) in &regions {
+        let r = Rect::from_min_max(
+            pos2(a.max(strip.left()), strip.top() + 2.0),
+            pos2(b.min(strip.right()), strip.bottom() - 1.0),
+        );
+        if r.width() > 0.0 {
+            let look = theme::region_look(color, true, true, *muted);
+            pr::region_header(&gr, r, &look, "AU", name);
+        }
+    }
+    hw::seam_h(&g, editor.x_range(), grid.top() - 2.0);
+
+    // ---- Playhead, over the ruler and the grid, its flag on the ruler.
+    let px = x_of(p.position_beats);
+    if px >= grid.left() && px <= grid.right() {
+        let gp = ui.painter_at(Rect::from_min_max(ruler.min, grid.max));
+        pr::playhead(
+            &gp,
+            &gp,
+            px,
+            Rect::from_min_max(pos2(grid.left(), ruler.bottom()), grid.max),
+            ruler.top() + 1.0,
+        );
+    }
+
+    // ---- The Correction Amount lane, under one seam, its name in the header column.
+    hw::seam_h(&g, editor.left()..=editor.right(), lower + 2.0);
+    lane_header(&g, lane_head, tr("Tune"), tr("Correction"));
+    hw::seam_v(&g, lane_head.right() - 2.0, lane_head.y_range());
     let tool_lane = if alt { Tool::Eraser } else { tool };
     amount_lane(
         ui,
@@ -1079,7 +1307,143 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
             tool_lane
         },
     );
+
+    // ---- The inspector: the region and the effect's settings, as the Piano Roll's.
+    inspector(ui, p, link, insp);
     true
+}
+
+/// The audio editor's inspector: the region (as the Piano Roll's) and what Pro Wave Tune
+/// corrects to.
+fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
+    use crate::hw;
+    use crate::theme::{self, Face};
+    let gi = ui.painter_at(insp);
+    gi.rect_filled(insp, 0.0, theme::TOOLBAR);
+    hw::seam_v(&gi, insp.right() - 3.0, insp.y_range());
+    hw::seam_v(&gi, insp.right() - 2.0, insp.y_range());
+    let t = &p.tracks[link.track];
+    let ix = insp.left() + 14.0;
+    let iw = insp.width() - 30.0;
+    let mut y = insp.top() + 14.0;
+    let pos = p.position_beats;
+    let region = t
+        .regions
+        .iter()
+        .find(|r| pos >= p.region_start_beats(r) && pos < p.region_end_beats(r))
+        .or_else(|| t.regions.first());
+    hw::tri_down(&gi, pos2(ix + 4.0, y + 1.0), theme::INK);
+    let head = hw::text(
+        &gi,
+        pos2(ix + 14.0, y),
+        Align2::LEFT_CENTER,
+        &crate::piano_roll::caption(tr("Region:")).to_uppercase(),
+        Face::Silk,
+        14.0,
+        theme::INK,
+    );
+    if let Some(r) = region {
+        let room = ix + iw - head.right() - 10.0;
+        let name = hw::fit(&gi, &r.name.to_uppercase(), Face::Silk, 14.0, room);
+        hw::text(
+            &gi,
+            pos2(head.right() + 10.0, y),
+            Align2::LEFT_CENTER,
+            &name,
+            Face::Silk,
+            14.0,
+            theme::PRINT,
+        );
+    }
+    y += 20.0;
+    let line = crate::i18n::trf("on Track {}", &[&t.name]).to_uppercase();
+    let line = hw::fit(&gi, &line, Face::Silk, 11.0, iw - 14.0);
+    hw::text(
+        &gi,
+        pos2(ix + 14.0, y),
+        Align2::LEFT_CENTER,
+        &line,
+        Face::Silk,
+        11.0,
+        theme::PRINT,
+    );
+    y += 16.0;
+    hw::seam_h(&gi, insp.left()..=insp.right() - 3.0, y);
+    y += 20.0;
+
+    let vals = values(&t.au_effects[link.slot]);
+    let get = |k: usize| vals.get(k).copied().unwrap_or(tune::PARAMS[k].default);
+    let choice = |k: usize, names: &[&str]| -> String {
+        names
+            .get(get(k).round().max(0.0) as usize)
+            .map_or_else(String::new, |s| tr(s).to_uppercase())
+    };
+    hw::bracket(&gi, ix, ix + iw, y, tr("Correction"));
+    y += 18.0;
+    let row = |y: f32, label: &str| {
+        hw::silk(
+            &gi,
+            pos2(ix + 84.0, y + 12.0),
+            Align2::RIGHT_CENTER,
+            label,
+            11.0,
+            theme::INK2,
+        );
+        Rect::from_min_size(pos2(ix + 92.0, y), vec2(iw - 92.0, 24.0))
+    };
+    let key = if get(tune::KEY).round() as i32 == 0 {
+        let (root, minor) = key_root(p.key);
+        format!(
+            "{} {}",
+            tune::scale::NAMES[root as usize % 12],
+            if minor { tr("Minor") } else { tr("Major") }
+        )
+        .to_uppercase()
+    } else {
+        choice(tune::KEY, tune::PARAMS[tune::KEY].choices)
+    };
+    hw::paint_field(&gi, row(y, tr("Key")), &key, false, false);
+    y += 32.0;
+    hw::paint_field(
+        &gi,
+        row(y, tr("Scale")),
+        &choice(tune::SCALE, tune::PARAMS[tune::SCALE].choices),
+        false,
+        false,
+    );
+    y += 32.0;
+    hw::paint_field(
+        &gi,
+        row(y, tr("Target")),
+        &choice(tune::TARGET, tune::PARAMS[tune::TARGET].choices),
+        false,
+        false,
+    );
+    y += 34.0;
+    hw::seam_h(&gi, ix..=ix + iw, y);
+    y += 12.0;
+    for (label, k) in [
+        (tr("Speed"), tune::RETUNE),
+        (tr("Correction"), tune::AMOUNT),
+        (tr("Mix"), tune::MIX),
+    ] {
+        let r = row(y, label);
+        crate::piano_roll::lcd_value(
+            &gi,
+            Rect::from_min_size(pos2(r.right() - 64.0, y), vec2(64.0, 24.0)),
+            &format!("{}", get(k).round() as i32),
+        );
+        hw::text(
+            &gi,
+            pos2(r.right() - 70.0, y + 12.0),
+            Align2::RIGHT_CENTER,
+            &tune::PARAMS[k].unit.to_uppercase(),
+            Face::Silk,
+            10.0,
+            theme::PRINT,
+        );
+        y += 32.0;
+    }
 }
 
 #[cfg(test)]
@@ -1389,8 +1753,10 @@ mod tests {
     #[ignore = "picture"]
     fn tune_lane_pictures() {
         let dir = std::env::var("PROWAVE_TUNE_PNG_DIR")
+            .or_else(|_| std::env::var("MANUAL_PNG_DIR"))
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir());
+        let _ = std::fs::create_dir_all(&dir);
         let (mut p, mut s, score, out) = picture_project();
         s.tracks.selected = Some((score, 0));
         s.piano.tune_lane = true;

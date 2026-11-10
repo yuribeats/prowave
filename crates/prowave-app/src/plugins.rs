@@ -417,6 +417,9 @@ pub struct PluginHost {
     /// What each running Audio Unit's window changes by hand (for automation), by slot uid.
     #[cfg(target_os = "macos")]
     watches: std::collections::HashMap<u64, prowave_engine::au::AuParamWatch>,
+    /// The host's frame of each open plug-in (its rack unit), by slot uid.
+    #[cfg(target_os = "macos")]
+    units: std::collections::HashMap<u64, crate::plugin_unit::UnitState>,
     /// The parameters of each running Audio Unit and VST3, by slot uid (the automation
     /// choosers).
     params: std::collections::HashMap<u64, Vec<crate::automation::AuParamInfo>>,
@@ -570,10 +573,16 @@ impl PluginHost {
         let _ = p;
     }
 
-    /// Once a frame: closed windows are forgotten, open ones follow their plug-in's size.
+    /// Once a frame: closed windows are forgotten (with their unit, when it shows the
+    /// plug-in's window), open ones follow their plug-in's size.
     pub fn tend_windows(&mut self) {
         #[cfg(target_os = "macos")]
         {
+            for (uid, w) in &self.windows {
+                if !w.is_open() && self.units.get(uid).is_some_and(|u| !u.generic) {
+                    self.units.remove(uid);
+                }
+            }
             self.windows.retain(|_, w| w.is_open());
             for w in self.windows.values() {
                 w.fit();
@@ -581,8 +590,27 @@ impl PluginHost {
         }
     }
 
-    /// Opens (or brings forward) the window of the plug-in in slot `uid`.
+    /// Opens (or brings forward) the plug-in in slot `uid`: its rack unit, and its own window
+    /// unless the unit shows the host's editor.
     pub fn show_window(&mut self, uid: u64, title: &str) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            let unit = self.units.entry(uid).or_default();
+            unit.title = title.to_string();
+            if unit.generic {
+                return Ok(());
+            }
+            self.open_window(uid, title)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (uid, title);
+            Err("plug-ins run on macOS only".into())
+        }
+    }
+
+    /// Opens (or brings forward) the plug-in's own window.
+    fn open_window(&mut self, uid: u64, title: &str) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
             self.windows.retain(|_, w| w.is_open());
@@ -600,6 +628,112 @@ impl PluginHost {
             let _ = (uid, title);
             Err("plug-ins run on macOS only".into())
         }
+    }
+
+    /// Once a frame: draws the rack unit of each open plug-in and does what its keys ask
+    /// (bypass, presets, compare, the view, the host editor's moves).
+    pub fn show_units(&mut self, ctx: &egui::Context, p: &mut Project) {
+        #[cfg(target_os = "macos")]
+        {
+            let uids: Vec<u64> = self.units.keys().copied().collect();
+            for uid in uids {
+                let Some((ti, slot)) = slot_of(p, uid) else {
+                    // The plug-in left its slot: its unit goes too.
+                    self.units.remove(&uid);
+                    self.windows.remove(&uid);
+                    continue;
+                };
+                let handle = self.handles.get(&uid).cloned();
+                // A window the engine's rebuild closed comes back (the unit shows it).
+                if let (Some(u), Some(_)) = (self.units.get(&uid), &handle) {
+                    if !u.generic && !self.windows.contains_key(&uid) {
+                        let title = u.title.clone();
+                        let _ = self.open_window(uid, &title);
+                    }
+                }
+                let (badge, strip) = crate::fx_ui::strip_plate(p, ti);
+                let found = if slot == 0 {
+                    p.tracks.get(ti).and_then(|t| t.au_instrument.as_ref())
+                } else {
+                    p.strip_plugins(ti)
+                        .and_then(|fx| fx.get(usize::from(slot) - 1))
+                };
+                let Some(found) = found else { continue };
+                let name = found.name.clone();
+                let bypassed = (slot > 0).then_some(found.bypass);
+                let auto = p.strip_auto(ti).cloned().unwrap_or_default();
+                let beat = p.position_beats;
+                let automated = |key: u32| {
+                    let target = prowave_engine::AutoTarget::Plugin { slot, param: key };
+                    (!auto.lane(target).is_empty())
+                        .then(|| !auto.is_overridden(target) && auto.played(target, beat).is_some())
+                };
+                let at = crate::plugin_unit::Where {
+                    badge: &badge,
+                    strip: &strip,
+                    name: &name,
+                    bypassed,
+                    automated: &automated,
+                };
+                let Some(unit) = self.units.get_mut(&uid) else {
+                    continue;
+                };
+                let out = crate::plugin_unit::draw(ctx, uid, unit, handle.as_ref(), &at);
+                if let Some(h) = &handle {
+                    for (key, value) in &out.edits {
+                        h.edit(*key, *value);
+                    }
+                    if let Some(n) = out.preset {
+                        h.set_preset(n);
+                    }
+                    if let Some(side) = out.compare {
+                        unit.ab[unit.side] = h.state();
+                        if unit.ab[side].is_none() {
+                            unit.ab[side] = unit.ab[unit.side].clone();
+                        }
+                        if let Some(state) = &unit.ab[side] {
+                            h.set_state(state);
+                        }
+                        unit.side = side;
+                    }
+                }
+                match out.view {
+                    Some(true) => {
+                        unit.generic = true;
+                        self.windows.remove(&uid);
+                    }
+                    Some(false) => {
+                        unit.generic = false;
+                        let title = unit.title.clone();
+                        let _ = self.open_window(uid, &title);
+                    }
+                    None => {}
+                }
+                if out.bypass && slot > 0 {
+                    if let (Some(h), Some(e)) = (
+                        &handle,
+                        p.strip_plugins_mut(ti)
+                            .and_then(|(fx, _)| fx.get_mut(usize::from(slot) - 1)),
+                    ) {
+                        if let Some(state) = h.state() {
+                            e.state = Some(state);
+                        }
+                    }
+                    if let Some(e) = p
+                        .strip_plugins_mut(ti)
+                        .and_then(|(fx, _)| fx.get_mut(usize::from(slot) - 1))
+                    {
+                        e.bypass = !e.bypass;
+                    }
+                }
+                if out.close {
+                    self.units.remove(&uid);
+                    self.windows.remove(&uid);
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (ctx, p);
     }
 
     /// Brings the engine's plug-ins in line with the project: a track whose plug-ins changed
@@ -779,11 +913,6 @@ impl PluginHost {
                     return Some(fx);
                 }
                 return prowave_engine::open_native_block(&slot.id, sample_rate, &values);
-            }
-            if crate::sampler::is_sampler(slot) {
-                let (sampler, remote) = prowave_engine::Sampler::new(sample_rate);
-                crate::sampler::attach(slot.uid, remote);
-                return Some(Box::new(sampler));
             }
             if crate::channel_rack::is_rack(slot) {
                 let (rack, errors) =
@@ -1133,5 +1262,88 @@ mod tests {
         assert_eq!(format_label("prowave:lemon-limiter"), "");
         assert_eq!(match_key("Valhalla DSP, LLC"), match_key("ValhallaDSP"));
         assert_ne!(match_key("Pro-Q 4"), match_key("Pro-Q 3"));
+    }
+
+    /// Pictures of the plug-in rack units over real Apple Audio Units: the frame alone (the
+    /// plug-in's own window beside it) and the host-drawn editor. Ignored; checks nothing:
+    /// `FX_PNG_DIR=/some/dir cargo test -p prowave-app plugin_unit_pictures -- --ignored`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "pictures of the plug-in units"]
+    fn plugin_unit_pictures() {
+        let dir = std::env::var_os("FX_PNG_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("prowave-fx"));
+        let _ = std::fs::create_dir_all(&dir);
+        let floor = egui::Color32::from_rgb(0xcf, 0xc8, 0xb8);
+        for (id, name, generic, file, h) in [
+            (
+                "aufx:dely:appl",
+                "Apple: AUDelay",
+                false,
+                "plugin-frame-audelay.png",
+                300.0,
+            ),
+            (
+                "aufx:dely:appl",
+                "Apple: AUDelay",
+                true,
+                "plugin-generic-audelay.png",
+                560.0,
+            ),
+            (
+                "aufx:mrev:appl",
+                "Apple: AUMatrixReverb",
+                true,
+                "plugin-generic-aumatrixreverb.png",
+                980.0,
+            ),
+            (
+                "aufx:nbeq:appl",
+                "Apple: AUNBandEQ",
+                true,
+                "plugin-generic-aunbandeq.png",
+                980.0,
+            ),
+        ] {
+            if prowave_engine::au::find(id).is_none() {
+                continue;
+            }
+            let mut p = Project::empty();
+            p.master_au_effects.push(PluginSlot::new(id, name));
+            let mut host = PluginHost::default();
+            let mut failed = Vec::new();
+            // The chain keeps the units alive while they are drawn.
+            let chain = host.open_master(&mut p, 48_000, 512, &mut failed);
+            assert!(failed.is_empty(), "{failed:?}");
+            let uid = p.master_au_effects[0].uid;
+            let handle = host.handles.get(&uid).cloned();
+            let mut unit = crate::plugin_unit::UnitState {
+                generic,
+                title: name.into(),
+                ..Default::default()
+            };
+            let none = |_: u32| None;
+            crate::ui_test::render_png(
+                760.0,
+                h,
+                2.0,
+                floor,
+                |ui| {
+                    crate::theme::apply(ui.ctx());
+                    let at = crate::plugin_unit::Where {
+                        badge: "ST",
+                        strip: "Stereo Out",
+                        name,
+                        bypassed: Some(false),
+                        automated: &none,
+                    };
+                    crate::plugin_unit::draw(ui.ctx(), uid, &mut unit, handle.as_ref(), &at);
+                },
+                &dir.join(file),
+            )
+            .unwrap();
+            drop(chain);
+        }
     }
 }

@@ -1,5 +1,8 @@
 # Build output (the workspace target dir grows to many GB)
 /target
+# The public export's build folder, when it is put in this checkout (it would otherwise be
+# copied into the export as an untracked file)
+/target-public
 
 # Release artifacts are built by .github/workflows/release.yml, not committed
 /dist/*.tar.gz

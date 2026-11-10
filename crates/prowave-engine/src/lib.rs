@@ -13,6 +13,9 @@ static ALLOC_GUARD: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisab
 mod analysis;
 #[cfg(target_os = "macos")]
 pub mod au;
+#[cfg(target_os = "macos")]
+mod au_host_time;
+mod audition;
 #[cfg(not(target_arch = "wasm32"))]
 mod capture;
 mod clock;
@@ -42,14 +45,15 @@ pub mod prerender;
 mod routing;
 #[cfg(target_os = "macos")]
 mod rt_thread;
+mod sample_buf;
 mod sample_rack;
 pub mod sample_tools;
-mod sampler;
 mod soundfont;
-mod sp_fx;
 mod spectral;
 mod synth;
 mod tempo_map;
+#[cfg(test)]
+mod timing_tests;
 mod triple;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vocoder;
@@ -62,7 +66,12 @@ mod vst3_view;
 #[cfg(windows)]
 mod wasapi;
 
-pub use crate::analysis::{tempo_curve, Analysis, Analyzer, TempoEstimate, STRENGTH_RATE};
+pub use crate::analysis::{
+    beats_at, tempo_curve, Analysis, Analyzer, TempoEstimate, STRENGTH_RATE,
+};
+pub use crate::audition::{
+    AuditionLayers, AuditionMsg, AuditionRemote, AuditionStatus, Auditioner, AUDITION_LAYERS,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::capture::{
     input_devices, Capture, CaptureError, InputInfo, InputSource, Recorded, DUPLEX_INPUT_ID,
@@ -112,18 +121,11 @@ pub use crate::routing::{
     curve_shape, lane_value, send_gain, AutoLane, AutoPoint, AutoTarget, Route, SendSpec,
     MAX_AUTO_POINTS, MAX_BUSES, MAX_SENDS,
 };
+pub use crate::sample_buf::SampleBuf;
 pub use crate::sample_rack::{
     RackChannelSpec, SampleRack, MAX_RACK_CHANNELS, RACK_BASE_NOTE, RACK_PARAMS_PER_CHANNEL,
 };
-pub use crate::sampler::{
-    chromatic_keys, pad_keys, KeyMap, PadParams, SampleBuf, Sampler, SamplerMsg, SamplerRemote,
-    SamplerStatus, NO_PAD, SAMPLER_PADS, SAMPLER_VOICES,
-};
 pub use crate::soundfont::{PresetInfo, SfPlayer, SoundFontBank, MAX_SOUNDFONT_BYTES};
-pub use crate::sp_fx::{
-    chromatic_semis, delay_note, delay_seconds, FxSettings, SpFx, SpFxKind, DELAY_NOTES,
-    MAX_DELAY_SECONDS,
-};
 pub use crate::spectral::{
     paint, spectrogram, Fft, FreqScale, PaintSettings, Picture, Spectrogram, MAX_PAINT_SECONDS,
     PAINT_FFT, PAINT_HOP,

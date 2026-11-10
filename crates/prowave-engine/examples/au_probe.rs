@@ -64,6 +64,18 @@ fn main() {
         let (mut peak, mut worst) = (0f32, Duration::ZERO);
         let mut total = Duration::ZERO;
         for b in 0..blocks {
+            // The transport plays at 117.02 BPM in 4/4: what the unit's host callbacks answer.
+            let beat = (b * frames) as f64 / 48_000.0 * 117.02 / 60.0;
+            au.set_transport(&prowave_engine::BlockTransport {
+                playing: true,
+                recording: false,
+                sample_pos: (b * frames) as i64,
+                beat,
+                bar_start_beat: (beat / 4.0).floor() * 4.0,
+                tempo: 117.02,
+                sig: (4, 4),
+                cycle: None,
+            });
             if info.kind != AuKind::Effect {
                 if b == 1 {
                     au.midi(0x90, 60, 100, 0);
@@ -81,13 +93,14 @@ fn main() {
         }
         let budget = Duration::from_secs_f64(frames as f64 / 48_000.0);
         println!(
-            "{}\topen {open_ms} ms\tpeak {peak:.3}\tlatency {:.2} ms\trender avg {:.0} us, max {:.0} us (budget {:.0} us)\terrors {}",
+            "{}\topen {open_ms} ms\tpeak {peak:.3}\tlatency {:.2} ms\trender avg {:.0} us, max {:.0} us (budget {:.0} us)\terrors {}\thost calls {}",
             info.label(),
             au.latency_seconds() * 1000.0,
             total.as_secs_f64() * 1e6 / blocks as f64,
             worst.as_secs_f64() * 1e6,
             budget.as_secs_f64() * 1e6,
-            au.errors()
+            au.errors(),
+            au.host_callback_calls()
         );
         return;
     }

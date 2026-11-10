@@ -632,8 +632,9 @@ pub enum Command {
     },
     /// How long after the transport renders a frame it is heard, in frames: `strips`, the
     /// delay compensation every strip waits for before its fader; `master`, the whole delay
-    /// up to the Stereo Out. Fader automation is read `strips` frames late and MIDI out is
-    /// stamped `master` frames later, so both stay in time with the compensated sound.
+    /// up to the Stereo Out. Fader automation is read `strips` frames late, MIDI out is
+    /// stamped `master` frames later and the click (count-in included) sounds `master` frames
+    /// later, so all stay in time with the compensated sound.
     SetOutputDelay {
         strips: u32,
         master: u32,
@@ -950,6 +951,7 @@ pub(crate) struct Readers {
     pub state: Option<StateReader>,
     pub midi: Option<Consumer<MidiOutEvent>>,
     pub mtc: Option<Consumer<MtcMessage>>,
+    pub audition: Option<crate::audition::AuditionRemote>,
 }
 
 pub struct EngineCore {
@@ -981,6 +983,13 @@ pub struct EngineCore {
     click_freq: f32,
     click_gain: f32,
     click_accent: bool,
+    /// Clicks waiting for the output delay (see [`Command::SetOutputDelay`]), as (frames
+    /// left, frequency): the click is heard with the delay-compensated tracks.
+    click_queue: [(u32, f32); CLICK_QUEUE],
+    click_queued: usize,
+    /// The transport just started (Play, the end of a count-in, a locate while playing): the
+    /// beat it starts on gets its click.
+    start_click: bool,
     /// Frequency of A4 in Hz.
     tuning_hz: f32,
     /// A count-in is running: the clicks left, the frames to the next one, the frames
@@ -1079,6 +1088,10 @@ pub struct EngineCore {
     test_hz: f32,
     test_gain: f32,
     test_phase: f32,
+    /// The browser's preview loop (see [`crate::audition`]), and the window's end of it until
+    /// the app takes it.
+    audition: crate::audition::Auditioner,
+    audition_remote: Option<crate::audition::AuditionRemote>,
     /// Record > Process Buffer in frames (0: off) and the delay it gives a pre-rendered hop.
     process_buffer: u32,
     /// Which tracks are live (their plug-ins stay in the I/O callback).
@@ -1102,6 +1115,16 @@ pub struct EngineCore {
     /// [`Command::SetOutputDelay`]).
     beat_hist: Vec<f64>,
     hist_pos: usize,
+    /// The beat a transport-following instrument was given at each of the last frames (NaN:
+    /// stopped), so a live track's instrument can follow it its content delay late, and the
+    /// plug-ins of Aux strips and the Stereo Out the output delay late. As long as
+    /// `beat_hist`, which covers the longest output delay.
+    transport_hist: Vec<f64>,
+    transport_pos: usize,
+    /// The cycle just wrapped: the plug-ins are given this, the cycle start, for the next
+    /// frame instead of the transport's beat (a fraction of a frame past it), so what sits
+    /// on the cycle start plays on every pass. NaN otherwise.
+    wrap_beat: f64,
 }
 
 /// Regions of live tracks that can be delayed at once (see [`Command::SetContentDelay`]).
@@ -1109,6 +1132,8 @@ const CONTENT_LINES: usize = 32;
 /// The longest content delay, in frames.
 const CONTENT_FRAMES: usize = 16_384;
 const NO_LINE: u8 = u8::MAX;
+/// Clicks that can wait for the output delay at once (one a beat; the delay is under a second).
+const CLICK_QUEUE: usize = 16;
 /// Frames of transport history kept for late automation.
 const BEAT_HISTORY: usize = 32_768;
 
@@ -1202,6 +1227,7 @@ impl EngineCore {
         let (state, reader) = triple_buffer(EngineState::default());
         let (midi_out, midi_out_reader) = rtrb::RingBuffer::new(1024);
         let (mtc_out, mtc_out_reader) = rtrb::RingBuffer::new(256);
+        let (audition, audition_remote) = crate::audition::Auditioner::new(sample_rate);
         Self {
             sr: sample_rate.max(1) as f32,
             rx,
@@ -1228,6 +1254,9 @@ impl EngineCore {
             click_freq: 1000.0,
             click_gain: DEFAULT_CLICK_GAIN,
             click_accent: true,
+            click_queue: [(0, 0.0); CLICK_QUEUE],
+            click_queued: 0,
+            start_click: false,
             tuning_hz: 440.0,
             counting: false,
             count_left: 0,
@@ -1296,6 +1325,8 @@ impl EngineCore {
             test_hz: 0.0,
             test_gain: 0.0,
             test_phase: 0.0,
+            audition,
+            audition_remote: Some(audition_remote),
             process_buffer: 0,
             track_live: vec![false; MAX_TRACKS],
             output_delay: (0, 0),
@@ -1307,6 +1338,9 @@ impl EngineCore {
             orphans: Vec::with_capacity(MAX_TRACKS),
             beat_hist: vec![0.0; BEAT_HISTORY],
             hist_pos: 0,
+            transport_hist: vec![f64::NAN; BEAT_HISTORY],
+            transport_pos: 0,
+            wrap_beat: f64::NAN,
         }
     }
 
@@ -1371,6 +1405,10 @@ impl EngineCore {
         {
             line.clear();
         }
+        // Clicks and transport beats on their way out are not heard either.
+        self.click_queued = 0;
+        self.transport_hist.fill(f64::NAN);
+        self.wrap_beat = f64::NAN;
     }
 
     /// Plug-ins the playback thread gave back go home to their track.
@@ -1509,6 +1547,7 @@ impl EngineCore {
             state: self.take_state_reader(),
             midi: self.take_midi_out_reader(),
             mtc: self.take_mtc_reader(),
+            audition: self.audition_remote.take(),
         }
     }
 
@@ -1858,6 +1897,7 @@ impl EngineCore {
 
     fn seek(&mut self, beat: f64) {
         self.beat = if beat.is_finite() { beat.max(0.0) } else { 0.0 };
+        self.wrap_beat = f64::NAN;
         self.kill_voices();
         self.next_note = self
             .song
@@ -2154,6 +2194,62 @@ impl EngineCore {
         }
     }
 
+    /// The click's pitch on beat `beat_in_bar` (0: the downbeat, accented when asked).
+    fn click_freq_of(&self, beat_in_bar: u32) -> f32 {
+        if beat_in_bar == 0 && self.click_accent {
+            1500.0
+        } else {
+            1000.0
+        }
+    }
+
+    /// The click of the transport starting at `beat`: one when `beat` is the first frame of a
+    /// beat (as if the transport had run into it), with that beat's pitch.
+    fn click_on(&self, beat: f64) -> Option<f32> {
+        let b = self.tempo_map.position(beat);
+        if beat <= 0.0 {
+            return Some(self.click_freq_of(b.beat));
+        }
+        let before = self.tempo_map.advance(beat, -1.0 / f64::from(self.sr));
+        let a = self.tempo_map.position(before);
+        ((a.bar, a.beat) != (b.bar, b.beat)).then(|| self.click_freq_of(b.beat))
+    }
+
+    /// A click of `freq` that starts with this frame's sound: heard after the output delay
+    /// (see [`Command::SetOutputDelay`]), like every track, so it lands on the same sample as
+    /// a region's beat. No allocation.
+    fn schedule_click(&mut self, freq: f32) {
+        let wait = self.output_delay.1;
+        if wait == 0 {
+            self.start_click_sound(freq);
+        } else if self.click_queued < CLICK_QUEUE {
+            self.click_queue[self.click_queued] = (wait, freq);
+            self.click_queued += 1;
+        }
+    }
+
+    /// Clicks whose wait is over start sounding; the others wait one frame less.
+    fn release_clicks(&mut self) {
+        let mut k = 0;
+        while k < self.click_queued {
+            let (left, freq) = self.click_queue[k];
+            if left == 0 {
+                self.start_click_sound(freq);
+                self.click_queued -= 1;
+                self.click_queue[k] = self.click_queue[self.click_queued];
+            } else {
+                self.click_queue[k].0 = left - 1;
+                k += 1;
+            }
+        }
+    }
+
+    fn start_click_sound(&mut self, freq: f32) {
+        self.click_remaining = (0.03 * self.sr) as u32;
+        self.click_phase = 0.0;
+        self.click_freq = freq;
+    }
+
     /// One frame of a count-in: a click on each beat, then the transport starts.
     fn tick_count_in(&mut self) {
         if self.count_wait == 0 {
@@ -2161,12 +2257,11 @@ impl EngineCore {
                 self.counting = false;
                 self.start_beat = self.beat;
                 self.playing = true;
+                self.start_click = true;
                 self.mtc_locate();
                 return;
             }
-            self.click_remaining = (0.03 * self.sr) as u32;
-            self.click_phase = 0.0;
-            self.click_freq = 1000.0;
+            self.schedule_click(1000.0);
             self.count_left -= 1;
             self.count_wait = self.count_step;
         }
@@ -2360,6 +2455,7 @@ impl EngineCore {
                     self.counting = false;
                     if !self.playing {
                         self.start_beat = self.beat;
+                        self.start_click = true;
                     }
                     self.playing = true;
                     self.mtc_locate();
@@ -2382,6 +2478,7 @@ impl EngineCore {
                     self.seek(beat);
                     if self.playing {
                         self.flush_ahead();
+                        self.start_click = true;
                     }
                 }
                 Command::SetTempoMap(map) => {
@@ -2863,18 +2960,81 @@ impl EngineCore {
         }
     }
 
-    /// The transport now, for the plug-ins' process context. No allocation.
-    fn block_transport(&self) -> crate::plugin_track::BlockTransport {
-        let map = &self.tempo_map;
-        let beat = if self.beat.is_finite() {
-            self.beat
+    /// The beat the plug-ins are given for the frame about to be rendered (NaN: stopped): the
+    /// transport's, or the cycle start on the frame after a wrap (see `wrap_beat`).
+    #[inline]
+    fn plugin_beat(&self) -> f64 {
+        if !self.playing {
+            f64::NAN
+        } else if self.wrap_beat.is_finite() {
+            self.wrap_beat
         } else {
-            0.0
-        };
+            self.beat
+        }
+    }
+
+    /// Frames from the next one until the transport plays (0: it plays), and the beat it
+    /// plays from; `None` while stopped and not counting in.
+    fn start_ahead(&self) -> Option<(usize, f64)> {
+        if self.playing {
+            Some((0, self.plugin_beat()))
+        } else if self.counting {
+            // `tick_count_in`: a click whenever the wait reaches 0, the start after the last.
+            let left =
+                self.count_wait as usize + usize::from(self.count_left) * self.count_step as usize;
+            Some((left, self.beat))
+        } else {
+            None
+        }
+    }
+
+    /// The transport `lag` frames ago, for the process context (VST3) and host callbacks
+    /// (Audio Units) of plug-ins that hear their input that late: a live track's regions
+    /// (its content delay), an Aux strip's sends (the strips' delay compensation), the
+    /// Stereo Out's mix (the whole output delay). For each output sample they then read the
+    /// position the transport had when that sound was made, as a pre-rendered track's plug-ins
+    /// do. When the transport (seen `lag` late) starts inside this block of `block` frames,
+    /// the block plays from its first frame from a position before the start (pre-roll), so
+    /// the plug-in reaches the start beat exactly on the frame it is played; never "stopped"
+    /// for the whole block. Stopped: the playhead now, not playing. No allocation.
+    fn block_transport_ago(&self, lag: usize, block: usize) -> crate::plugin_track::BlockTransport {
+        let n = self.transport_hist.len();
+        let lag = lag.min(n - 1);
+        // Frame `j` of this block hears the transport's frame `j - lag`: kept in the history
+        // for `j < lag` (the block's first frame is written next, at `transport_pos + 1`).
+        let hist = |j: usize| self.transport_hist[(self.transport_pos + 1 + j + n - lag) % n];
+        let mut start = None;
+        if lag > 0 {
+            let b = hist(0);
+            if b.is_finite() {
+                return self.transport_at(b, true);
+            }
+            start = (1..lag.min(block))
+                .map(|j| (j, hist(j)))
+                .find(|(_, b)| b.is_finite());
+        }
+        if start.is_none() {
+            start = self
+                .start_ahead()
+                .map(|(k, b)| (lag + k, b))
+                .filter(|&(j, _)| j < block.max(1));
+        }
+        match start {
+            Some((0, b)) => self.transport_at(b, true),
+            Some((j, b)) => {
+                crate::plugin_track::pre_roll(self.transport_at(b, true), j as u64, self.sr)
+            }
+            None => self.transport_at(self.beat, false),
+        }
+    }
+
+    fn transport_at(&self, beat: f64, playing: bool) -> crate::plugin_track::BlockTransport {
+        let map = &self.tempo_map;
+        let beat = if beat.is_finite() { beat } else { 0.0 };
         let pos = map.position(beat);
         let secs = map.seconds_at(beat);
         crate::plugin_track::BlockTransport {
-            playing: self.playing,
+            playing,
             recording: false,
             sample_pos: if secs.is_finite() {
                 (secs * f64::from(self.sr)).round() as i64
@@ -2931,6 +3091,9 @@ impl EngineCore {
         }
 
         let block_frames = out.len() / 2;
+        self.audition.begin_block();
+        // The preview loop's tempo when it follows a stopped transport: quarter notes a frame.
+        let audition_bpf = f64::from(self.tempo_map.tempo_at(self.beat)) / 60.0 * frame_secs;
         // The master plug-ins take this block whole once its frames are mixed (see
         // `finish_master_block`); a block longer than they were made for passes them by.
         let master_block = self
@@ -2938,7 +3101,8 @@ impl EngineCore {
             .as_ref()
             .is_some_and(|p| p.has_active_effects() && block_frames <= p.capacity());
         if master_block {
-            let bt = self.block_transport();
+            // They hear the mix the whole output delay late.
+            let bt = self.block_transport_ago(self.output_delay.1 as usize, block_frames);
             if let Some(p) = self.master_plugins.as_mut() {
                 p.set_block_transport(bt);
                 // Never sent to a playback thread: the master chain stays in the I/O callback.
@@ -2946,12 +3110,24 @@ impl EngineCore {
             }
         }
         if !self.plugin_tracks.is_empty() {
-            let bt = self.block_transport();
+            let bt = self.block_transport_ago(0, block_frames);
             // Tracks that are not live render their plug-ins on the playback thread.
             let hop = self.prerender_hop(block_frames);
             for k in 0..self.plugin_tracks.len() {
                 let t = self.plugin_tracks[k] as usize;
                 let away = hop > 0 && !self.track_live[t];
+                // A live track's plug-ins hear its regions its content delay late; an Aux
+                // strip's hear the sends after the strips' delay compensation.
+                let lag = if self.strip_kind[t] == 2 {
+                    self.output_delay.0 as usize
+                } else {
+                    self.content_delay[t] as usize
+                };
+                let bt = if lag == 0 {
+                    bt
+                } else {
+                    self.block_transport_ago(lag, block_frames)
+                };
                 if let Some(p) = self.plugins[t].as_mut() {
                     p.set_block_transport(bt);
                     p.begin_block(block_frames, away, hop);
@@ -2963,14 +3139,31 @@ impl EngineCore {
             self.hist_pos = (self.hist_pos + 1) % self.beat_hist.len();
             self.beat_hist[self.hist_pos] = self.beat;
             self.tick_midi_clock();
+            // A count-in ending now starts the transport on this frame, before the plug-ins
+            // learn its beat: they play the start beat on the frame the notes and click do.
+            if self.counting {
+                self.tick_count_in();
+            }
             // Plug-in instruments sound whether or not the transport runs (tails, live notes).
             // An instrument that follows the transport (a drum machine) learns this frame's beat.
-            let transport_beat = if self.playing { self.beat } else { f64::NAN };
+            // A live track's instrument gets it as late as its regions are (its content delay),
+            // so it plays in time with the other tracks whether the track is live or not.
+            let transport_beat = self.plugin_beat();
+            self.wrap_beat = f64::NAN;
+            let hist_n = self.transport_hist.len();
+            self.transport_pos = (self.transport_pos + 1) % hist_n;
+            self.transport_hist[self.transport_pos] = transport_beat;
             for k in 0..self.plugin_tracks.len() {
                 let t = self.plugin_tracks[k] as usize;
                 if let Some(p) = self.plugins[t].as_mut() {
                     if p.follows_transport() {
-                        p.set_beat(frame_i, transport_beat);
+                        let lag = self.content_delay[t] as usize;
+                        let beat = if lag == 0 {
+                            transport_beat
+                        } else {
+                            self.transport_hist[(self.transport_pos + hist_n - lag) % hist_n]
+                        };
+                        p.set_beat(frame_i, beat);
                     }
                     let (pl, pr) = p.instrument_frame(frame_i);
                     if self.track_audible[t] {
@@ -2978,9 +3171,6 @@ impl EngineCore {
                         self.in_r[t] += pr as f64;
                     }
                 }
-            }
-            if self.counting {
-                self.tick_count_in();
             }
             let sample_beat = self.beat;
             // Advance once per track/sample, not once per voice or overlapping audio clip.
@@ -3181,6 +3371,23 @@ impl EngineCore {
                 l += t as f64;
                 r += t as f64;
             }
+            {
+                let at = if self.playing { self.beat } else { f64::NAN };
+                let (al, ar) = self.audition.frame(at, audition_bpf);
+                l += al as f64;
+                r += ar as f64;
+            }
+            if self.start_click {
+                self.start_click = false;
+                if self.playing && self.metronome {
+                    if let Some(freq) = self.click_on(self.beat) {
+                        self.schedule_click(freq);
+                    }
+                }
+            }
+            if self.click_queued > 0 {
+                self.release_clicks();
+            }
             if self.click_remaining > 0 {
                 self.click_remaining -= 1;
                 self.click_phase += self.click_freq / self.sr;
@@ -3237,6 +3444,8 @@ impl EngineCore {
                             let wrapped =
                                 self.tempo_map.beat_at(start + excess.rem_euclid(duration));
                             self.seek(wrapped);
+                            // The plug-ins hear the cycle start itself on the next frame.
+                            self.wrap_beat = s;
                             // A fractional-sample wrap must still trigger notes at cycle start.
                             self.next_note = self.song.notes.partition_point(|n| n.start_beat < s);
                             self.next_control = self.song.controls.partition_point(|c| c.beat < s);
@@ -3249,17 +3458,13 @@ impl EngineCore {
                         self.tempo_map.position(self.beat),
                     );
                     if (a.bar, a.beat) != (b.bar, b.beat) {
-                        self.click_remaining = (0.03 * self.sr) as u32;
-                        self.click_phase = 0.0;
-                        self.click_freq = if b.beat == 0 && self.click_accent {
-                            1500.0
-                        } else {
-                            1000.0
-                        };
+                        let freq = self.click_freq_of(b.beat);
+                        self.schedule_click(freq);
                     }
                 }
             }
         }
+        self.audition.end_block();
         if master_block {
             (pk_l, pk_r) = self.finish_master_block(out);
         }

@@ -12,6 +12,9 @@ use crate::model::{Project, TrackKind};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
+#[path = "hw_utilities.rs"]
+pub(crate) mod hw_utilities;
+
 /// Messages kept in the log.
 const KEEP: usize = 2000;
 /// Clock intervals kept per port (four beats).
@@ -262,218 +265,18 @@ pub fn show(
     let outputs = crate::midi_out::ports();
     let inputs = input_names();
     let clock = crate::midi_out::clock_ports();
-    let mut open = true;
     let mut panic = false;
-    egui::Window::new(tr("MIDI Monitor"))
-        .id(egui::Id::unique("midi_monitor"))
-        .open(&mut open)
-        .default_size([720.0, 520.0])
-        .resizable(true)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button(tr("Send All Notes Off")).clicked() {
-                    panic = true;
-                }
-                ui.separator();
-                ui.label(tr("Test note"));
-                let current = m.test_port.clone().unwrap_or_default();
-                egui::ComboBox::from_id_salt("monitor_test_port")
-                    .selected_text(if current.is_empty() {
-                        tr("Port")
-                    } else {
-                        &current
-                    })
-                    .show_ui(ui, |ui| {
-                        for name in &outputs {
-                            ui.selectable_value(&mut m.test_port, Some(name.clone()), name);
-                        }
-                    });
-                ui.add(
-                    egui::DragValue::new(&mut m.test_channel)
-                        .range(1..=16)
-                        .prefix("ch "),
-                );
-                if ui
-                    .add_enabled(m.test_port.is_some(), egui::Button::new(tr("Send")))
-                    .clicked()
-                {
-                    if let Some(port) = m.test_port.clone() {
-                        *test_note = Some((port, m.test_channel));
-                    }
-                }
-            });
-            ui.separator();
-            // Ports.
-            let (clock_stats, counts) = match log().lock() {
-                Ok(mut l) => {
-                    let stats: HashMap<String, (f64, f64, f64, u64, u64)> = l
-                        .clock
-                        .iter()
-                        .filter(|((d, _), _)| *d == Dir::Out)
-                        .map(|((_, port), c)| {
-                            let n = c.intervals.len().max(1) as f64;
-                            let mean = c.intervals.iter().sum::<f64>() / n;
-                            let sd = (c.intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                                / n)
-                                .sqrt();
-                            let bpm = if mean > 0.0 {
-                                60_000.0 / (mean * 24.0)
-                            } else {
-                                0.0
-                            };
-                            (port.clone(), (bpm, sd, mean, c.ticks, c.last_ns))
-                        })
-                        .collect();
-                    let counts = std::mem::take(&mut l.counts);
-                    (stats, counts)
-                }
-                Err(_) => (HashMap::new(), HashMap::new()),
-            };
-            let now = now_ns();
-            egui::CollapsingHeader::new(tr("Ports"))
-                .default_open(true)
-                .show(ui, |ui| {
-                    egui::Grid::new("monitor_ports")
-                        .striped(true)
-                        .num_columns(5)
-                        .show(ui, |ui| {
-                            for h in ["Output", "Clock", "Tracks", "Clock tempo", "Activity"] {
-                                ui.strong(tr(h));
-                            }
-                            ui.end_row();
-                            let mut all: Vec<String> = outputs.clone();
-                            // Ports the project or the clock names but the system no longer has.
-                            for t in &p.tracks {
-                                if let Some(port) = &t.midi_port {
-                                    if !all.contains(port) {
-                                        all.push(port.clone());
-                                    }
-                                }
-                            }
-                            for c in &clock {
-                                if !all.contains(c) {
-                                    all.push(c.clone());
-                                }
-                            }
-                            for port in all {
-                                let online = outputs.contains(&port);
-                                let name = if online {
-                                    egui::RichText::new(&port)
-                                } else {
-                                    egui::RichText::new(format!("{port} ({})", tr("offline")))
-                                        .color(egui::Color32::from_rgb(0xe0, 0x60, 0x50))
-                                };
-                                ui.label(name);
-                                let mut on = clock.contains(&port);
-                                if ui.checkbox(&mut on, "").changed() {
-                                    crate::midi_out::set_clock_port(&port, on);
-                                }
-                                let tracks: Vec<String> = p
-                                    .tracks
-                                    .iter()
-                                    .filter(|t| {
-                                        t.kind == TrackKind::ExternalMidi
-                                            && t.midi_port.as_deref() == Some(port.as_str())
-                                    })
-                                    .map(|t| format!("{} (ch {})", t.name, t.midi_channel))
-                                    .collect();
-                                ui.label(tracks.join(", "));
-                                match clock_stats.get(&port) {
-                                    Some((bpm, sd, _, _, last))
-                                        if now.saturating_sub(*last) < 500_000_000 =>
-                                    {
-                                        ui.label(format!("{bpm:.2} bpm, ±{sd:.3} ms"));
-                                    }
-                                    _ => {
-                                        ui.label("—");
-                                    }
-                                }
-                                let busy =
-                                    counts.get(&(Dir::Out, port.clone())).copied().unwrap_or(0);
-                                activity_dot(ui, busy > 0);
-                                ui.end_row();
-                            }
-                            for port in &inputs {
-                                ui.label(format!("{port} ({})", tr("input")));
-                                ui.label("");
-                                ui.label("");
-                                ui.label("");
-                                let busy =
-                                    counts.get(&(Dir::In, port.clone())).copied().unwrap_or(0);
-                                activity_dot(ui, busy > 0);
-                                ui.end_row();
-                            }
-                        });
-                });
-            ui.separator();
-            // Activity.
-            ui.horizontal(|ui| {
-                ui.strong(tr("Activity"));
-                ui.checkbox(&mut m.show_out, tr("Out"));
-                ui.checkbox(&mut m.show_in, tr("In"));
-                if let Ok(mut l) = log().lock() {
-                    let label = if l.paused { tr("Resume") } else { tr("Pause") };
-                    if ui.button(label).clicked() {
-                        l.paused = !l.paused;
-                    }
-                    if ui.button(tr("Clear")).clicked() {
-                        l.entries.clear();
-                        l.clock.clear();
-                    }
-                }
-            });
-            let entries: Vec<Entry> = log()
-                .lock()
-                .map(|l| {
-                    l.entries
-                        .iter()
-                        .rev()
-                        .filter(|e| match e.dir {
-                            Dir::Out => m.show_out,
-                            Dir::In => m.show_in,
-                        })
-                        .take(400)
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    egui::Grid::new("monitor_log")
-                        .striped(true)
-                        .num_columns(6)
-                        .show(ui, |ui| {
-                            for h in ["Time", "", "Port", "Ch", "Message", "Ahead"] {
-                                ui.strong(tr(h));
-                            }
-                            ui.end_row();
-                            for e in entries {
-                                let age = now.saturating_sub(e.at_ns) as f64 / 1e9;
-                                ui.monospace(format!("-{age:.3} s"));
-                                ui.label(if e.dir == Dir::Out { "→" } else { "←" });
-                                ui.label(&e.port);
-                                let (text, ch) = describe(&e.bytes[..usize::from(e.len)]);
-                                ui.label(ch.map_or(String::new(), |c| c.to_string()));
-                                ui.label(text);
-                                if e.dir == Dir::Out && e.lead_ms != 0.0 {
-                                    let txt = format!("{:+.2} ms", e.lead_ms);
-                                    if e.lead_ms < 0.0 {
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(0xe0, 0x60, 0x50),
-                                            txt,
-                                        );
-                                    } else {
-                                        ui.monospace(txt);
-                                    }
-                                } else {
-                                    ui.label("");
-                                }
-                                ui.end_row();
-                            }
-                        });
-                });
-        });
+    let (open, _) = hw_utilities::window(
+        ctx,
+        egui::Id::unique("midi_monitor"),
+        tr("MIDI Monitor"),
+        "",
+        760.0,
+        Some((egui::vec2(780.0, 600.0), egui::vec2(600.0, 420.0))),
+        |ui| {
+            panel(ui, p, m, &outputs, &inputs, &clock, &mut panic, test_note);
+        },
+    );
     if !open {
         s.show_midi_monitor = false;
     }
@@ -482,14 +285,507 @@ pub fn show(
     }
 }
 
-fn activity_dot(ui: &mut egui::Ui, busy: bool) {
-    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-    let c = if busy {
-        egui::Color32::from_rgb(0x50, 0xd0, 0x60)
-    } else {
-        egui::Color32::from_gray(0x50)
+/// What the clock gives on each output: (bpm, jitter ms, last tick ns).
+type ClockStats = HashMap<String, (f64, f64, u64)>;
+
+/// The clock figures and the message counts since the last look (the counts start again).
+fn take_stats() -> (ClockStats, HashMap<(Dir, String), u64>) {
+    let Ok(mut l) = log().lock() else {
+        return (HashMap::new(), HashMap::new());
     };
-    ui.painter().circle_filled(r.center(), 4.0, c);
+    let stats = l
+        .clock
+        .iter()
+        .filter(|((d, _), _)| *d == Dir::Out)
+        .map(|((_, port), c)| {
+            let n = c.intervals.len().max(1) as f64;
+            let mean = c.intervals.iter().sum::<f64>() / n;
+            let sd = (c.intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+            let bpm = if mean > 0.0 {
+                60_000.0 / (mean * 24.0)
+            } else {
+                0.0
+            };
+            (port.clone(), (bpm, sd, c.last_ns))
+        })
+        .collect();
+    let counts = std::mem::take(&mut l.counts);
+    (stats, counts)
+}
+
+/// The inside of the window: the test-note row, the ports and the message log.
+#[allow(clippy::too_many_arguments)]
+fn panel(
+    ui: &mut egui::Ui,
+    p: &Project,
+    m: &mut Monitor,
+    outputs: &[String],
+    inputs: &[String],
+    clock: &[String],
+    panic: &mut bool,
+    test_note: &mut Option<(String, u8)>,
+) {
+    use crate::hw::{self, Cap};
+    use crate::theme::{self, Face};
+    use egui::{pos2, vec2, Align2, Rect, Sense};
+    use hw_utilities as hu;
+    let id = egui::Id::unique("midi_monitor_panel");
+    let w = ui.available_width();
+
+    // Test note and All Notes Off.
+    let (row, _) = ui.allocate_exact_size(vec2(w, 62.0), Sense::hover());
+    let g = ui.painter().clone();
+    let key_y = row.top() + 22.0;
+    let panic_label = tr("Send All Notes Off");
+    let pw = hu::key_width(&g, panic_label, 11.0, false).max(150.0);
+    let panic_r = Rect::from_min_size(pos2(row.right() - pw, key_y), vec2(pw, 32.0));
+    hw::bracket(&g, panic_r.left(), panic_r.right(), row.top() + 8.0, "MIDI");
+    if hu::key(
+        ui,
+        panic_r,
+        id.with("panic"),
+        Cap::Dark,
+        false,
+        None,
+        panic_label,
+        true,
+    )
+    .clicked()
+    {
+        *panic = true;
+    }
+    let send_label = tr("Send");
+    let sw = hu::key_width(&g, send_label, 11.0, false).max(70.0);
+    let ch_w = 74.0;
+    let test_right = panic_r.left() - 24.0;
+    let port_w = (test_right - row.left() - ch_w - sw - 20.0).clamp(140.0, 300.0);
+    hw::bracket(
+        &g,
+        row.left(),
+        row.left() + port_w + ch_w + sw + 20.0,
+        row.top() + 8.0,
+        tr("Test note"),
+    );
+    let field_y = key_y + 4.0;
+    let port_r = Rect::from_min_size(pos2(row.left(), field_y), vec2(port_w, 24.0));
+    let shown = match (&m.test_port, outputs.is_empty()) {
+        (Some(port), _) => port.clone(),
+        (None, true) => tr("No Port").to_string(),
+        (None, false) => tr("Port").to_string(),
+    };
+    let sel = m
+        .test_port
+        .as_ref()
+        .and_then(|t| outputs.iter().position(|o| o == t));
+    if let Some(i) = hu::dropdown(
+        ui,
+        id.with("port"),
+        port_r,
+        &shown,
+        outputs,
+        sel,
+        !outputs.is_empty(),
+    ) {
+        m.test_port = outputs.get(i).cloned();
+    }
+    let ch_r = Rect::from_min_size(pos2(port_r.right() + 10.0, field_y), vec2(ch_w, 24.0));
+    let ch_text = format!("{} {:02}", tr("Ch"), m.test_channel);
+    hu::stepper(
+        ui,
+        id.with("channel"),
+        ch_r,
+        &mut m.test_channel,
+        1,
+        16,
+        &ch_text,
+    );
+    let send_r = Rect::from_min_size(pos2(ch_r.right() + 10.0, key_y), vec2(sw, 32.0));
+    let can_send = m.test_port.is_some();
+    if hu::key(
+        ui,
+        send_r,
+        id.with("send"),
+        Cap::Bone,
+        false,
+        None,
+        send_label,
+        can_send,
+    )
+    .clicked()
+    {
+        if let Some(port) = m.test_port.clone() {
+            *test_note = Some((port, m.test_channel));
+        }
+    }
+
+    // Ports: every output (with the ones the project or the clock still names), then the
+    // inputs.
+    let (clock_stats, counts) = take_stats();
+    let now = now_ns();
+    hu::section(ui, tr("Ports"));
+    let mut all: Vec<String> = outputs.to_vec();
+    for t in &p.tracks {
+        if let Some(port) = &t.midi_port {
+            if !all.contains(port) {
+                all.push(port.clone());
+            }
+        }
+    }
+    for c in clock {
+        if !all.contains(c) {
+            all.push(c.clone());
+        }
+    }
+    let row_h = 32.0;
+    let cols = |r: Rect| {
+        let name = r.left() + 26.0;
+        let tempo_w = 178.0;
+        let tempo = r.right() - tempo_w - 4.0;
+        let clock = name + ((tempo - name) * 0.42).max(150.0);
+        let tracks = clock + 72.0;
+        (name, clock, tracks, tempo, tempo_w)
+    };
+    let (head, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
+    {
+        let (name, clock_x, tracks, tempo, _) = cols(head);
+        for (x, h) in [
+            (name, "Port"),
+            (clock_x, "Clock"),
+            (tracks, "Tracks"),
+            (tempo, "Clock tempo"),
+        ] {
+            let label = tr(h);
+            hw::silk(
+                &g,
+                pos2(x, head.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                10.0,
+                theme::PRINT,
+            );
+        }
+    }
+    hw::seam_h(&g, head.x_range(), head.bottom() - 1.0);
+    let max_rows = ((ui.available_height() - 200.0) / row_h).floor().max(2.0) as usize;
+    let rows: Vec<(String, Dir)> = all
+        .into_iter()
+        .map(|n| (n, Dir::Out))
+        .chain(inputs.iter().map(|n| (n.clone(), Dir::In)))
+        .collect();
+    let draw_row = |ui: &mut egui::Ui, port: &str, dir: Dir| {
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+        let g = ui.painter().clone();
+        let (name_x, clock_x, tracks_x, tempo_x, tempo_w) = cols(r);
+        let busy = counts.get(&(dir, port.to_string())).copied().unwrap_or(0) > 0;
+        hw::led_sized(&g, pos2(r.left() + 10.0, r.center().y), 3.0, busy);
+        let online = dir == Dir::In || outputs.iter().any(|o| o == port);
+        let label = if dir == Dir::Out {
+            tr("Output")
+        } else {
+            tr("input")
+        };
+        let c = hu::chip(
+            &g,
+            pos2(name_x, r.center().y),
+            &label.to_uppercase(),
+            8.5,
+            false,
+        );
+        let mut name_room = clock_x - 10.0 - (c.right() + 7.0);
+        let off_label = tr("offline").to_uppercase();
+        let off_w = hw::galley(&g, &off_label, Face::Bold, 8.5, theme::INK)
+            .size()
+            .x
+            + 14.0;
+        if !online {
+            name_room -= off_w;
+        }
+        let shown = hw::fit(&g, port, Face::Bold, 11.0, name_room);
+        let nr = hw::text(
+            &g,
+            pos2(c.right() + 7.0, r.center().y),
+            Align2::LEFT_CENTER,
+            &shown,
+            Face::Bold,
+            11.0,
+            if online { theme::INK } else { theme::PRINT },
+        );
+        if !online {
+            hu::tag(&g, pos2(nr.right() + 6.0, r.center().y), &off_label, 8.5);
+        }
+        if dir == Dir::Out {
+            let on = clock.iter().any(|c| c == port);
+            let kr = Rect::from_min_size(pos2(clock_x, r.center().y - 11.0), vec2(60.0, 22.0));
+            let legend = if on { tr("On") } else { tr("Off") };
+            if hu::key(
+                ui,
+                kr,
+                egui::Id::unique(("monitor_clock", port)),
+                Cap::Bone,
+                on,
+                Some(on),
+                legend,
+                true,
+            )
+            .clicked()
+            {
+                crate::midi_out::set_clock_port(port, !on);
+            }
+            let tracks: Vec<String> = p
+                .tracks
+                .iter()
+                .filter(|t| {
+                    t.kind == TrackKind::ExternalMidi && t.midi_port.as_deref() == Some(port)
+                })
+                .map(|t| format!("{} {} {}", t.name, tr("Ch"), t.midi_channel))
+                .collect();
+            let shown = hw::fit(
+                &g,
+                &tracks.join(", "),
+                Face::Body,
+                10.5,
+                tempo_x - tracks_x - 10.0,
+            );
+            hw::text(
+                &g,
+                pos2(tracks_x, r.center().y),
+                Align2::LEFT_CENTER,
+                &shown,
+                Face::Body,
+                10.5,
+                theme::INK2,
+            );
+            // The clock's tempo on a small LCD: its jitter at the left, the bpm at the right.
+            let lr = Rect::from_min_size(pos2(tempo_x, r.center().y - 12.0), vec2(tempo_w, 24.0));
+            hw::lcd_glass(&g, lr);
+            match clock_stats.get(port) {
+                Some((bpm, sd, last)) if now.saturating_sub(*last) < 500_000_000 => {
+                    let v = format!("{bpm:.2}");
+                    let vw = hw::seg_width(&v, 13.0);
+                    hw::seg(
+                        &g,
+                        pos2(lr.right() - 8.0 - vw, lr.top() + 5.5),
+                        &v,
+                        13.0,
+                        theme::LCD_INK,
+                        true,
+                    );
+                    hw::text(
+                        &g,
+                        pos2(lr.left() + 6.0, lr.center().y),
+                        Align2::LEFT_CENTER,
+                        &format!("±{sd:.3}MS"),
+                        Face::Lcd,
+                        8.5,
+                        theme::LCD_INK.gamma_multiply(0.75),
+                    );
+                }
+                _ => {
+                    let v = "888.88";
+                    let vw = hw::seg_width(v, 13.0);
+                    hw::seg(
+                        &g,
+                        pos2(lr.right() - 8.0 - vw, lr.top() + 5.5),
+                        v,
+                        13.0,
+                        theme::LCD_GHOST,
+                        true,
+                    );
+                }
+            }
+        }
+        hw::seam_h(&g, r.x_range(), r.bottom() - 1.0);
+    };
+    if rows.is_empty() {
+        let (r, _) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
+        hw::silk(
+            &g,
+            pos2(r.left() + 26.0, r.center().y),
+            Align2::LEFT_CENTER,
+            tr("No Port"),
+            11.0,
+            theme::PRINT,
+        );
+        hw::seam_h(&g, r.x_range(), r.bottom() - 1.0);
+    } else if rows.len() <= max_rows {
+        for (port, dir) in &rows {
+            draw_row(ui, port, *dir);
+        }
+    } else {
+        egui::ScrollArea::vertical()
+            .id_salt("monitor_ports")
+            .max_height(max_rows as f32 * row_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                for (port, dir) in &rows {
+                    draw_row(ui, port, *dir);
+                }
+            });
+    }
+
+    // Activity: what to show, then the log on an LCD.
+    ui.add_space(8.0);
+    let (bar, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+    let paused = log().lock().map(|l| l.paused).unwrap_or(false);
+    let keys: [(&str, Option<bool>, bool); 4] = [
+        (tr("Out"), Some(m.show_out), m.show_out),
+        (tr("In"), Some(m.show_in), m.show_in),
+        (
+            if paused { tr("Resume") } else { tr("Pause") },
+            Some(paused),
+            paused,
+        ),
+        (tr("Clear"), None, false),
+    ];
+    let widths: Vec<f32> = keys
+        .iter()
+        .map(|(l, led, _)| hu::key_width(&g, l, 11.0, led.is_some()).max(62.0))
+        .collect();
+    let total: f32 = widths.iter().sum::<f32>() + 8.0 * (widths.len() - 1) as f32;
+    let mut x = bar.right() - total;
+    hw::bracket(&g, bar.left(), x - 14.0, bar.center().y, tr("Activity"));
+    for (i, ((label, led, latched), kw)) in keys.iter().zip(&widths).enumerate() {
+        let r = Rect::from_min_size(pos2(x, bar.top() + 5.0), vec2(*kw, 28.0));
+        x += kw + 8.0;
+        let cap = Cap::Bone;
+        if hu::key(ui, r, id.with(("act", i)), cap, *latched, *led, label, true).clicked() {
+            match i {
+                0 => m.show_out = !m.show_out,
+                1 => m.show_in = !m.show_in,
+                2 => {
+                    if let Ok(mut l) = log().lock() {
+                        l.paused = !l.paused;
+                    }
+                }
+                _ => {
+                    if let Ok(mut l) = log().lock() {
+                        l.entries.clear();
+                        l.clock.clear();
+                    }
+                }
+            }
+        }
+    }
+    let entries: Vec<Entry> = log()
+        .lock()
+        .map(|l| {
+            l.entries
+                .iter()
+                .rev()
+                .filter(|e| match e.dir {
+                    Dir::Out => m.show_out,
+                    Dir::In => m.show_in,
+                })
+                .take(400)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    ui.add_space(4.0);
+    let h = ui.available_height().max(140.0);
+    let (lcd_r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let glass = hw::lcd(&g, lcd_r);
+    // Columns on the glass.
+    let gx = glass.left() + 10.0;
+    let gw = glass.width() - 20.0;
+    let c_dir = gx + 74.0;
+    let c_port = c_dir + 18.0;
+    let c_ch = c_port + (gw * 0.24).clamp(110.0, 220.0);
+    let c_msg = c_ch + 34.0;
+    let c_ahead = glass.right() - 10.0;
+    for (x, h) in [
+        (gx, "Time"),
+        (c_port, "Port"),
+        (c_ch, "Ch"),
+        (c_msg, "Message"),
+    ] {
+        hu::lcd_label(&g, pos2(x, glass.top() + 6.0), tr(h));
+    }
+    let ahead_key = "Ahead";
+    let ahead = tr(ahead_key).to_uppercase();
+    hw::text(
+        &g,
+        pos2(c_ahead, glass.top() + 6.0),
+        Align2::RIGHT_TOP,
+        &ahead,
+        Face::Lcd,
+        8.5,
+        theme::LCD_INK.gamma_multiply(0.72),
+    );
+    g.hline(
+        glass.left() + 6.0..=glass.right() - 6.0,
+        glass.top() + 20.5,
+        egui::Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.25)),
+    );
+    let body = Rect::from_min_max(
+        pos2(glass.left(), glass.top() + 23.0),
+        glass.max - vec2(0.0, 3.0),
+    );
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
+    egui::ScrollArea::vertical()
+        .id_salt("monitor_log")
+        .auto_shrink([false, false])
+        .show(&mut child, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            let size = 10.5;
+            for e in entries {
+                let (r, _) = ui.allocate_exact_size(vec2(body.width(), 18.0), Sense::hover());
+                let g = ui.painter();
+                let cy = r.center().y;
+                let ink = theme::LCD_INK;
+                let age = now.saturating_sub(e.at_ns) as f64 / 1e9;
+                let put = |x: f32, s: &str, room: f32| {
+                    let shown = hw::fit(g, &s.to_uppercase(), Face::Lcd, size, room);
+                    hw::text(
+                        g,
+                        pos2(x, cy),
+                        Align2::LEFT_CENTER,
+                        &shown,
+                        Face::Lcd,
+                        size,
+                        ink,
+                    );
+                };
+                put(gx, &format!("-{age:.3}s"), 70.0);
+                hu::arrow(g, pos2(c_dir + 5.0, cy), 8.0, e.dir == Dir::Out, ink);
+                put(c_port, &e.port, c_ch - c_port - 8.0);
+                let (text, ch) = describe(&e.bytes[..usize::from(e.len)]);
+                put(c_ch, &ch.map_or(String::new(), |c| format!("{c:02}")), 30.0);
+                put(c_msg, &text, (c_ahead - 90.0 - c_msg).max(40.0));
+                if e.dir == Dir::Out && e.lead_ms != 0.0 {
+                    let txt = format!("{:+.2}MS", e.lead_ms);
+                    if e.lead_ms < 0.0 {
+                        // Late: printed inverted, as the LCD's CYC flag.
+                        let gal = hw::galley(g, &txt, Face::Lcd, size, theme::LCD);
+                        let br = Rect::from_min_max(
+                            pos2(c_ahead - gal.size().x - 8.0, cy - 7.5),
+                            pos2(c_ahead, cy + 7.5),
+                        );
+                        g.rect_filled(br, 1.5, ink);
+                        hw::text(
+                            g,
+                            br.center(),
+                            Align2::CENTER_CENTER,
+                            &txt,
+                            Face::Lcd,
+                            size,
+                            theme::LCD,
+                        );
+                    } else {
+                        hw::text(
+                            g,
+                            pos2(c_ahead, cy),
+                            Align2::RIGHT_CENTER,
+                            &txt,
+                            Face::Lcd,
+                            size,
+                            ink,
+                        );
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -507,5 +803,62 @@ mod tests {
         assert_eq!(describe(&[0xE0, 0, 64]).0, "Pitch Bend 0");
         assert_eq!(describe(&[0xF2, 4, 1]).0, "Song Position 132");
         assert_eq!(describe(&[0xF8]), ("Clock".into(), None));
+    }
+
+    /// `midi-monitor.png`: a project with an External MIDI track on a port that is not
+    /// connected, its clock running, and a few messages (one late).
+    #[test]
+    #[ignore = "pictures"]
+    fn picture_midi_monitor() {
+        let mut p = Project::demo();
+        let ti = p.add_track(TrackKind::ExternalMidi);
+        p.tracks[ti].name = "Subsequent 25".into();
+        p.tracks[ti].midi_port = Some("Subsequent 25".into());
+        p.tracks[ti].midi_channel = 2;
+        let port = "Subsequent 25";
+        let now = now_ns();
+        let tick = (60_000.0 / (120.0 * 24.0) * 1e6) as u64;
+        // Ticks due up to a few seconds ahead, so the clock still reads as running while the
+        // picture is drawn.
+        let last = now + 4_000_000_000;
+        for i in (0..48u64).rev() {
+            record(Dir::Out, port, &[0xF8], last - i * tick - (i % 3) * 9_000);
+        }
+        record(Dir::Out, port, &[0xFA], now + 2_000_000);
+        for (k, b) in [
+            [0x91, 48, 100],
+            [0x81, 48, 0],
+            [0xB1, 74, 92],
+            [0x91, 55, 87],
+            [0xE1, 0, 72],
+            [0x91, 60, 110],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let ahead = if k == 3 {
+                -1_400_000
+            } else {
+                2_500_000 + k as i64 * 100_000
+            };
+            record(Dir::Out, port, b, (now as i64 + ahead) as u64);
+        }
+        record(Dir::In, "Komplete Kontrol A49", &[0x90, 64, 96], 0);
+        record(Dir::In, "Komplete Kontrol A49", &[0xB0, 1, 40], 0);
+        let mut s = crate::UiState::new();
+        s.show_midi_monitor = true;
+        let mut test_note = None;
+        crate::ui_test::render_png(
+            900.0,
+            680.0,
+            2.0,
+            crate::theme::BONE3,
+            |ui| {
+                crate::theme::apply(ui.ctx());
+                show(ui.ctx(), &p, &mut s, &mut test_note);
+            },
+            &hw_utilities::picture_path("midi-monitor.png"),
+        )
+        .unwrap();
     }
 }

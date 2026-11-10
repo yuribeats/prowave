@@ -63,10 +63,17 @@ pub struct Recorder {
     takes: Vec<Take>,
     /// Song position at the last frame, to see the cycle jump back.
     last_pos: f64,
+    /// The playhead has jumped back to the cycle start but what is heard has not yet (it is
+    /// `heard_us` behind): what is played until then still belongs to the pass that is ending.
+    wrap_pending: bool,
     /// What was played while not recording, for Capture Recording: (song position, note).
     played: Vec<(f64, LiveNote)>,
     /// The transport was running at the last frame.
     was_playing: bool,
+    /// How long after the transport renders a beat it is heard, in microseconds (the device,
+    /// the delay compensation and the Stereo Out's plug-ins, as audio takes are moved back by):
+    /// what is played to what is heard is put that much earlier.
+    heard_us: u32,
 }
 
 impl Recorder {
@@ -78,6 +85,20 @@ impl Recorder {
     pub fn active(&self) -> bool {
         self.target.is_some()
     }
+
+    /// Sets how late the song is heard after the transport renders it (see `heard_us`).
+    pub fn set_heard_latency(&mut self, us: u32) {
+        self.heard_us = us;
+    }
+}
+
+/// The song position heard when the playhead reads `raw`: `us` microseconds earlier.
+fn heard_beat(p: &Project, raw: f64, us: u32) -> f64 {
+    if us == 0 {
+        return raw;
+    }
+    let map = p.tempo_map();
+    map.beat_at(map.seconds_at(raw) - f64::from(us) * 1e-6)
 }
 
 /// Notes kept for Capture Recording.
@@ -131,7 +152,11 @@ pub fn update(rec: &mut Recorder, p: &mut Project, input: &[LiveNote]) -> Outcom
 /// Keeps what is played along with the song and not recorded. Starting the song again, or
 /// the cycle jumping back, begins a new performance.
 fn remember_played(rec: &mut Recorder, p: &Project, input: &[LiveNote], recording: bool) {
-    let now = p.position_beats;
+    let now = if input.is_empty() {
+        p.position_beats
+    } else {
+        heard_beat(p, p.position_beats, rec.heard_us)
+    };
     if p.playing {
         let jumped = rec.played.last().is_some_and(|(at, _)| *at > now + 0.25);
         if !rec.was_playing || jumped {
@@ -273,6 +298,7 @@ fn start(rec: &mut Recorder, p: &mut Project, pedal: u8) -> Outcome {
         target: Some((t, r)),
         start_beat: start,
         pedal: rec.pedal,
+        heard_us: rec.heard_us,
         cycle_len: cycle,
         last_pos: p.position_beats,
         ..Recorder::default()
@@ -289,31 +315,27 @@ fn bars_between(p: &Project, start: f64, len: f64) -> f32 {
 
 fn record(rec: &mut Recorder, p: &mut Project, t: usize, r: usize, input: &[LiveNote]) {
     let raw = p.position_beats;
+    let heard = heard_beat(p, raw, rec.heard_us);
     let region = &mut p.tracks[t].regions[r];
-    // The cycle jumped back: the pass is over and the next one is a new take.
+    // The cycle jumped back: the pass is over and the next one is a new take. The playhead
+    // jumps first; the pass ends when what is heard jumps, `heard_us` later, so the notes
+    // played on the last beats of a pass (heard before the jump) stay in that pass.
     if let Some(len) = rec.cycle_len {
         if raw + 0.25 < rec.last_pos {
-            for &i in rec.open.values() {
-                close(&mut region.notes[i], len);
+            if rec.wrap_pending {
+                // A second jump before the first was heard (a cycle shorter than the latency).
+                end_pass(rec, region, len);
             }
-            rec.open.clear();
-            rec.takes.push(Take {
-                notes: std::mem::take(&mut region.notes),
-                controls: std::mem::take(&mut region.controls),
-            });
-            region.controls.push(Control {
-                start: 0.0,
-                num: SUSTAIN,
-                val: u16::from(rec.pedal),
-            });
+            rec.wrap_pending = true;
+        }
+        if rec.wrap_pending && heard >= rec.start_beat {
+            end_pass(rec, region, len);
         }
     }
     rec.last_pos = raw;
-    // The playhead can be before the start (the cycle), or past the end of the cycle.
-    let mut now = (raw - rec.start_beat).max(0.0);
-    if let Some(len) = rec.cycle_len {
-        now = now.min(len);
-    }
+    // What is played goes where the song was heard when it was played. The playhead can be
+    // before the start (the cycle), or past the end of the cycle.
+    let now = pass_position(rec, heard);
     for ev in input {
         match *ev {
             LiveNote::On { pitch, vel } => {
@@ -362,6 +384,42 @@ fn record(rec: &mut Recorder, p: &mut Project, t: usize, r: usize, input: &[Live
     }
 }
 
+/// Where `heard` falls in the pass being recorded, in beats from its start. While a cycle jump
+/// is still to be heard, a position before the cycle start is the end of the pass that is ending.
+fn pass_position(rec: &Recorder, heard: f64) -> f64 {
+    pass_offset(heard - rec.start_beat, rec.cycle_len, rec.wrap_pending)
+}
+
+/// [`pass_position`] for `now` beats from the start of the recording.
+fn pass_offset(mut now: f64, cycle_len: Option<f64>, wrap_pending: bool) -> f64 {
+    if let Some(len) = cycle_len {
+        if wrap_pending && now < 0.0 {
+            now += len;
+        }
+        now = now.min(len);
+    }
+    now.max(0.0)
+}
+
+/// Ends a cycle pass of `len` beats: its held notes stop at its end, it becomes a take and the
+/// region starts over with the pedal's state.
+fn end_pass(rec: &mut Recorder, region: &mut Region, len: f64) {
+    for &i in rec.open.values() {
+        close(&mut region.notes[i], len);
+    }
+    rec.open.clear();
+    rec.takes.push(Take {
+        notes: std::mem::take(&mut region.notes),
+        controls: std::mem::take(&mut region.controls),
+    });
+    region.controls.push(Control {
+        start: 0.0,
+        num: SUSTAIN,
+        val: u16::from(rec.pedal),
+    });
+    rec.wrap_pending = false;
+}
+
 /// The sustain pedal's controller number.
 pub const SUSTAIN: u8 = 64;
 
@@ -380,10 +438,12 @@ fn finish(rec: &mut Recorder, p: &mut Project) -> Outcome {
     let cycle_len = rec.cycle_len.take();
     let earlier = std::mem::take(&mut rec.takes);
     p.recording = false;
-    let mut now = (p.position_beats - rec.start_beat).max(0.0);
-    if let Some(len) = cycle_len {
-        now = now.min(len);
-    }
+    let now = pass_offset(
+        heard_beat(p, p.position_beats, rec.heard_us) - rec.start_beat,
+        cycle_len,
+        rec.wrap_pending,
+    );
+    rec.wrap_pending = false;
     if !is_recording_region(p, t, r) {
         return Outcome::Finished(None);
     }
@@ -635,6 +695,78 @@ mod tests {
         assert_eq!(r.notes.len(), 1);
         assert_eq!(r.len_bars, 2.0);
         assert!(!r.name.starts_with('*'));
+    }
+
+    /// A cycle recording 8 beats long at 120 BPM, heard 40 ms (0.08 beats) after the playhead.
+    fn late_heard_cycle() -> (Project, Recorder) {
+        let mut p = project();
+        p.cycle = true;
+        p.cycle_start = 8.0;
+        p.cycle_end = 16.0;
+        let mut rec = Recorder::default();
+        rec.set_heard_latency(40_000);
+        p.recording = true;
+        p.playing = true;
+        p.position_beats = 8.0;
+        assert_eq!(update(&mut rec, &mut p, &[]), Outcome::Started(0, 0));
+        p.position_beats = 9.0;
+        update(&mut rec, &mut p, &[on(60)]);
+        p.position_beats = 11.0;
+        update(&mut rec, &mut p, &[off(60)]);
+        p.position_beats = 15.5;
+        update(&mut rec, &mut p, &[]);
+        // The playhead has jumped back; what is heard is still 20 ms before the cycle end.
+        p.position_beats = 8.04;
+        update(&mut rec, &mut p, &[on(62)]);
+        (p, rec)
+    }
+
+    #[test]
+    fn notes_heard_at_the_end_of_a_pass_stay_in_that_take() {
+        let (mut p, mut rec) = late_heard_cycle();
+        p.position_beats = 8.07;
+        update(&mut rec, &mut p, &[off(62)]);
+        // What is heard has jumped too: the next pass.
+        p.position_beats = 8.2;
+        update(&mut rec, &mut p, &[on(64)]);
+        p.position_beats = 10.0;
+        update(&mut rec, &mut p, &[off(64)]);
+        p.playing = false;
+        update(&mut rec, &mut p, &[]);
+        let f = p.tracks[0].regions[0]
+            .folder
+            .as_ref()
+            .expect("two passes make a take folder");
+        assert_eq!(f.takes.len(), 2);
+        let first: Vec<_> = f.takes[0].notes.iter().map(|n| n.pitch).collect();
+        assert_eq!(
+            first,
+            vec![60, 62],
+            "the late hit belongs to the first pass"
+        );
+        let hit = f.takes[0].notes[1];
+        // 20 ms before the end of the 8 beats: 8 - 0.04.
+        assert!((hit.start - 7.96).abs() < 1e-3, "{}", hit.start);
+        let second: Vec<_> = f.takes[1].notes.iter().map(|n| n.pitch).collect();
+        assert_eq!(second, vec![64]);
+        assert!((f.takes[1].notes[0].start - 0.12).abs() < 1e-3);
+    }
+
+    #[test]
+    fn stopping_before_the_jump_is_heard_keeps_the_late_notes_in_the_pass() {
+        let (mut p, mut rec) = late_heard_cycle();
+        p.position_beats = 8.06;
+        p.playing = false;
+        update(&mut rec, &mut p, &[]);
+        let r = &p.tracks[0].regions[0];
+        assert!(r.folder.is_none(), "one pass was played");
+        let pitches: Vec<_> = r.notes.iter().map(|n| n.pitch).collect();
+        assert_eq!(pitches, vec![60, 62]);
+        assert!(
+            (r.notes[1].start - 7.96).abs() < 1e-3,
+            "{}",
+            r.notes[1].start
+        );
     }
 
     #[test]

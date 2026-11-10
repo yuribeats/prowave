@@ -10,16 +10,13 @@
 //!   and cannot be deleted.
 use crate::i18n::tr;
 use crate::model::{Project, SIGNATURE_DENOMINATORS};
+use crate::theme;
+use crate::tracks_area::hw_tracks;
 use crate::widgets::context_menu;
-use egui::{pos2, Align2, Color32, FontId, Rect, Sense, Stroke, Ui};
+use egui::{pos2, Rect, Sense, Stroke, Ui};
 
 /// Height of the Signature track, in points.
-pub const HEIGHT: f32 = 24.0;
-
-const BG: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
-const HEADER_BG: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-const BLOCK: Color32 = Color32::from_rgb(0x5a, 0x6a, 0x8c);
-const BLOCK_EDGE: Color32 = Color32::from_rgb(0x9a, 0xaa, 0xcc);
+pub const HEIGHT: f32 = 28.0;
 
 /// One block: the 1-based bar it starts at and its signature. Bar 1 is the song's own.
 #[derive(Clone, Copy)]
@@ -64,30 +61,31 @@ pub fn show(
 
     // ---- header
     let gh = ui.painter_at(header);
-    gh.rect_filled(header, 0.0, HEADER_BG);
-    gh.line_segment(
-        [header.left_bottom(), header.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x22)),
-    );
-    gh.text(
-        pos2(header.left() + 12.0, header.center().y),
-        Align2::LEFT_CENTER,
-        tr("Signature"),
-        FontId::proportional(13.0),
-        Color32::from_gray(0xdc),
-    );
+    hw_tracks::global_header(&gh, header, tr("Signature"));
+    // The signature at the playhead, on a small LCD.
     let (num, den) = p.signature_of_bar(p.beats_to_bar(p.position_beats) as u32);
-    gh.text(
-        pos2(header.right() - 10.0, header.center().y),
-        Align2::RIGHT_CENTER,
-        format!("{num}/{den}"),
-        FontId::proportional(11.0),
-        Color32::from_gray(0xa8),
+    let glass = Rect::from_min_max(
+        pos2(header.right() - 82.0, header.top() + 3.0),
+        pos2(header.right() - 20.0, header.bottom() - 4.0),
+    );
+    crate::hw::lcd_glass(&gh, glass);
+    let value = format!("{num}/{den}");
+    let h = (glass.height() - 8.0).clamp(8.0, 16.0);
+    crate::hw::seg(
+        &gh,
+        pos2(
+            glass.right() - 6.0 - crate::hw::seg_width(&value, h),
+            glass.center().y - h / 2.0,
+        ),
+        &value,
+        h,
+        theme::LCD_INK,
+        true,
     );
 
     // ---- lane: double-click an empty spot to add a change
     let g = ui.painter_at(lane);
-    g.rect_filled(lane, 0.0, BG);
+    hw_tracks::global_lane(&g, lane);
     let lane_resp = ui.interact(
         lane,
         egui::Id::unique("signature_track_lane"),
@@ -117,7 +115,10 @@ pub fn show(
         if x1 < lane.left() || x0 > lane.right() {
             continue;
         }
-        let block = Rect::from_min_max(pos2(x0, lane.top() + 2.0), pos2(x1, lane.bottom() - 2.0));
+        let block = Rect::from_min_max(
+            pos2(x0 + 1.0, lane.top() + 4.0),
+            pos2(x1 - 1.0, lane.bottom() - 4.0),
+        );
         let resp = ui.interact(
             block.intersect(lane),
             egui::Id::unique(("signature", i)),
@@ -160,22 +161,25 @@ pub fn show(
             }
         });
 
-        g.rect_filled(block, 3.0, BLOCK);
-        g.line_segment(
-            [pos2(x0, lane.top()), pos2(x0, lane.bottom())],
-            Stroke::new(1.5, BLOCK_EDGE),
+        // In the well: an ink line where the signature changes, and the signature in
+        // segments after it.
+        g.vline(
+            x0,
+            lane.top() + 2.0..=lane.bottom() - 2.0,
+            Stroke::new(2.0, theme::INK),
         );
-        let label = g.layout_no_wrap(
-            format!("{}/{}", b.num, b.den),
-            FontId::proportional(12.0),
-            Color32::WHITE,
-        );
-        let text_x = x0.max(lane.left()) + 5.0;
+        let text_x = x0.max(lane.left()) + 7.0;
         if text_x + 10.0 < x1 {
-            g.with_clip_rect(block.shrink(1.0).intersect(lane)).galley(
-                pos2(text_x, block.center().y - label.size().y / 2.0),
-                label,
-                Color32::WHITE,
+            let clip = g.with_clip_rect(block.shrink(1.0).intersect(lane));
+            let value = format!("{}/{}", b.num, b.den);
+            let h = (lane.height() - 12.0).clamp(8.0, 13.0);
+            crate::hw::seg(
+                &clip,
+                pos2(text_x, lane.center().y - h / 2.0),
+                &value,
+                h,
+                theme::INK,
+                false,
             );
         }
     }
@@ -236,16 +240,5 @@ pub fn show(
         }
     }
 
-    // ---- playhead
-    let x = x_of(p.position_beats);
-    if x >= lane.left() && x <= lane.right() {
-        g.line_segment(
-            [pos2(x, lane.top()), pos2(x, lane.bottom())],
-            Stroke::new(1.0, Color32::WHITE),
-        );
-    }
-    g.line_segment(
-        [lane.left_bottom(), lane.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x1a)),
-    );
+    // The playhead runs through this lane from the Tracks area's ruler.
 }

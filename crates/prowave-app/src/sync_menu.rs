@@ -9,7 +9,7 @@ use prowave_engine::SmpteRate;
 
 /// The start times the menu offers: midnight, Logic's own 01:00:00:00, and the 00:59:55:00 of
 /// film work, which leaves five seconds before the hour for a countdown.
-const STARTS: [[u8; 4]; 3] = [[0, 0, 0, 0], [0, 59, 55, 0], [1, 0, 0, 0]];
+pub const STARTS: [[u8; 4]; 3] = [[0, 0, 0, 0], [0, 59, 55, 0], [1, 0, 0, 0]];
 
 /// A frame rate as the menu names it.
 pub fn rate_label(rate: SmpteRate) -> String {
@@ -22,7 +22,7 @@ pub fn rate_label(rate: SmpteRate) -> String {
     }
 }
 
-fn start_label(start: [u8; 4], rate: SmpteRate) -> String {
+pub fn start_label(start: [u8; 4], rate: SmpteRate) -> String {
     let sep = if rate.is_drop_frame() { ';' } else { ':' };
     format!(
         "{:02}:{:02}:{:02}{sep}{:02}",

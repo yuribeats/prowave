@@ -1,10 +1,11 @@
-//! Pro Wave Tune's window (Logic: the Pitch Correction plug-in window): presets, the key and
-//! scale (or the MIDI target), the correction and voice controls, and a live meter of the
-//! pitch heard and made, with its note name and cents.
+//! Pro Wave Tune's window (Logic: the Pitch Correction plug-in window) as a PW-1 tuner unit:
+//! a tuner LCD with the note heard and the note made (names, cents and needles on a ±50 cent
+//! scale around the note aimed at), the target (key, scale or MIDI notes) with its twelve
+//! note keys, the correction and voice knobs, and a status LCD.
+use crate::gear::{self, Cap, Control, LedAt};
 use crate::i18n::{tr, trf};
 use crate::native_fx_ui::Edit;
-use crate::widgets::{BLUE, BTN_BG, TEXT, TEXT_DIM};
-use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Align2, Rect, Sense, Shape, Stroke, Ui};
 use prowave_engine::tune::{self, scale};
 use prowave_engine::NativeFxInfo;
 
@@ -23,9 +24,9 @@ pub struct Context {
     pub auto_source: Option<String>,
 }
 
-const PANEL: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
-const NEEDLE_IN: Color32 = Color32::from_rgb(0xff, 0xb0, 0x40);
-const NEEDLE_OUT: Color32 = Color32::from_rgb(0x50, 0xd8, 0xff);
+/// The unit's width: seven knobs.
+pub const WIDTH: f32 = 7.0 * gear::CELL_W + 52.0;
+const PAD: f32 = 26.0;
 
 /// A MIDI note with a fraction as its nearest note's name and the cents from it.
 pub fn note_and_cents(m: f32) -> (String, i32) {
@@ -33,115 +34,136 @@ pub fn note_and_cents(m: f32) -> (String, i32) {
     (scale::note_name(n), ((m - n as f32) * 100.0).round() as i32)
 }
 
-/// The meter: what the effect hears (orange) and makes (blue), as note names and cents, and
-/// both as needles on a scale of -50 to +50 cents from the note aimed at.
-fn meter(ui: &mut Ui, reading: Option<(f32, f32, f32)>) {
-    let w = ui.available_width().max(300.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 84.0), Sense::hover());
-    let g = ui.painter_at(rect);
-    g.rect_filled(rect, 4.0, PANEL);
+/// The tuner LCD: what the effect hears and makes, as note names and cents, and both as
+/// needles on a scale of -50 to +50 cents from the note aimed at.
+fn tuner(ui: &mut Ui, rect: Rect, reading: Option<(f32, f32, f32)>) {
+    let p = ui.painter().clone();
+    let glass = gear::lcd(&p, rect);
+    ui.interact(rect, ui.scope_id().with("tuner_lcd"), Sense::hover())
+        .on_hover_text(tr(
+            "Draw pitch corrections in the Piano Roll: pick Pitch Correction in its Automation/MIDI lane.",
+        ));
     let (input, output, target) = reading.unwrap_or((f32::NAN, f32::NAN, f32::NAN));
-    let big = FontId::proportional(22.0);
-    let small = FontId::proportional(11.0);
-    let side = |x: f32, align: Align2, label: &str, m: f32, colour: Color32| {
-        g.text(
-            pos2(x, rect.top() + 8.0),
-            align,
-            label,
-            small.clone(),
-            TEXT_DIM,
-        );
+    let side = |x: f32, align: Align2, label: &str, m: f32| {
+        gear::lcd_label(&p, pos2(x, glass.top() + 8.0), align, label);
         let (name, cents) = if m.is_finite() {
             let (n, c) = note_and_cents(m);
-            (n, format!("{c:+} ct"))
+            (n, Some(c))
         } else {
-            ("—".to_string(), String::new())
+            ("--".to_string(), None)
         };
-        g.text(pos2(x, rect.top() + 24.0), align, name, big.clone(), colour);
-        g.text(
-            pos2(x, rect.top() + 52.0),
-            align,
-            cents,
-            small.clone(),
-            TEXT,
-        );
-    };
-    side(
-        rect.left() + 12.0,
-        Align2::LEFT_TOP,
-        tr("Input"),
-        input,
-        NEEDLE_IN,
-    );
-    side(
-        rect.right() - 12.0,
-        Align2::RIGHT_TOP,
-        tr("Output"),
-        output,
-        NEEDLE_OUT,
-    );
-    // The cents scale, around the note aimed at.
-    let bar = Rect::from_min_max(
-        pos2(rect.left() + 90.0, rect.top() + 30.0),
-        pos2(rect.right() - 90.0, rect.top() + 58.0),
-    );
-    g.rect_filled(bar, 2.0, Color32::from_gray(0x18));
-    for c in [-50, -25, 0, 25, 50] {
-        let x = bar.left() + (c + 50) as f32 / 100.0 * bar.width();
-        let h = if c == 0 {
-            bar.height()
-        } else {
-            bar.height() * 0.4
-        };
-        g.line_segment(
-            [pos2(x, bar.bottom() - h), pos2(x, bar.bottom())],
-            Stroke::new(1.0, Color32::from_gray(if c == 0 { 0xc0 } else { 0x60 })),
-        );
-        g.text(
-            pos2(x, bar.bottom() + 2.0),
-            Align2::CENTER_TOP,
-            format!("{c:+}"),
-            FontId::proportional(9.5),
-            TEXT_DIM,
-        );
-    }
-    let needle = |m: f32, colour: Color32, width: f32| {
-        if m.is_finite() && target.is_finite() {
-            let c = ((m - target) * 100.0).clamp(-50.0, 50.0);
-            let x = bar.left() + (c + 50.0) / 100.0 * bar.width();
-            g.line_segment(
-                [pos2(x, bar.top() + 2.0), pos2(x, bar.bottom() - 2.0)],
-                Stroke::new(width, colour),
+        gear::lcd_text(&p, pos2(x, glass.top() + 22.0), align, &name, 34.0);
+        if let Some(c) = cents {
+            let t = format!("{c}");
+            let w = gear::seg7_width(&t, 18.0) + 24.0;
+            let left = match align.x() {
+                egui::Align::Min => x,
+                _ => x - w,
+            };
+            gear::seg7(
+                &p,
+                pos2(left, glass.top() + 70.0),
+                &t,
+                18.0,
+                gear::LCD_INK,
+                true,
+            );
+            gear::lcd_text(
+                &p,
+                pos2(left + w, glass.top() + 88.0),
+                Align2::RIGHT_BOTTOM,
+                "CT",
+                10.0,
             );
         }
     };
-    needle(input, NEEDLE_IN, 3.0);
-    needle(output, NEEDLE_OUT, 2.0);
+    side(glass.left() + 12.0, Align2::LEFT_TOP, tr("Input"), input);
+    side(
+        glass.right() - 12.0,
+        Align2::RIGHT_TOP,
+        tr("Output"),
+        output,
+    );
+    // The cents scale around the note aimed at.
+    let bar = Rect::from_min_max(
+        pos2(glass.left() + 150.0, glass.top() + 44.0),
+        pos2(glass.right() - 150.0, glass.top() + 96.0),
+    );
+    let ink = gear::LCD_INK;
+    for c in (-50..=50).step_by(5) {
+        let x = bar.left() + (c + 50) as f32 / 100.0 * bar.width();
+        let major = c % 25 == 0;
+        let h = if c == 0 {
+            bar.height()
+        } else if major {
+            bar.height() * 0.45
+        } else {
+            bar.height() * 0.22
+        };
+        p.line_segment(
+            [pos2(x, bar.bottom() - h), pos2(x, bar.bottom())],
+            Stroke::new(
+                if c == 0 { 2.0 } else { 1.0 },
+                gear::alpha(ink, if major { 0.9 } else { 0.45 }),
+            ),
+        );
+        if major {
+            gear::lcd_label(
+                &p,
+                pos2(x, bar.bottom() + 3.0),
+                Align2::CENTER_TOP,
+                &format!("{c:+}"),
+            );
+        }
+    }
+    let x_of = |m: f32| {
+        let c = ((m - target) * 100.0).clamp(-50.0, 50.0);
+        bar.left() + (c + 50.0) / 100.0 * bar.width()
+    };
+    if input.is_finite() && target.is_finite() {
+        // The note heard: an outlined pointer above the scale.
+        let x = x_of(input);
+        let y = bar.top() + 2.0;
+        p.add(Shape::closed_line(
+            vec![pos2(x - 6.0, y - 10.0), pos2(x + 6.0, y - 10.0), pos2(x, y)],
+            Stroke::new(1.6, ink),
+        ));
+    }
+    if output.is_finite() && target.is_finite() {
+        // The note made: a solid bar through the scale.
+        let x = x_of(output);
+        p.rect_filled(
+            Rect::from_min_max(pos2(x - 2.0, bar.top() + 4.0), pos2(x + 2.0, bar.bottom())),
+            0.0,
+            ink,
+        );
+    }
     let label = if target.is_finite() {
         trf("Target {}", &[&scale::note_name(target.round() as i32)])
     } else {
         tr("Not voiced").to_string()
     };
-    g.text(
-        pos2(bar.center().x, bar.top() - 4.0),
-        Align2::CENTER_BOTTOM,
-        label,
-        FontId::proportional(11.0),
-        TEXT,
+    gear::lcd_text(
+        &p,
+        pos2(bar.center().x, glass.top() + 10.0),
+        Align2::CENTER_TOP,
+        &label,
+        13.0,
     );
 }
 
-/// The window's contents. `played(k)` is what automation plays for parameter `k` now (if it
-/// does); `led(k)` draws its automation light. Edits go to `vals` and `edits`.
+/// The window's contents. `controls` and `shown` are each parameter as the panel shows it
+/// (automation's value while a lane plays). Edits go to `vals` and `edits`.
 #[allow(clippy::too_many_arguments)]
 pub fn body(
     ui: &mut Ui,
+    id: egui::Id,
     info: &NativeFxInfo,
     cx: &Context,
+    controls: &[Control],
+    shown: &[f32],
     vals: &mut [f32],
     edits: &mut Vec<Edit>,
-    played: &dyn Fn(usize) -> Option<f32>,
-    led: &dyn Fn(&mut Ui, usize),
 ) {
     let reading = crate::tune_lane::meter(cx.uid);
     if reading.is_some() {
@@ -149,181 +171,180 @@ pub fn body(
             .request_repaint_after(std::time::Duration::from_millis(33));
     }
     let (ti, uid) = (cx.track, cx.uid);
-    let set = |vals: &mut [f32], edits: &mut Vec<Edit>, k: usize, v: f32| {
+    let mut set = |vals: &mut [f32], k: usize, v: f32| {
         if vals[k] != v {
             vals[k] = v;
             edits.push((ti, uid, k, v));
         }
     };
-    let now = |vals: &[f32], k: usize| played(k).unwrap_or(vals[k]);
-    // Presets and Reset.
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt(("tune_preset", uid))
-            .selected_text(tr("Presets"))
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                for preset in info.presets {
-                    if ui.selectable_label(false, preset.name).clicked() {
-                        let mut v = vals.to_vec();
-                        preset.apply(&mut v);
-                        for (k, x) in v.into_iter().enumerate() {
-                            set(vals, edits, k, x);
-                        }
-                    }
-                }
-            });
-        if ui.button(tr("Reset")).clicked() {
-            for (k, d) in info.defaults().into_iter().enumerate() {
-                set(vals, edits, k, d);
-            }
-        }
-    });
-    ui.add_space(4.0);
-    meter(ui, reading);
-    ui.add_space(6.0);
-    let p = info.params;
-    let choice =
-        |ui: &mut Ui, vals: &mut [f32], edits: &mut Vec<Edit>, k: usize, names: &[String]| {
-            let mut c = now(vals, k).round().clamp(0.0, (names.len() - 1) as f32) as usize;
-            let before = c;
-            egui::ComboBox::from_id_salt(("tune_choice", uid, k))
-                .selected_text(names[c].clone())
-                .width(170.0)
-                .show_ui(ui, |ui| {
-                    for (n, name) in names.iter().enumerate() {
-                        ui.selectable_value(&mut c, n, name);
-                    }
-                });
-            if c != before {
-                set(vals, edits, k, c as f32);
-            }
-        };
-    let names = |k: usize| -> Vec<String> { p[k].choices.iter().map(|s| s.to_string()).collect() };
-    ui.label(RichText::new(tr("Target")).strong().color(TEXT));
-    egui::Grid::new(("tune_target", uid))
-        .num_columns(3)
-        .min_col_width(96.0)
-        .spacing([10.0, 6.0])
-        .show(ui, |ui| {
-            let mut keys = names(tune::KEY);
-            keys[0] = trf("Project ({})", &[&cx.project_key]);
-            ui.label(tr("Key"));
-            choice(ui, vals, edits, tune::KEY, &keys);
-            led(ui, tune::KEY);
-            ui.end_row();
-            let mut scales = names(tune::SCALE);
-            scales[0] = tr("Project").to_string();
-            ui.label(tr("Scale"));
-            choice(ui, vals, edits, tune::SCALE, &scales);
-            led(ui, tune::SCALE);
-            ui.end_row();
-            ui.label(tr("Correct to"));
-            choice(
-                ui,
-                vals,
-                edits,
-                tune::TARGET,
-                &[
-                    tr("Key and scale").to_string(),
-                    tr("MIDI notes").to_string(),
-                ],
-            );
-            led(ui, tune::TARGET);
-            ui.end_row();
-            if now(vals, tune::TARGET).round() as i32 == tune::TARGET_MIDI {
-                let mut list = vec![match &cx.auto_source {
-                    Some(n) => trf("Auto ({})", &[n]),
-                    None => trf("Auto ({})", &[&tr("none")]),
-                }];
-                let mut numbers = vec![0usize];
-                for (n, name) in &cx.tracks {
-                    list.push(format!("{n}. {name}"));
-                    numbers.push(*n);
-                }
-                let cur = now(vals, tune::MIDI_TRACK).round() as usize;
-                let mut c = numbers.iter().position(|n| *n == cur).unwrap_or(0);
-                let before = c;
-                ui.label(tr("MIDI notes from"));
-                egui::ComboBox::from_id_salt(("tune_midi", uid))
-                    .selected_text(list[c].clone())
-                    .width(170.0)
-                    .show_ui(ui, |ui| {
-                        for (i, name) in list.iter().enumerate() {
-                            ui.selectable_value(&mut c, i, name);
-                        }
-                    });
-                if c != before {
-                    set(vals, edits, tune::MIDI_TRACK, numbers[c] as f32);
-                }
-                ui.end_row();
-            }
-        });
-    // The notes of the scale in use; a click makes it a Custom scale with that note turned
-    // on or off.
-    ui.add_space(4.0);
-    let mask = {
-        let (root, minor) = (cx.project_root, cx.project_minor);
-        scale::mask(
-            now(vals, tune::KEY) as i32,
-            now(vals, tune::SCALE) as i32,
-            now(vals, tune::NOTES) as u16,
-            root,
-            minor,
-        )
+    let now = |k: usize| shown[k];
+    let midi = now(tune::TARGET).round() as i32 == tune::TARGET_MIDI;
+    let total = 150.0 + 18.0 + 22.0 + 66.0 + 62.0 + 2.0 * (22.0 + gear::CELL_H) + 48.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, total), Sense::hover());
+    let p = ui.painter().clone();
+    let left = rect.left() + PAD;
+    let inner_w = WIDTH - PAD * 2.0;
+    let mut y = rect.top() + 16.0;
+    tuner(
+        ui,
+        Rect::from_min_size(pos2(left, y), vec2(inner_w, 140.0)),
+        reading,
+    );
+    y += 150.0 + 12.0;
+
+    // The target: key, scale, what to correct to, and the presets.
+    gear::bracket(&p, pos2(left, y + 6.0), inner_w, tr("Target"));
+    y += 22.0;
+    let names = |k: usize| -> Vec<String> {
+        info.params[k]
+            .choices
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
+    let field_w = 148.0;
+    let label_at = |x: f32, t: &str| {
+        gear::silk(
+            &p,
+            pos2(x, y + 6.0),
+            Align2::LEFT_CENTER,
+            t,
+            11.0,
+            gear::INK2,
+        );
+    };
+    let mut x = left;
+    let mut keys = names(tune::KEY);
+    keys[0] = trf("Project ({})", &[&cx.project_key]);
+    label_at(x, tr("Key"));
+    let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let cur = now(tune::KEY).round().clamp(0.0, (keys.len() - 1) as f32) as usize;
+    if let Some(c) = gear::choice_field(
+        ui,
+        Rect::from_min_size(pos2(x, y + 16.0), vec2(field_w, 26.0)),
+        id.with("key"),
+        &refs,
+        cur,
+        true,
+    ) {
+        set(vals, tune::KEY, c as f32);
+    }
+    x += field_w + 14.0;
+    let mut scales = names(tune::SCALE);
+    scales[0] = tr("Project").to_string();
+    label_at(x, tr("Scale"));
+    let refs: Vec<&str> = scales.iter().map(String::as_str).collect();
+    let cur = now(tune::SCALE)
+        .round()
+        .clamp(0.0, (scales.len() - 1) as f32) as usize;
+    if let Some(c) = gear::choice_field(
+        ui,
+        Rect::from_min_size(pos2(x, y + 16.0), vec2(field_w, 26.0)),
+        id.with("scale"),
+        &refs,
+        cur,
+        true,
+    ) {
+        set(vals, tune::SCALE, c as f32);
+    }
+    x += field_w + 14.0;
+    label_at(x, tr("Correct to"));
+    for (i, t) in [tr("Key and scale"), tr("MIDI notes")].iter().enumerate() {
+        let on = (i == 1) == midi;
+        let r = Rect::from_min_size(pos2(x + i as f32 * 128.0, y + 16.0), vec2(120.0, 26.0));
+        if gear::key(
+            ui,
+            r,
+            id.with(("target", i)),
+            t,
+            Cap::Bone,
+            LedAt::Left,
+            on,
+            on,
+        )
+        .clicked()
+            && !on
+        {
+            set(vals, tune::TARGET, i as f32);
+        }
+    }
+    y += 52.0;
+    // MIDI notes from (with a MIDI target), else the notes of the scale in use: a click
+    // makes it a Custom scale with that note turned on or off.
+    if midi {
+        let mut list = vec![match &cx.auto_source {
+            Some(n) => trf("Auto ({})", &[n]),
+            None => trf("Auto ({})", &[&tr("none")]),
+        }];
+        let mut numbers = vec![0usize];
+        for (n, name) in &cx.tracks {
+            list.push(format!("{n}. {name}"));
+            numbers.push(*n);
+        }
+        let cur = now(tune::MIDI_TRACK).round() as usize;
+        let c = numbers.iter().position(|n| *n == cur).unwrap_or(0);
+        gear::silk(
+            &p,
+            pos2(left, y + 20.0),
+            Align2::LEFT_CENTER,
+            tr("MIDI notes from"),
+            11.0,
+            gear::INK2,
+        );
+        let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+        if let Some(i) = gear::choice_field(
+            ui,
+            Rect::from_min_size(pos2(left + 150.0, y + 7.0), vec2(300.0, 26.0)),
+            id.with("midi_from"),
+            &refs,
+            c,
+            true,
+        ) {
+            set(vals, tune::MIDI_TRACK, numbers[i] as f32);
+        }
+    } else {
+        let mask = scale::mask(
+            now(tune::KEY) as i32,
+            now(tune::SCALE) as i32,
+            now(tune::NOTES) as u16,
+            cx.project_root,
+            cx.project_minor,
+        );
+        let kw = (inner_w - 11.0 * 6.0) / 12.0;
         for (k, name) in scale::NAMES.iter().enumerate() {
             let on = mask & (1 << k) != 0;
-            let (bg, fg) = if on {
-                (BLUE, Color32::WHITE)
-            } else {
-                (BTN_BG, Color32::from_gray(0xd0))
-            };
-            let b = egui::Button::new(RichText::new(*name).color(fg).size(12.0))
-                .fill(bg)
-                .min_size(vec2(30.0, 22.0));
-            if ui
-                .add(b)
+            let sharp = name.contains('#') || (name.len() == 2 && name.ends_with('b'));
+            let r =
+                Rect::from_min_size(pos2(left + k as f32 * (kw + 6.0), y + 2.0), vec2(kw, 40.0));
+            let cap = if sharp { Cap::Dark } else { Cap::Bone };
+            let resp = gear::key(
+                ui,
+                r,
+                id.with(("note", k)),
+                name,
+                cap,
+                LedAt::Top,
+                on,
+                false,
+            );
+            if resp
                 .on_hover_text(tr("Turn this note on or off (a Custom scale)"))
                 .clicked()
             {
-                set(vals, edits, tune::NOTES, f32::from(mask ^ (1 << k)));
-                set(vals, edits, tune::SCALE, scale::SCALE_CUSTOM as f32);
+                set(vals, tune::NOTES, f32::from(mask ^ (1 << k)));
+                set(vals, tune::SCALE, scale::SCALE_CUSTOM as f32);
             }
         }
-    });
-    ui.add_space(8.0);
-    let knob = |ui: &mut Ui, vals: &mut [f32], edits: &mut Vec<Edit>, k: usize| {
-        let param = &p[k];
-        ui.label(param.name);
-        if param.choices.is_empty() {
-            let mut v = now(vals, k);
-            let slider = egui::Slider::new(&mut v, param.min..=param.max)
-                .show_value(false)
-                .step_by(1.0);
-            if ui.add_sized([170.0, 18.0], slider).changed() {
-                set(vals, edits, k, v.round());
-            }
-        } else {
-            choice(ui, vals, edits, k, &names(k));
-        }
-        ui.horizontal(|ui| {
-            if param.choices.is_empty() {
-                ui.label(RichText::new(info.value_text(k, now(vals, k))).color(TEXT));
-            }
-            led(ui, k);
-        });
-        ui.end_row();
-    };
-    ui.label(RichText::new(tr("Correction")).strong().color(TEXT));
-    egui::Grid::new(("tune_correction", uid))
-        .num_columns(3)
-        .min_col_width(96.0)
-        .spacing([10.0, 6.0])
-        .striped(true)
-        .show(ui, |ui| {
-            for k in [
+    }
+    y += 62.0;
+
+    // Correction and voice.
+    let mut changes = Vec::new();
+    let mut voice_top = y;
+    for (label, params) in [
+        (
+            tr("Correction"),
+            vec![
                 tune::RETUNE,
                 tune::HUMANIZE,
                 tune::FLEX,
@@ -331,52 +352,89 @@ pub fn body(
                 tune::ADD_VIBRATO,
                 tune::VIBRATO_RATE,
                 tune::AMOUNT,
-            ] {
-                knob(ui, vals, edits, k);
-            }
-        });
-    ui.add_space(6.0);
-    ui.label(RichText::new(tr("Voice")).strong().color(TEXT));
-    egui::Grid::new(("tune_voice", uid))
-        .num_columns(3)
-        .min_col_width(96.0)
-        .spacing([10.0, 6.0])
-        .striped(true)
-        .show(ui, |ui| {
-            for k in [
+            ],
+        ),
+        (
+            tr("Voice"),
+            vec![
                 tune::FORMANT,
                 tune::THROAT,
                 tune::TRANSPOSE,
                 tune::VOICE,
                 tune::MIX,
-            ] {
-                knob(ui, vals, edits, k);
-            }
-        });
-    ui.add_space(6.0);
-    ui.separator();
-    ui.label(
-        RichText::new(trf(
+            ],
+        ),
+    ] {
+        voice_top = y;
+        gear::bracket(
+            &p,
+            pos2(left, y + 6.0),
+            params.len() as f32 * gear::CELL_W,
+            label,
+        );
+        changes.extend(gear::control_grid(
+            ui,
+            pos2(left, y + 22.0),
+            params.len(),
+            id,
+            controls,
+            &params,
+            46.0,
+        ));
+        y += 22.0 + gear::CELL_H;
+    }
+    for ch in changes {
+        let v = crate::native_fx_ui::value_of(info, &ch);
+        set(vals, ch.index, v);
+    }
+
+    // Status: the pitch override and the latency.
+    let status = Rect::from_min_size(pos2(left, y + 6.0), vec2(inner_w, 30.0));
+    gear::glass(&p, status);
+    gear::lcd_text(
+        &p,
+        pos2(status.left() + 10.0, status.center().y),
+        Align2::LEFT_CENTER,
+        &trf(
             "Pitch Override: {}",
-            &[&tune::override_text(now(vals, tune::OVERRIDE) as i32)],
-        ))
-        .color(TEXT),
+            &[&tune::override_text(now(tune::OVERRIDE) as i32)],
+        ),
+        11.0,
     );
-    ui.label(
-        RichText::new(trf(
+    gear::lcd_text(
+        &p,
+        pos2(status.right() - 10.0, status.center().y),
+        Align2::RIGHT_CENTER,
+        &trf(
             "Latency {} ms, compensated",
             &[&format!("{:.1}", tune::LATENCY_SECONDS * 1000.0)],
-        ))
-        .color(TEXT_DIM),
+        ),
+        11.0,
     );
-    ui.label(
-        RichText::new(tr(
-            "Draw pitch corrections in the Piano Roll: pick Pitch Correction in its Automation/MIDI lane.",
-        ))
-        .color(TEXT_DIM),
+    // Presets: a menu beside the voice knobs.
+    let px = left + 5.0 * gear::CELL_W + 24.0;
+    let pr = Rect::from_min_size(pos2(px, voice_top + 46.0), vec2(left + inner_w - px, 26.0));
+    gear::silk(
+        &p,
+        pos2(px, voice_top + 34.0),
+        Align2::LEFT_CENTER,
+        tr("Presets"),
+        11.0,
+        gear::INK2,
     );
+    let resp = gear::field(ui, pr, id.with("presets"), tr("Presets"), true);
+    egui::Popup::menu(&resp).show(|ui| {
+        for preset in info.presets {
+            if ui.selectable_label(false, preset.name).clicked() {
+                let mut v = vals.to_vec();
+                preset.apply(&mut v);
+                for (k, x) in v.into_iter().enumerate() {
+                    set(vals, k, x);
+                }
+            }
+        }
+    });
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,7 +513,7 @@ mod tests {
             560.0,
             1000.0,
             1.0,
-            Color32::from_gray(0x2a),
+            egui::Color32::from_gray(0x2a),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 crate::native_fx_ui::show(ui.ctx(), &mut p, &mut s)

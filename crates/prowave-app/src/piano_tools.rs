@@ -3,9 +3,10 @@
 //! Logic's letters: <https://support.apple.com/guide/logicpro/tool-menu-lgcp0182c4e5/mac>.
 //! Left-click and Command-click tools:
 //! <https://support.apple.com/guide/logicpro/tools-overview-lgcp9b92f74c/mac>.
+use crate::hw;
 use crate::i18n::tr;
-use crate::widgets::{BLUE, TEXT};
-use egui::{pos2, vec2, Align2, Color32, FontId, Key, Painter, Pos2, Rect, Shape, Stroke};
+use crate::theme::{self, Face};
+use egui::{pos2, vec2, Align2, Color32, Key, Painter, Pos2, Rect, Shape, Stroke};
 
 /// A Piano Roll tool.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -160,7 +161,7 @@ pub fn draw_icon(g: &Painter, c: Pos2, tool: Tool, col: Color32) {
                 Tool::Mute => "M",
                 _ => "Q",
             };
-            g.text(c, Align2::CENTER_CENTER, t, FontId::proportional(13.0), col);
+            hw::text(g, c, Align2::CENTER_CENTER, t, Face::Bold, 12.0, col);
         }
     }
 }
@@ -195,44 +196,51 @@ pub fn tool_menu(ctx: &egui::Context, at: Pos2, current: Tool) -> (Option<Tool>,
         .order(egui::Order::Foreground)
         .fixed_pos(at)
         .show(ctx, |ui| {
-            egui::Frame::menu(ui.style()).show(ui, |ui| {
-                ui.set_min_width(190.0);
-                for (tool, _, letter) in Tool::ALL {
-                    let (r, resp) = ui.allocate_exact_size(vec2(190.0, 22.0), egui::Sense::click());
-                    let g = ui.painter();
-                    let on = tool == current;
-                    if resp.hovered() || on {
-                        g.rect_filled(
-                            r,
-                            3.0,
-                            if resp.hovered() {
-                                BLUE
-                            } else {
-                                Color32::from_white_alpha(18)
-                            },
+            // The dropdown material: a dark field, the current tool in orange, each tool's key
+            // on a small bone cap.
+            egui::Frame::menu(ui.style())
+                .fill(theme::CAP)
+                .stroke(egui::Stroke::new(1.0, theme::CAP_EDGE))
+                .show(ui, |ui| {
+                    ui.set_min_width(200.0);
+                    for (tool, _, letter) in Tool::ALL {
+                        let (r, resp) =
+                            ui.allocate_exact_size(vec2(200.0, 24.0), egui::Sense::click());
+                        let g = ui.painter();
+                        let on = tool == current;
+                        if resp.hovered() {
+                            g.rect_filled(r, 3.0, theme::CAP_TOP);
+                        }
+                        let col = if on { theme::ORANGE } else { theme::ON_DARK };
+                        draw_icon(g, pos2(r.left() + 14.0, r.center().y), tool, col);
+                        hw::text(
+                            g,
+                            pos2(r.left() + 32.0, r.center().y),
+                            Align2::LEFT_CENTER,
+                            &tool.name().to_uppercase(),
+                            Face::Bold,
+                            11.5,
+                            col,
                         );
+                        let cap = Rect::from_center_size(
+                            pos2(r.right() - 16.0, r.center().y - 1.0),
+                            vec2(18.0, 17.0),
+                        );
+                        let face = hw::paint_key(g, cap, hw::Cap::Bone, false, false);
+                        hw::text(
+                            g,
+                            face.center(),
+                            Align2::CENTER_CENTER,
+                            letter,
+                            Face::Bold,
+                            10.0,
+                            theme::INK,
+                        );
+                        if resp.clicked() {
+                            picked = Some(tool);
+                        }
                     }
-                    let col = if resp.hovered() { Color32::WHITE } else { TEXT };
-                    draw_icon(g, pos2(r.left() + 14.0, r.center().y), tool, col);
-                    g.text(
-                        pos2(r.left() + 30.0, r.center().y),
-                        Align2::LEFT_CENTER,
-                        tool.name(),
-                        FontId::proportional(12.5),
-                        col,
-                    );
-                    g.text(
-                        pos2(r.right() - 8.0, r.center().y),
-                        Align2::RIGHT_CENTER,
-                        letter,
-                        FontId::proportional(12.0),
-                        col,
-                    );
-                    if resp.clicked() {
-                        picked = Some(tool);
-                    }
-                }
-            });
+                });
         });
     let clicked_out = ctx.input(|i| i.pointer.any_pressed())
         && ctx

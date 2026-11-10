@@ -22,8 +22,6 @@ It is the public edition of a personal fork of [Pro Wave](https://github.com/fab
 - **Channel Rack:** a step-sequenced sample rack.
 - **Piano Roll** with Logic's editing commands: quantize, scale quantize, velocity lane, MIDI
   draw lanes; Score, Step and Event List editors.
-- **Sampler** in the style of the SP-303: pads, banks, chop, Vinyl Sim and the other effects,
-  patterns, a file browser with tempo and key.
 - **Pro Wave Tune** (pitch correction, with a drawn correction lane) and the **Pitch Editor**
   (note-by-note editing of an audio region).
 - **Spectrogram** view and **Paint Image to Audio**.
@@ -43,7 +41,7 @@ to update this section.
 
 | | Done | Started | Total | Done % |
 | --- | ---: | ---: | ---: | ---: |
-| Menu entries | 91 | 0 | 196 | 46.43% |
+| Menu entries | 95 | 0 | 200 | 47.50% |
 | Roadmap items | 24 | 12 | 77 | 31.17% |
 <!-- status:end -->
 
@@ -100,7 +98,6 @@ endorsed by any of the companies below, and contains none of their code, artwork
 - Apple, Logic Pro, macOS and Audio Units are trademarks of Apple Inc.
 - FL Studio and Fruity are trademarks of Image-Line Software.
 - Ableton and Live are trademarks of Ableton AG.
-- Roland, BOSS and Dr. Sample are trademarks of Roland Corporation.
 - VST is a trademark of Steinberg Media Technologies GmbH.
 
 The names are used only to describe the workflows Pro Wave (Yuri's Version) follows.

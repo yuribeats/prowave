@@ -5,37 +5,36 @@
 //! Regions, drag in the ruler to set the cycle, click to move the playhead, scroll, zoom
 //! (sliders and Ctrl+wheel), Catch playhead, add/duplicate tracks, M/S/R/I, volume, pan.
 //! Menu entries that are not implemented yet are shown disabled.
+use crate::hw::{self, Cap};
 use crate::i18n::{tr, trf};
 use crate::model::HeaderPart;
 use crate::model::{AutoTarget, Project, Region, Track, TrackKind};
+use crate::theme::{self, Face};
 use crate::track_icons::{draw_icon, track_icon};
-use crate::widgets::{
-    context_click, context_menu, menu_title, popup_button, stroke, BLUE, BTN_BG, TEXT, TEXT_DIM,
-};
+use crate::widgets::{context_click, context_menu, menu_title, popup_button};
 use crate::{Bottom, UiState};
 use egui::{
-    pos2, vec2, Align2, Color32, FontId, Key, KeyboardShortcut, Modifiers, Painter, Pos2, Rect,
-    Sense, Shape, Stroke, StrokeKind, Ui,
+    pos2, vec2, Align2, Color32, Key, KeyboardShortcut, Modifiers, Painter, Pos2, Rect, Sense,
+    Shape, Stroke, StrokeKind, Ui, Vec2,
 };
+use hw_tracks::{Glyph, Material};
 
-const TOOLBAR_H: f32 = 30.0;
-const RULER_H: f32 = 26.0;
-const HEADER_W: f32 = 340.0;
-const NUM_W: f32 = 24.0;
+/// The Hardware parts of the Tracks area (header keys, slider, knob, regions, ruler).
+#[path = "hw_tracks.rs"]
+pub(crate) mod hw_tracks;
+
+/// The menu row over the tracks (Edit, Functions, View, the tool keys, Snap, Drag, zoom).
+pub(crate) const TOOLBAR_H: f32 = 48.0;
+/// The ruler: the cycle band on top, bar numbers and ticks under it.
+pub(crate) const RULER_H: f32 = 38.0;
+/// The track list.
+pub(crate) const HEADER_W: f32 = 440.0;
+/// Left margin of a header's contents (the number key starts here).
+pub(crate) const NUM_W: f32 = 16.0;
 /// How far each folder nesting level moves a track header's contents to the right.
 const INDENT_W: f32 = 14.0;
-
-const TOOLBAR_BG: Color32 = Color32::from_rgb(0x3c, 0x3c, 0x3c);
-const HEADER_BG: Color32 = Color32::from_rgb(0x41, 0x41, 0x41);
-const HEADER_SEL: Color32 = Color32::from_rgb(0x58, 0x58, 0x58);
-const LANE_BG: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
-const LANE_SEL: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
-const RULER_BG: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
-const CYCLE: Color32 = Color32::from_rgb(0xd4, 0x9e, 0x2a);
-const MUTE_ON: Color32 = Color32::from_rgb(0x3b, 0x8c, 0xe6);
-const SOLO_ON: Color32 = Color32::from_rgb(0xe6, 0xc2, 0x2e);
-const REC_ON: Color32 = Color32::from_rgb(0xe0, 0x3a, 0x30);
-const MON_ON: Color32 = Color32::from_rgb(0xe8, 0x8a, 0x2c);
+/// Height of the ruler's cycle zone (the band and the strip a drag sets it in).
+const CYCLE_ZONE_H: f32 = 16.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Snap {
@@ -104,7 +103,7 @@ const TOOL_KINDS: [TrackTool; 8] = [
 ];
 
 /// What a click with one of the editing tools does, once the regions are drawn.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ToolAct {
     Erase(usize, usize),
     Split(usize, usize, f64),
@@ -112,6 +111,9 @@ enum ToolAct {
     Zoom(bool),
     /// A region's end dragged to a new place (quarter notes); `true`: stretch to fit.
     End(usize, usize, f64, bool),
+    /// Regions let go after a drag: (track, region, start before), how far later and how many
+    /// tracks down they land, and whether Option was held (copies land there instead).
+    Drop(Vec<(usize, usize, f64)>, f64, isize, bool),
 }
 
 /// A Normalize Region Gain scan running on its own thread: reading a long recording to find
@@ -177,6 +179,8 @@ pub struct TracksView {
     /// A drag of selected regions in progress: each one's (track, region, start in beats) when it
     /// began, so they all move by the same distance.
     group_drag: Vec<(usize, usize, f64)>,
+    /// That drag so far: quarter notes later (snapped) and tracks down.
+    drag_by: (f64, isize),
     cycle_anchor: Option<f64>,
     /// A swipe on a take row in progress: the comp as it was and where the swipe began.
     swipe: Option<(Vec<crate::model::CompSegment>, f32)>,
@@ -298,8 +302,8 @@ impl TracksView {
 impl Default for TracksView {
     fn default() -> Self {
         Self {
-            bar_w: 62.0,
-            row_h: 56.0,
+            bar_w: 96.0,
+            row_h: 70.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
             lanes_w: 1000.0,
@@ -316,6 +320,7 @@ impl Default for TracksView {
             extra: Vec::new(),
             grab_beats: 0.0,
             group_drag: Vec::new(),
+            drag_by: (0.0, 0),
             cycle_anchor: None,
             swipe: None,
             normalize_jobs: Vec::new(),
@@ -333,29 +338,19 @@ pub(crate) fn silenced_by_solo(p: &Project, track: usize) -> bool {
     p.tracks.get(track).is_some() && !p.is_soloed(track) && p.any_solo()
 }
 
-/// A region while it is being recorded.
-const RECORDING_FILL: Color32 = Color32::from_rgb(86, 14, 14);
+/// The ruler over the selected region: a band of ink across the bar-number zone.
+const RULER_SELECTION: Color32 = Color32::from_rgba_premultiplied(4, 4, 4, 30);
 
-/// The outline of a selected region.
-const SELECTED_EDGE: Color32 = Color32::from_rgb(176, 200, 72);
-
-/// The ruler over a selected region is gold.
-const RULER_SELECTION: Color32 = Color32::from_rgb(169, 126, 25);
-const RULER_SELECTION_EDGE: Color32 = Color32::from_rgb(95, 69, 20);
-
-/// Logic's playhead is yellow: a pale yellow line and a yellow head.
-pub(crate) const PLAYHEAD_LINE: Color32 = Color32::from_rgb(214, 196, 112);
-pub(crate) const PLAYHEAD_HEAD: Color32 = Color32::from_rgb(240, 206, 84);
-pub(crate) const PLAYHEAD_EDGE: Color32 = Color32::from_rgb(146, 118, 30);
-/// While recording the playhead turns red.
-const PLAYHEAD_LINE_REC: Color32 = Color32::from_rgb(176, 42, 38);
-const PLAYHEAD_HEAD_REC: Color32 = Color32::from_rgb(206, 32, 26);
-const PLAYHEAD_EDGE_REC: Color32 = Color32::from_rgb(112, 16, 14);
+/// The playhead is the signal orange with an ink edge; while recording it is the deeper
+/// record red.
+pub(crate) const PLAYHEAD_LINE: Color32 = theme::ORANGE;
+pub(crate) const PLAYHEAD_HEAD: Color32 = theme::ORANGE;
+pub(crate) const PLAYHEAD_EDGE: Color32 = theme::INK;
 
 /// The playhead's line, head and outline colours.
 pub(crate) fn playhead_colors(recording: bool) -> (Color32, Color32, Color32) {
     if recording {
-        (PLAYHEAD_LINE_REC, PLAYHEAD_HEAD_REC, PLAYHEAD_EDGE_REC)
+        (theme::DANGER, theme::DANGER, theme::INK)
     } else {
         (PLAYHEAD_LINE, PLAYHEAD_HEAD, PLAYHEAD_EDGE)
     }
@@ -433,7 +428,7 @@ fn fade_for_drag(at: f64, start: f64, len: f64, fade_in: bool) -> f32 {
 }
 
 /// Whether region `ri` of track `ti` overlaps another region of the track.
-fn overlaps_another(p: &Project, ti: usize, ri: usize) -> bool {
+pub(crate) fn overlaps_another(p: &Project, ti: usize, ri: usize) -> bool {
     let track = &p.tracks[ti];
     let (s, e) = (
         p.region_start_beats(&track.regions[ri]),
@@ -465,28 +460,10 @@ pub(crate) fn snap_to(b: f64, step: f64) -> f64 {
 
 // ------------------------------------------------------------------ small widgets
 
-fn icon_button(
-    ui: &Ui,
-    g: &Painter,
-    rect: Rect,
-    key: &str,
-    on: bool,
-    draw: impl FnOnce(&Painter, Rect, Color32),
-) -> egui::Response {
-    let resp = ui.interact(rect, id(("icon", key)), Sense::click());
-    if on {
-        g.rect_filled(rect, 4.0, BLUE);
-    } else if resp.hovered() {
-        g.rect_filled(rect, 4.0, Color32::from_white_alpha(14));
-    }
-    draw(g, rect, if on { Color32::WHITE } else { TEXT });
-    resp
-}
-
-/// Horizontal mini slider; returns the new 0..1 value.
-fn mini_slider(ui: &Ui, g: &Painter, rect: Rect, key: &str, value: f32) -> f32 {
+/// A zoom slider: the black groove `rect` with the 12×22 thumb; returns the new 0..1 value.
+fn zoom_slider(ui: &Ui, g: &Painter, rect: Rect, key: &str, value: f32) -> f32 {
     let resp = ui.interact(
-        rect.expand2(vec2(4.0, 6.0)),
+        rect.expand2(vec2(6.0, 11.0)),
         id(("slider", key)),
         Sense::click_and_drag(),
     );
@@ -494,28 +471,19 @@ fn mini_slider(ui: &Ui, g: &Painter, rect: Rect, key: &str, value: f32) -> f32 {
     if let Some(p) = resp.interact_pointer_pos() {
         v = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
     }
-    let cy = rect.center().y;
-    g.line_segment(
-        [pos2(rect.left(), cy), pos2(rect.right(), cy)],
-        Stroke::new(2.0, Color32::from_gray(0x22)),
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 2.0, theme::BONE_HI);
+    g.rect_filled(rect, 2.0, hw_tracks::GROOVE);
+    let thumb = Rect::from_center_size(
+        pos2(rect.left() + rect.width() * v, rect.center().y),
+        vec2(12.0, 22.0),
     );
-    g.circle_filled(
-        pos2(rect.left() + rect.width() * v, cy),
-        5.5,
-        Color32::from_gray(0xc8),
-    );
+    hw_tracks::thumb_h(g, thumb);
     v
 }
 
-fn header_button_bg(selected_row: bool) -> Color32 {
-    if selected_row {
-        Color32::from_gray(0x72)
-    } else {
-        Color32::from_gray(0x5a)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
+/// An M/S/R/I key (4.7): a bone key latched with its LED lit while on. All four speak the
+/// same language: the LED in its own column at the left, the letter centred beside it.
+/// Returns whether it was clicked.
 fn header_button(
     ui: &Ui,
     g: &Painter,
@@ -523,99 +491,62 @@ fn header_button(
     key: (usize, &str),
     label: &str,
     on: bool,
-    on_col: Color32,
-    selected_row: bool,
 ) -> bool {
     let resp = ui.interact(rect, id(("hdrbtn", key)), Sense::click());
-    g.rect_filled(
+    hw_tracks::small_key(
+        g,
         rect,
-        3.0,
-        if on {
-            on_col
-        } else {
-            header_button_bg(selected_row)
-        },
-    );
-    let txt = if on && on_col == SOLO_ON {
-        Color32::BLACK
-    } else {
-        Color32::from_gray(0xe8)
-    };
-    g.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
+        Cap::Bone,
+        on,
+        resp.is_pointer_button_down_on(),
+        resp.hovered(),
+        true,
         label,
-        FontId::proportional(10.5),
-        txt,
+        None,
     );
     resp.clicked()
 }
 
-// ------------------------------------------------------------------ toolbar icons
-
-fn draw_catch_icon(g: &Painter, r: Rect, c: Color32) {
-    // Playhead with a follow arrow.
-    let p = r.center();
-    g.line_segment([p + vec2(-4.0, -7.0), p + vec2(-4.0, 7.0)], stroke(c));
-    g.add(Shape::convex_polygon(
-        vec![
-            p + vec2(-8.0, -7.0),
-            p + vec2(0.0, -7.0),
-            p + vec2(-4.0, -3.0),
-        ],
-        c,
-        Stroke::NONE,
-    ));
-    g.line_segment([p + vec2(-1.0, 2.0), p + vec2(6.0, 2.0)], stroke(c));
-    g.add(Shape::line(
-        vec![p + vec2(3.5, -0.5), p + vec2(6.5, 2.0), p + vec2(3.5, 4.5)],
-        stroke(c),
-    ));
+/// A tool key in the menu row: a bone key with `glyph`, latched with its LED lit when `on`
+/// (the LED only when `led`).
+fn glyph_key(
+    ui: &Ui,
+    g: &Painter,
+    rect: Rect,
+    key: &str,
+    on: bool,
+    led: bool,
+    glyph: Glyph,
+) -> egui::Response {
+    let resp = ui.interact(rect, id(("icon", key)), Sense::click());
+    let face = hw::paint_key(
+        g,
+        rect,
+        Cap::Bone,
+        on || resp.is_pointer_button_down_on(),
+        resp.hovered(),
+    );
+    let mut c = face.center();
+    if led {
+        hw::led_sized(g, pos2(face.left() + 9.0, face.center().y), 3.0, on);
+        c.x += 7.0;
+    }
+    hw_tracks::glyph(g, c, 18.0, glyph, theme::INK);
+    resp
 }
 
-fn draw_pointer(g: &Painter, at: Pos2, c: Color32) {
-    let pts = vec![
-        at + vec2(-3.0, -7.0),
-        at + vec2(5.0, 1.0),
-        at + vec2(1.0, 1.5),
-        at + vec2(-1.0, 6.0),
-        at + vec2(-3.0, -7.0),
-    ];
-    g.add(Shape::line(pts, stroke(c)));
-}
-
-/// The Fade tool's icon: a ramp down to a baseline.
-fn draw_fade_tool(g: &Painter, at: Pos2, c: Color32) {
-    g.line_segment([at + vec2(-6.0, 5.0), at + vec2(6.0, 5.0)], stroke(c));
-    g.line_segment([at + vec2(-6.0, 5.0), at + vec2(-6.0, -5.0)], stroke(c));
-    g.line_segment([at + vec2(-6.0, -5.0), at + vec2(6.0, 5.0)], stroke(c));
-}
-
-fn draw_zoom_icon(g: &Painter, at: Pos2, c: Color32, vertical: bool) {
-    let (a, b) = if vertical {
-        (vec2(0.0, -6.0), vec2(0.0, 6.0))
-    } else {
-        (vec2(-6.0, 0.0), vec2(6.0, 0.0))
-    };
-    g.line_segment([at + a, at + b], stroke(c));
-    let n = if vertical {
-        vec2(2.5, 0.0)
-    } else {
-        vec2(0.0, 2.5)
-    };
-    let d = if vertical {
-        vec2(0.0, 2.5)
-    } else {
-        vec2(2.5, 0.0)
-    };
-    g.add(Shape::line(
-        vec![at + a + n + d, at + a, at + a - n + d],
-        stroke(c),
-    ));
-    g.add(Shape::line(
-        vec![at + b + n - d, at + b, at + b - n - d],
-        stroke(c),
-    ));
+/// The tool's glyph in the tool menu key.
+fn tool_glyph(tool: TrackTool) -> Glyph {
+    match tool {
+        TrackTool::Pointer => Glyph::Pointer,
+        TrackTool::Eraser => Glyph::Eraser,
+        TrackTool::Text => Glyph::Text,
+        TrackTool::Scissors => Glyph::Scissors,
+        TrackTool::Join => Glyph::Join,
+        TrackTool::Mute => Glyph::Mute,
+        TrackTool::Zoom => Glyph::Zoom,
+        TrackTool::Fade => Glyph::Fade,
+    }
 }
 
 fn shortcut(ui: &Ui, mods: Modifiers, key: Key) -> String {
@@ -626,20 +557,23 @@ fn shortcut(ui: &Ui, mods: Modifiers, key: Key) -> String {
 
 fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
     let g = ui.painter_at(bar);
-    g.rect_filled(bar, 0.0, TOOLBAR_BG);
-    g.line_segment(
-        [bar.left_bottom(), bar.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x24)),
+    g.rect_filled(bar, 0.0, hw_tracks::PANEL_MENU);
+    g.hline(
+        bar.x_range(),
+        bar.top() + 0.5,
+        Stroke::new(1.0, Color32::WHITE),
     );
-    let cy = bar.center().y;
+    hw_tracks::seam_wide_h(&g, bar.x_range(), bar.bottom());
+    // The keys sit on the row's centre, above the seam.
+    let cy = bar.center().y - 1.0;
     let (can_undo, can_redo) = (s.can_undo, s.can_redo);
     let mut undo_pick = None;
     let v = &mut s.tracks;
 
-    let mut x = bar.left() + 8.0;
+    let mut x = bar.left() + 12.0;
     let sel = v.selected;
     let (edit, w) = menu_title(ui, &g, x, cy, tr("Edit"), id(("menu", "Edit")));
-    x += w + 2.0;
+    x += w + 12.0;
     egui::Popup::menu(&edit).show(|ui| {
         ui.set_min_width(260.0);
         crate::widgets::undo_items(ui, can_undo, can_redo, &mut undo_pick);
@@ -733,7 +667,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         s.undo_cmd = undo_pick;
     }
     let (func, w) = menu_title(ui, &g, x, cy, tr("Functions"), id(("menu", "Functions")));
-    x += w + 2.0;
+    x += w + 12.0;
     egui::Popup::menu(&func).show(|ui| {
         ui.set_min_width(260.0);
         if ui
@@ -782,7 +716,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         }
     });
     let (view, w) = menu_title(ui, &g, x, cy, tr("View"), id(("menu", "View")));
-    x += w + 10.0;
+    x += w + 24.0;
     egui::Popup::menu(&view).show(|ui| {
         ui.set_min_width(260.0);
         if ui.button(tr("Zoom to Fit")).clicked() {
@@ -807,42 +741,57 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         }
     });
 
-    // Catch: follow the playhead.
-    let r = Rect::from_center_size(pos2(x + 13.0, cy), vec2(26.0, 20.0));
-    if icon_button(ui, &g, r, "catch", v.catch, draw_catch_icon).clicked() {
+    // Catch: follow the playhead (a latching key with its LED).
+    let r = Rect::from_min_size(pos2(x, cy - 15.0), vec2(52.0, 30.0));
+    if glyph_key(ui, &g, r, "catch", v.catch, true, Glyph::Catch).clicked() {
         v.catch = !v.catch;
     }
     // Automation Mode (A), Draw Mode (B), Automation Arm, Re-Enable Automation.
-    let w = crate::automation_ui::toolbar(ui, &g, p, &mut s.auto, x + 34.0, cy);
-    let left_end = x + 34.0 + w;
+    let w = crate::automation_ui::toolbar(ui, &g, p, &mut s.auto, r.right() + 10.0, cy);
+    let left_end = r.right() + 10.0 + w;
 
-    // Right-hand side, laid out from the right edge.
+    // Right-hand side, laid out from the right edge: the zoom sliders, each with its glyph.
     // Horizontal zoom (log scale, 6..600 points per bar).
-    let hz = Rect::from_min_size(pos2(bar.right() - 72.0, cy - 6.0), vec2(64.0, 12.0));
+    let slider_w = if bar.width() > 1500.0 { 110.0 } else { 80.0 };
+    let hz = Rect::from_min_size(
+        pos2(bar.right() - 18.0 - slider_w, cy - 2.0),
+        vec2(slider_w, 4.0),
+    );
     let (lo, hi) = (6f32.ln(), 600f32.ln());
     let t = ((v.bar_w.ln() - lo) / (hi - lo)).clamp(0.0, 1.0);
-    let t2 = mini_slider(ui, &g, hz, "hzoom", t);
+    let t2 = zoom_slider(ui, &g, hz, "hzoom", t);
     if t2 != t {
         v.bar_w = (lo + t2 * (hi - lo)).exp();
     }
-    draw_zoom_icon(&g, pos2(hz.left() - 13.0, cy), TEXT, false);
+    hw_tracks::glyph(
+        &g,
+        pos2(hz.left() - 19.0, cy),
+        18.0,
+        Glyph::HZoom,
+        theme::INK2,
+    );
     // Vertical zoom (track height 36..140).
-    let vz = Rect::from_min_size(pos2(hz.left() - 26.0 - 54.0, cy - 6.0), vec2(54.0, 12.0));
+    let vz = Rect::from_min_size(
+        pos2(hz.left() - 50.0 - slider_w, cy - 2.0),
+        vec2(slider_w, 4.0),
+    );
     let t = ((v.row_h - 36.0) / (140.0 - 36.0)).clamp(0.0, 1.0);
-    let t2 = mini_slider(ui, &g, vz, "vzoom", t);
+    let t2 = zoom_slider(ui, &g, vz, "vzoom", t);
     if t2 != t {
         v.row_h = 36.0 + t2 * (140.0 - 36.0);
     }
-    draw_zoom_icon(&g, pos2(vz.left() - 13.0, cy), TEXT, true);
+    hw_tracks::glyph(
+        &g,
+        pos2(vz.left() - 19.0, cy),
+        18.0,
+        Glyph::VZoom,
+        theme::INK2,
+    );
     // What fits between the two sides; the rest is left out rather than drawn on top.
-    let mut rx = vz.left() - 30.0;
-    // SNAP_W and DRAG_W allow for the English "Snap:" and "Drag:"; longer translations take
+    let mut rx = vz.left() - 44.0;
+    // SNAP_W and DRAG_W allow for the English "SNAP" and "DRAG"; longer translations take
     // the difference from the room left.
-    let label_w = |t: &str| {
-        g.layout_no_wrap(t.to_owned(), FontId::proportional(12.5), TEXT_DIM)
-            .size()
-            .x
-    };
+    let label_w = |t: &str| hw::silk_width(&g, no_colon(t), 11.0);
     let longer = (label_w(tr("Snap:")) - label_w("Snap:")).max(0.0)
         + (label_w(tr("Drag:")) - label_w("Drag:")).max(0.0);
     let show = fit_toolbar(rx - left_end - longer);
@@ -858,8 +807,8 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
 }
 
 /// Which optional toolbar items are shown, given the free width between the left-hand group
-/// and the zoom sliders. Logic hides toolbar items that do not fit; most useful first: Snap,
-/// Drag, then the tool menu.
+/// and the zoom sliders. Items that do not fit are hidden; kept first: Snap, then the tool
+/// menu (it is the narrowest and otherwise vanished at laptop widths), then Drag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct ToolbarFit {
     snap: bool,
@@ -868,9 +817,14 @@ struct ToolbarFit {
 }
 
 /// Widths (with their labels and gaps) of the optional toolbar items.
-const SNAP_W: f32 = 204.0;
-const DRAG_W: f32 = 160.0;
-const TOOLS_W: f32 = 48.0;
+const SNAP_W: f32 = 214.0;
+const DRAG_W: f32 = 214.0;
+const TOOLS_W: f32 = 72.0;
+
+/// A label such as "Snap:" as the silkscreen prints it, without its colon.
+fn no_colon(t: &str) -> &str {
+    t.trim_end_matches([':', '：', ' '])
+}
 
 fn fit_toolbar(free: f32) -> ToolbarFit {
     let mut left = free;
@@ -882,14 +836,14 @@ fn fit_toolbar(free: f32) -> ToolbarFit {
         fits
     };
     let snap = take(SNAP_W);
-    let drag = take(DRAG_W);
     let tools = take(TOOLS_W);
+    let drag = take(DRAG_W);
     ToolbarFit { snap, drag, tools }
 }
 
 /// "Drag:" mode menu ending at `rx`; returns where the next item to its left ends.
 fn drag_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 {
-    let drag_r = Rect::from_min_size(pos2(rx - 110.0, cy - 10.0), vec2(110.0, 20.0));
+    let drag_r = Rect::from_min_size(pos2(rx - 150.0, cy - 13.0), vec2(150.0, 26.0));
     let resp = popup_button(ui, g, drag_r, id(("popup", "drag")), v.drag_mode.label());
     egui::Popup::menu(&resp).show(|ui| {
         for m in DragMode::ALL {
@@ -899,19 +853,20 @@ fn drag_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 
             }
         }
     });
-    let label = g.text(
-        pos2(drag_r.left() - 6.0, cy),
+    let label = hw::silk(
+        g,
+        pos2(drag_r.left() - 10.0, cy),
         Align2::RIGHT_CENTER,
-        tr("Drag:"),
-        FontId::proportional(12.5),
-        TEXT_DIM,
+        no_colon(tr("Drag:")),
+        11.0,
+        theme::INK2,
     );
-    label.left() - 8.0
+    label.left() - 24.0
 }
 
 /// "Snap:" menu ending at `rx`; returns where the next item to its left ends.
 fn snap_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 {
-    let snap_r = Rect::from_min_size(pos2(rx - 150.0, cy - 10.0), vec2(150.0, 20.0));
+    let snap_r = Rect::from_min_size(pos2(rx - 150.0, cy - 13.0), vec2(150.0, 26.0));
     let resp = popup_button(ui, g, snap_r, id(("popup", "snap")), v.snap.label());
     egui::Popup::menu(&resp).show(|ui| {
         for m in Snap::ALL {
@@ -921,52 +876,40 @@ fn snap_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 
             }
         }
     });
-    let label = g.text(
-        pos2(snap_r.left() - 6.0, cy),
+    let label = hw::silk(
+        g,
+        pos2(snap_r.left() - 10.0, cy),
         Align2::RIGHT_CENTER,
-        tr("Snap:"),
-        FontId::proportional(12.5),
-        TEXT_DIM,
+        no_colon(tr("Snap:")),
+        11.0,
+        theme::INK2,
     );
-    label.left() - 12.0
+    label.left() - 24.0
 }
 
-/// The left-click tool menu ending at `rx`: the Pointer or the Fade tool.
+/// The left-click tool menu ending at `rx`: a key with the tool's glyph and a menu triangle.
 fn tool_menus(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) {
-    let r = Rect::from_min_size(pos2(rx - 40.0, cy - 10.0), vec2(40.0, 20.0));
+    let r = Rect::from_min_size(pos2(rx - 56.0, cy - 15.0), vec2(56.0, 30.0));
     let resp = ui.interact(r, id("tool_l"), Sense::click());
-    if resp.hovered() {
-        g.rect_filled(r, 4.0, Color32::from_white_alpha(14));
-    }
-    let icon_at = pos2(r.left() + 13.0, cy);
-    let letter = |t: &str| {
-        g.text(
-            icon_at,
-            Align2::CENTER_CENTER,
-            t,
-            FontId::proportional(13.0),
-            TEXT,
-        );
-    };
-    match v.tool {
-        TrackTool::Fade => draw_fade_tool(g, icon_at, TEXT),
-        TrackTool::Pointer => draw_pointer(g, icon_at, TEXT),
-        TrackTool::Eraser => letter("E"),
-        TrackTool::Text => letter("T"),
-        TrackTool::Scissors => letter("✂"),
-        TrackTool::Join => letter("J"),
-        TrackTool::Mute => letter("M"),
-        TrackTool::Zoom => letter("Z"),
-    }
-    let c = pos2(r.right() - 9.0, cy + 1.0);
-    g.add(Shape::line(
-        vec![
-            c + vec2(-3.0, -1.5),
-            c + vec2(0.0, 1.5),
-            c + vec2(3.0, -1.5),
-        ],
-        stroke(TEXT_DIM),
-    ));
+    let face = hw::paint_key(
+        g,
+        r,
+        Cap::Bone,
+        resp.is_pointer_button_down_on(),
+        resp.hovered(),
+    );
+    hw_tracks::glyph(
+        g,
+        pos2(face.left() + 20.0, face.center().y),
+        16.0,
+        tool_glyph(v.tool),
+        theme::INK,
+    );
+    hw::tri_down(
+        g,
+        pos2(face.right() - 14.0, face.center().y + 0.5),
+        theme::INK2,
+    );
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(220.0);
         for (t, tool) in TOOLS.iter().zip(TOOL_KINDS) {
@@ -1003,6 +946,8 @@ enum CtxAction {
     FlexMode(usize, usize, prowave_engine::FlexMode),
     Flex(usize, usize, crate::flex_edit::Command),
     FlexRemove(usize, usize),
+    /// Fit to Grid: the region's tempo and beats onto the project's grid.
+    FitToGrid(usize, usize),
     /// Time Stretch the audio to the nearest bar line (false) or to the locators (true).
     TimeStretch(usize, usize, bool),
     /// The Spectrogram window on an audio region.
@@ -1191,6 +1136,13 @@ fn region_items(
             );
         });
         ui.menu_button(tr("Flex Time"), |ui| {
+            pick(
+                ui,
+                tr("Fit to Grid"),
+                "",
+                CtxAction::FitToGrid(ti, ri),
+                picked,
+            );
             ui.menu_button(tr("Flex Mode"), |ui| {
                 for mode in prowave_engine::FlexMode::ALL {
                     pick(
@@ -1411,6 +1363,7 @@ fn apply_ctx(action: CtxAction, p: &mut Project, s: &mut UiState, lanes_w: f32) 
         }
         CtxAction::Flex(t, r, command) => crate::flex_edit::start(p, s, t, r, command),
         CtxAction::FlexRemove(t, r) => s.flex.remove_later(t, r),
+        CtxAction::FitToGrid(t, r) => crate::fit_grid::start_region(p, s, t, r),
         CtxAction::RepeatRegion => repeat_with_automation(p, v, &s.auto),
         CtxAction::LocatorsByRegion => set_locators_by_region(p, v),
         CtxAction::DeleteRegion => delete_selected(p, v),
@@ -1668,47 +1621,34 @@ pub(crate) fn zoom_to_fit(p: &Project, v: &mut TracksView, lanes_w: f32) {
 
 // ------------------------------------------------------------------ drawing
 
-/// The body colour of a region. Logic draws regions deeper than the track colour; these four
-/// were measured from Logic Pro itself (yellow is estimated from the others).
-const LOGIC_REGION_COLORS: [([u8; 3], [u8; 3]); 4] = [
-    ([0x4e, 0xb0, 0x4a], [43, 150, 53]),
-    ([0x3f, 0x5f, 0xc0], [60, 102, 176]),
-    ([0xd9, 0xaa, 0x2a], [196, 158, 26]),
-    ([0x7a, 0x4f, 0xc0], [97, 63, 175]),
-];
-
-/// A selected region keeps its colour but gets deeper and more saturated (Logic: a green
-/// region goes from 43, 150, 53 to 15, 136, 29).
-fn selected_fill(c: Color32) -> Color32 {
-    let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
-    let lum = 0.3 * r + 0.59 * g + 0.11 * b;
-    let k = |v: f32| ((lum + (v - lum) * 1.45) * 0.8).clamp(0.0, 255.0) as u8;
-    Color32::from_rgb(k(r), k(g), k(b))
+/// The material a region is drawn in (A.5): audio regions warm grey with a waveform, Drummer
+/// regions hatched bone with drum hits, every other MIDI region black with note dashes.
+fn material_of(track: &Track, region: &Region) -> Material {
+    let drummer = region
+        .generated
+        .as_ref()
+        .is_some_and(|g| matches!(g.source, crate::model::Generator::Drummer(_)));
+    if region.audio.is_some() || track.kind == TrackKind::Audio {
+        Material::Audio
+    } else if drummer || track.kind == TrackKind::Drummer {
+        Material::Drum
+    } else {
+        Material::Inst
+    }
 }
 
-fn region_fill(c: Color32) -> Color32 {
-    if let Some((_, [r, g, b])) = LOGIC_REGION_COLORS
-        .iter()
-        .find(|(track, _)| *track == [c.r(), c.g(), c.b()])
-    {
-        return Color32::from_rgb(*r, *g, *b);
-    }
-    // Any other colour gets the same kind of darkening.
-    let ch = |v: u8| v as f32 * 0.72;
-    let (r, g, b) = (ch(c.r()), ch(c.g()), ch(c.b()));
-    let lum = 0.3 * r + 0.59 * g + 0.11 * b;
-    let sat = |v: f32| (lum + (v - lum) * 1.1).clamp(0.0, 255.0) as u8;
-    Color32::from_rgb(sat(r), sat(g), sat(b))
+/// The region colours of `track`'s regions (the body takes a hint of the track colour; the
+/// muted look is drawn by the region painter itself).
+fn look_of(track: &Track, material: Material, selected: bool) -> theme::RegionLook {
+    theme::region_look(track.color, material == Material::Audio, selected, false)
 }
 
 // ------------------------------------------------------------------ take folders
 
 /// Height of one take's row in an opened take folder.
 const TAKE_ROW_H: f32 = 22.0;
-/// The yellow header of a take folder.
-const FOLDER_HEAD_H: f32 = 14.0;
-/// Logic's take folder header is yellow.
-const FOLDER_YELLOW: Color32 = Color32::from_rgb(253, 197, 0);
+/// The header of a take folder (the same bar as any region's).
+const FOLDER_HEAD_H: f32 = 15.0;
 
 /// Extra height a track's row needs for its opened take folders (one row per take).
 fn take_rows_height(t: &Track) -> f32 {
@@ -1735,7 +1675,8 @@ fn take_row_rect(full: Rect, takes: usize, take: usize) -> Rect {
     )
 }
 
-/// Thin note lines (pitch up, time right) of `notes` in `inner`, clipped to `clip`.
+/// Note dashes (pitch up, time right) of `notes` in `inner`: `h` points tall, a fixed step per
+/// semitone with the notes centred in the region.
 #[allow(clippy::too_many_arguments)]
 fn draw_note_lines<'a>(
     g: &Painter,
@@ -1747,118 +1688,105 @@ fn draw_note_lines<'a>(
     hi: f32,
     ink: Color32,
 ) {
-    let step = (2.0f32).min((inner.height() - 4.0) / (hi - lo).max(1.0));
+    let h = if inner.height() >= 24.0 { 3.0 } else { 2.0 };
+    let step = (4.0f32).min((inner.height() - h - 2.0).max(1.0) / (hi - lo).max(1.0));
     let mid = (lo + hi) / 2.0;
     for n in notes {
         let nx = left + n.start * beat_px;
         if nx > inner.right() || nx + n.len * beat_px < inner.left() {
             continue;
         }
-        let ny = inner.center().y - (n.pitch as f32 - mid) * step;
+        // On whole points, so every note stays crisp; a 1-point gap before the next note.
+        let ny = (inner.center().y - (n.pitch as f32 - mid) * step - h / 2.0).round();
+        let x0 = nx.round();
+        let x1 = (nx + n.len * beat_px).round() - 1.0;
         let nr = Rect::from_min_max(
-            pos2(nx.max(inner.left()), ny - 0.75),
-            pos2(
-                (nx + (n.len * beat_px).max(2.0)).min(inner.right()),
-                ny + 0.75,
-            ),
+            pos2(x0.max(inner.left()), ny),
+            pos2(x1.max(x0 + 2.0).min(inner.right()), ny + h),
         );
         g.rect_filled(nr, 0.0, ink);
     }
 }
 
-/// A take folder as Logic draws it: a yellow header with the name and a triangle, and under
-/// it the comp, the stretches of the takes that play, side by side with thin lines between.
-/// Opened, a row for each take follows, the stretches the comp uses lit in the region colour.
+/// Which of a Drummer region's three lanes a drum note plays in: cymbals and hi-hats on top,
+/// snares, claps and toms in the middle, kicks at the bottom.
+fn drum_lane(pitch: u8) -> usize {
+    match pitch {
+        35 | 36 => 2,
+        42 | 44 | 46 | 49 | 51..=53 | 55 | 57 | 59 => 0,
+        _ => 1,
+    }
+}
+
+/// Drum hits: a bar of ink per note in its lane, at most 4 points wide.
+fn draw_drum_hits(
+    g: &Painter,
+    inner: Rect,
+    left: f32,
+    beat_px: f32,
+    notes: &[crate::model::Note],
+    ink: Color32,
+) {
+    let lane_h = inner.height() / 3.0;
+    for n in notes {
+        let nx = left + n.start * beat_px;
+        if nx > inner.right() || nx + 4.0 < inner.left() {
+            continue;
+        }
+        let w = (beat_px / 6.0).clamp(1.5, 4.0);
+        let top = inner.top() + drum_lane(n.pitch) as f32 * lane_h + 1.0;
+        let r = Rect::from_min_size(pos2(nx, top), vec2(w, (lane_h - 2.0).max(1.0)));
+        g.rect_filled(r.intersect(inner), 0.0, ink);
+    }
+}
+
+/// A take folder: a region whose header carries the open/close triangle, the comp (the
+/// stretches of the takes that play) side by side with ink lines between them, and, opened,
+/// a recessed row for each take with the stretches the comp uses in the region material.
 #[allow(clippy::too_many_arguments)]
 fn draw_take_folder(
     g: &Painter,
     full: Rect,
     track: &Track,
+    number: usize,
     region: &Region,
     folder: &crate::model::TakeFolder,
     beat_px: f32,
     selected: bool,
     silenced: bool,
 ) {
-    let base = if region.params.mute {
-        Color32::from_gray(0x6a)
-    } else {
-        track.color
-    };
-    let fill = if silenced {
-        Color32::from_rgb(0x2e, 0x2e, 0x30)
-    } else if selected {
-        selected_fill(region_fill(base))
-    } else {
-        region_fill(base)
-    };
-    let ink = if silenced {
-        Color32::from_gray(0x8c)
-    } else {
-        fill.lerp_to_gamma(Color32::WHITE, if selected { 0.75 } else { 0.6 })
-    };
-    let head_h = FOLDER_HEAD_H.min(full.height() * 0.4);
-    let round = 4;
-    let body = Rect::from_min_max(pos2(full.left(), full.top() + head_h), full.max);
-    // The comp: one block per stretch, rounded at the ends of the folder only.
-    let last = folder.comp.len().saturating_sub(1);
-    for (i, seg) in folder.comp.iter().enumerate() {
-        let x0 = (full.left() + seg.start * beat_px).max(full.left());
-        let x1 = (full.left() + seg.end * beat_px).min(full.right());
-        if x1 <= x0 {
-            continue;
-        }
-        g.rect_filled(
-            Rect::from_min_max(pos2(x0, body.top()), pos2(x1, body.bottom())),
-            egui::CornerRadius {
-                nw: 0,
-                ne: 0,
-                sw: if i == 0 { round } else { 0 },
-                se: if i == last { round } else { 0 },
-            },
-            fill,
-        );
-    }
-    // The header.
-    let head = Rect::from_min_size(full.min, vec2(full.width(), head_h));
-    let head_fill = if silenced {
-        Color32::from_gray(0x70)
-    } else {
-        FOLDER_YELLOW
-    };
-    g.rect_filled(
-        head,
-        egui::CornerRadius {
-            nw: round,
-            ne: round,
-            sw: 0,
-            se: 0,
+    let material = material_of(track, region);
+    let look = look_of(track, material, selected);
+    let body = hw_tracks::region(
+        g,
+        full,
+        &hw_tracks::RegionPaint {
+            material,
+            look,
+            selected,
+            muted: region.params.mute,
+            dim: silenced,
+            recording: false,
+            number,
+            name: &region.name,
+            lead: 14.0,
         },
-        head_fill,
     );
-    let dark = Color32::from_rgb(40, 30, 0);
-    // The triangle: pointing right when closed, down when opened.
-    let c = pos2(full.left() + 8.0, head.center().y);
-    let tri = if folder.open {
-        vec![
-            c + vec2(-3.5, -2.0),
-            c + vec2(3.5, -2.0),
-            c + vec2(0.0, 3.0),
-        ]
+    let faded = region.params.mute || silenced;
+    let head_ink = if selected {
+        theme::INK
+    } else if faded {
+        theme::INK2
     } else {
-        vec![
-            c + vec2(-2.0, -3.5),
-            c + vec2(-2.0, 3.5),
-            c + vec2(3.0, 0.0),
-        ]
+        theme::BONE
     };
-    g.add(Shape::convex_polygon(tri, dark, Stroke::NONE));
-    g.text(
-        head.left_center() + vec2(16.0, 0.0),
-        Align2::LEFT_CENTER,
-        &region.name,
-        FontId::proportional(10.5),
-        dark,
+    let head = Rect::from_min_max(full.min, pos2(full.right(), body.top()));
+    // The triangle: pointing right when closed, down when opened.
+    hw_tracks::disclosure(
+        g,
+        pos2(full.left() + 8.0, head.center().y),
+        folder.open,
+        head_ink,
     );
     // Where one stretch gives way to the next: a notch in the header and a line below it.
     for seg in folder.comp.iter().skip(1) {
@@ -1866,23 +1794,27 @@ fn draw_take_folder(
         if x <= full.left() || x >= full.right() {
             continue;
         }
-        g.line_segment(
-            [pos2(x, head.bottom() - 4.0), pos2(x, head.bottom())],
-            Stroke::new(1.0, dark),
+        g.vline(
+            x,
+            head.bottom() - 4.0..=head.bottom(),
+            Stroke::new(1.0, head_ink),
         );
-        g.line_segment(
-            [pos2(x, body.top()), pos2(x, body.bottom())],
-            Stroke::new(1.0, Color32::from_black_alpha(150)),
+        g.vline(
+            x,
+            body.top()..=body.bottom(),
+            Stroke::new(1.0, theme::INK.gamma_multiply(0.7)),
         );
     }
     // What the comp plays.
+    let mut ink = material.ink();
+    if faded {
+        ink = ink.gamma_multiply(0.45);
+    }
     let (lo, hi) = pitch_range(&region.notes);
-    let inner = Rect::from_min_max(
-        pos2(body.left(), body.top() + 2.0),
-        body.max - vec2(0.0, 2.0),
-    );
+    let inner = body.shrink2(vec2(0.0, 3.0));
+    let gb = g.with_clip_rect(body.intersect(g.clip_rect()));
     draw_note_lines(
-        g,
+        &gb,
         inner,
         full.left(),
         beat_px,
@@ -1891,35 +1823,26 @@ fn draw_take_folder(
         hi,
         ink,
     );
-    let border = if selected {
-        SELECTED_EDGE
-    } else {
-        Color32::from_black_alpha(110)
-    };
-    g.rect_stroke(
-        full,
-        egui::CornerRadius::same(round),
-        Stroke::new(1.0, border),
-        StrokeKind::Inside,
-    );
 
     // The takes, newest on top.
     if folder.open {
         for (take_idx, take) in folder.takes.iter().enumerate() {
             let row = take_row_rect(full, folder.takes.len(), take_idx);
-            g.rect_filled(row, 3.0, Color32::from_gray(0x3a));
-            let row_inner =
-                Rect::from_min_max(pos2(row.left(), row.top() + 2.0), row.max - vec2(0.0, 2.0));
+            hw_tracks::well(g, row, 3.0);
+            let row_inner = row.shrink2(vec2(0.0, 2.0));
             let (lo, hi) = pitch_range(&take.notes);
-            // The stretches of this take that the comp plays are lit.
+            // The stretches of this take that the comp plays are in the region material.
             for seg in folder.comp.iter().filter(|s| s.take == take_idx) {
                 let x0 = (full.left() + seg.start * beat_px).max(full.left());
                 let x1 = (full.left() + seg.end * beat_px).min(full.right());
                 if x1 > x0 {
-                    g.rect_filled(
-                        Rect::from_min_max(pos2(x0, row.top()), pos2(x1, row.bottom())),
-                        3.0,
-                        fill,
+                    let r = Rect::from_min_max(pos2(x0, row.top()), pos2(x1, row.bottom()));
+                    g.rect_filled(r, 2.0, look.body);
+                    g.rect_stroke(
+                        r,
+                        2.0,
+                        Stroke::new(1.0, theme::INK.gamma_multiply(0.75)),
+                        StrokeKind::Inside,
                     );
                 }
             }
@@ -1929,219 +1852,289 @@ fn draw_take_folder(
                     .iter()
                     .any(|s| s.take == take_idx && start >= s.start && start < s.end)
             };
+            let gr = g.with_clip_rect(row.intersect(g.clip_rect()));
             draw_note_lines(
-                g,
+                &gr,
                 row_inner,
                 full.left(),
                 beat_px,
                 take.notes.iter().filter(|n| used(n.start)),
                 lo,
                 hi,
-                ink,
+                material.ink(),
             );
             draw_note_lines(
-                g,
+                &gr,
                 row_inner,
                 full.left(),
                 beat_px,
                 take.notes.iter().filter(|n| !used(n.start)),
                 lo,
                 hi,
-                Color32::from_gray(0x86),
+                theme::PRINT,
             );
-            g.text(
-                row.left_top() + vec2(5.0, 1.0),
-                Align2::LEFT_TOP,
-                trf("Take {}", &[&(take_idx + 1)]),
-                FontId::proportional(9.5),
-                Color32::from_white_alpha(200),
+            // The take's number on a small bone plate, readable on either material.
+            let label = trf("Take {}", &[&(take_idx + 1)]).to_uppercase();
+            let gal = hw_tracks::galley(&gr, &label, Face::Silk, 10.0, 0.12, theme::INK);
+            let plate = Rect::from_min_size(
+                row.left_top() + vec2(4.0, 3.0),
+                vec2(gal.size().x + 6.0, row.height() - 6.0),
+            );
+            gr.rect_filled(plate, 1.5, theme::BONE);
+            gr.galley(
+                pos2(plate.left() + 3.0, plate.center().y - gal.size().y / 2.0),
+                gal,
+                theme::INK,
             );
         }
     }
 }
 
 /// Lowest and highest pitch of `notes` (a default span when there are none).
-fn pitch_range(notes: &[crate::model::Note]) -> (f32, f32) {
-    let lo = notes.iter().map(|n| n.pitch).min().unwrap_or(48) as f32;
-    let hi = notes.iter().map(|n| n.pitch).max().unwrap_or(72) as f32;
-    (lo, hi)
+fn pitch_range<'a>(notes: impl IntoIterator<Item = &'a crate::model::Note>) -> (f32, f32) {
+    let (lo, hi) = notes
+        .into_iter()
+        .fold((u8::MAX, 0u8), |(l, h), n| (l.min(n.pitch), h.max(n.pitch)));
+    if lo > hi {
+        (48.0, 72.0)
+    } else {
+        (lo as f32, hi as f32)
+    }
 }
 
+/// The notes of a region that show inside it: those that sound before its end, which moves
+/// when the region is shortened.
+fn visible_notes(region: &Region, len_beats: f32) -> impl Iterator<Item = &crate::model::Note> {
+    region
+        .notes
+        .iter()
+        .filter(move |n| n.start < len_beats && n.start + n.len > 0.0)
+}
+
+/// The part of its file an audio region plays and how that runs across the region on screen:
+/// what its waveform and Flex markers are drawn from. A cut or a trim changes the offset and
+/// the length, so the picture follows the edit instead of squeezing the whole file in.
+pub(crate) struct AudioSpan<'a> {
+    map: &'a prowave_engine::TempoMap,
+    /// Where the region starts, in quarter notes and in seconds.
+    start_beat: f64,
+    start_secs: f64,
+    /// Where in the file the region starts, and how many seconds of the file it plays.
+    offset: f64,
+    len: f64,
+    /// The whole file, in seconds.
+    file: f64,
+    reverse: bool,
+}
+
+impl<'a> AudioSpan<'a> {
+    /// The span of region `r` (`None` when it has no audio). `map` is `p.tempo_map()`.
+    pub(crate) fn of(p: &Project, map: &'a prowave_engine::TempoMap, r: &Region) -> Option<Self> {
+        let a = r.audio.as_ref()?;
+        let start_beat = p.region_start_beats(r);
+        let start_secs = map.seconds_at(start_beat);
+        let region_secs = (map.seconds_at(p.region_end_beats(r)) - start_secs).max(0.0);
+        let file = a.file.duration_secs().max(0.0);
+        let offset = r.params.offset_secs.max(0.0).min(file);
+        Some(Self {
+            map,
+            start_beat,
+            start_secs,
+            offset,
+            len: region_secs.min(file - offset),
+            file,
+            reverse: r.params.reverse,
+        })
+    }
+
+    /// Seconds into the region at `beats` quarter notes from its start.
+    fn secs_at(&self, beats: f64) -> f64 {
+        self.map.seconds_at(self.start_beat + beats) - self.start_secs
+    }
+
+    /// Quarter notes from the region's start at `secs` seconds into it.
+    fn beats_at(&self, secs: f64) -> f64 {
+        self.map.beat_at(self.start_secs + secs) - self.start_beat
+    }
+
+    /// Seconds into the region at which the file's second `f` is heard (`None` when the region
+    /// does not play it).
+    fn region_secs(&self, f: f64) -> Option<f64> {
+        let u = if self.reverse {
+            self.offset + self.len - f
+        } else {
+            f - self.offset
+        };
+        (0.0..=self.len).contains(&u).then_some(u)
+    }
+
+    /// The lowest and highest level the overview `peaks` (of the whole file) holds for the
+    /// part heard from `u0` to `u1` seconds into the region; `None` where nothing plays.
+    pub(crate) fn peak_range(&self, peaks: &[(f32, f32)], u0: f64, u1: f64) -> Option<(f32, f32)> {
+        let (u0, u1) = (u0.max(0.0), u1.min(self.len));
+        if peaks.is_empty() || self.file <= 0.0 || u1 <= u0 {
+            return None;
+        }
+        let (f0, f1) = if self.reverse {
+            (self.offset + self.len - u1, self.offset + self.len - u0)
+        } else {
+            (self.offset + u0, self.offset + u1)
+        };
+        let n = peaks.len();
+        let bin = |f: f64| f / self.file * n as f64;
+        let a = (bin(f0).floor().max(0.0) as usize).min(n - 1);
+        let b = (bin(f1).ceil() as usize).clamp(a + 1, n);
+        Some(
+            peaks[a..b]
+                .iter()
+                .fold((0f32, 0f32), |(l, h), p| (l.min(p.0), h.max(p.1))),
+        )
+    }
+}
+
+/// A region in its material, with its notes, hits or waveform, bar lines inside it at
+/// `bar_xs`, fades, Flex markers and the Drummer/Pattern mark.
 #[allow(clippy::too_many_arguments)]
 fn draw_region(
     g: &Painter,
     rr: Rect,
     full: Rect,
     track: &Track,
+    number: usize,
     region: &Region,
     fades: (f32, f32),
     beat_px: f32,
     selected: bool,
     recording: bool,
     silenced: bool,
+    bar_xs: &[f32],
+    span: Option<&AudioSpan>,
 ) {
-    // Muted regions are drawn grey, like Logic.
-    let base = if region.params.mute {
-        Color32::from_gray(0x6a)
-    } else {
-        track.color
-    };
-    let body = if recording {
-        // The region being recorded is red until the recording stops.
-        RECORDING_FILL
-    } else if silenced {
-        // Another track is soloed: dark grey body, grey content, name in the track colour.
-        Color32::from_rgb(0x2e, 0x2e, 0x30)
-            .lerp_to_gamma(Color32::WHITE, if selected { 0.06 } else { 0.0 })
-    } else if selected {
-        selected_fill(region_fill(base))
-    } else {
-        region_fill(base)
-    };
-    g.rect_filled(rr, 3.0, body);
-    let head_h = 14.0f32.min(rr.height() * 0.4);
-    let head = Rect::from_min_size(rr.min, vec2(rr.width(), head_h));
-    g.rect_filled(
-        head,
-        egui::CornerRadius {
-            nw: 3,
-            ne: 3,
-            sw: 0,
-            se: 0,
+    let material = material_of(track, region);
+    let muted = region.params.mute;
+    let faded = muted || silenced;
+    let body = hw_tracks::region(
+        g,
+        rr,
+        &hw_tracks::RegionPaint {
+            material,
+            look: look_of(track, material, selected),
+            selected,
+            muted,
+            dim: silenced,
+            recording,
+            number,
+            name: &region.name,
+            lead: 0.0,
         },
-        body.lerp_to_gamma(Color32::WHITE, if silenced { 0.03 } else { 0.0 }),
     );
-    let name_color = if silenced {
-        base.lerp_to_gamma(Color32::WHITE, 0.15)
+    let head = Rect::from_min_max(rr.min, pos2(rr.right(), body.top()));
+    let head_ink = if selected || recording {
+        theme::INK
+    } else if faded {
+        theme::INK2
     } else {
-        body.lerp_to_gamma(Color32::WHITE, if selected { 0.7 } else { 0.85 })
+        theme::BONE
     };
+    let gb = g.with_clip_rect(body.shrink2(vec2(1.0, 0.0)).intersect(g.clip_rect()));
+    // Bar lines inside the region.
+    for &x in bar_xs {
+        if x > body.left() + 1.0 && x < body.right() - 1.0 {
+            gb.vline(x, body.y_range(), Stroke::new(1.0, material.grid()));
+        }
+    }
     if let Some(generated) = &region.generated {
-        if head.width() > 44.0 {
+        if head.width() > 120.0 {
             draw_generated_mark(
                 g,
                 head,
                 matches!(generated.source, crate::model::Generator::Drummer(_)),
-                name_color,
+                head_ink,
             );
         }
     }
-    g.text(
-        head.left_center() + vec2(5.0, 0.0),
-        Align2::LEFT_CENTER,
-        &region.name,
-        FontId::proportional(10.5),
-        name_color,
-    );
-    let inner = Rect::from_min_max(
-        pos2(rr.left(), head.bottom() + 2.0),
-        rr.max - vec2(0.0, 2.0),
-    );
-    // A Flex edit: its mode in the corner of the name bar and its markers over the waveform.
-    if let Some((a, f)) = region
-        .audio
-        .as_ref()
-        .and_then(|a| a.flex.as_ref().map(|f| (a, f)))
-    {
-        if head.width() > 90.0 {
+    let inner = body.shrink2(vec2(0.0, 3.0));
+    // A Flex edit: its mode at the right of the header and its markers over the waveform.
+    if let Some(f) = region.audio.as_ref().and_then(|a| a.flex.as_ref()) {
+        if head.width() > 140.0 {
             let mark = if f.pitch.is_empty() {
-                crate::flex_edit::mode_label(f.mode).to_string()
+                crate::flex_edit::mode_label(f.mode).to_uppercase()
             } else {
-                format!("{} ♪", crate::flex_edit::mode_label(f.mode))
+                format!("{} ♪", crate::flex_edit::mode_label(f.mode).to_uppercase())
             };
-            g.text(
-                head.right_center() - vec2(5.0, 0.0),
+            hw_tracks::label(
+                g,
+                head.right_center() - vec2(6.0, 0.0),
                 Align2::RIGHT_CENTER,
-                mark,
-                FontId::proportional(9.5),
-                name_color,
+                &mark,
+                Face::Bold,
+                9.5,
+                0.06,
+                head_ink,
             );
         }
-        let secs = a.file.duration_secs().max(1e-3);
+        // A marker sits where the region plays its place in the file.
         for m in &f.markers {
-            let x = full.left() + (m.dst / secs) as f32 * full.width();
+            let Some(u) = span.and_then(|sp| sp.region_secs(m.dst)) else {
+                continue;
+            };
+            let x = full.left() + span.map_or(0.0, |sp| sp.beats_at(u)) as f32 * beat_px;
             if x > inner.left() && x < inner.right() {
-                g.line_segment(
-                    [pos2(x, inner.top()), pos2(x, inner.bottom())],
-                    Stroke::new(1.0, Color32::from_rgb(0xff, 0xb0, 0x30).gamma_multiply(0.7)),
+                gb.vline(
+                    x,
+                    inner.y_range(),
+                    Stroke::new(1.0, theme::ORANGE_DK.gamma_multiply(0.85)),
                 );
             }
         }
     }
     let ink = if recording {
-        Color32::from_rgb(236, 152, 155)
-    } else if silenced {
-        Color32::from_gray(0x8c)
+        theme::ORANGE_HI
+    } else if faded {
+        material.ink().gamma_multiply(0.45)
     } else {
-        // Logic draws the content in a pale tint of the region colour, not pure white.
-        body.lerp_to_gamma(Color32::WHITE, if selected { 0.75 } else { 0.6 })
+        material.ink()
     };
     let edit = region.audio.is_some() || track.kind == TrackKind::Audio;
-    if let Some(peaks) = region.audio.as_ref().and_then(|a| a.peaks.get()) {
+    if let (Some(peaks), Some(span)) = (region.audio.as_ref().and_then(|a| a.peaks.get()), span) {
         let gain = 10f32.powf(region.params.gain_db / 20.0);
-        let full_x = (full.left(), full.width());
-        draw_peaks(g, inner, full_x, peaks, gain, region.params.reverse, ink);
+        draw_peaks(&gb, inner, (full.left(), beat_px), span, peaks, gain, ink);
     } else if region.audio.is_some() {
-        g.line_segment(
-            [
-                pos2(inner.left(), inner.center().y),
-                pos2(inner.right(), inner.center().y),
-            ],
-            Stroke::new(1.0, ink),
+        gb.hline(
+            inner.x_range(),
+            inner.center().y,
+            Stroke::new(1.0, ink.gamma_multiply(0.5)),
         );
     } else if track.kind == TrackKind::Audio {
         // An audio region without a file has nothing to show.
     } else if !region.notes.is_empty() {
-        let lo = region.notes.iter().map(|n| n.pitch).min().unwrap_or(48) as f32;
-        let hi = region.notes.iter().map(|n| n.pitch).max().unwrap_or(72) as f32;
-        // Logic keeps a fixed, small step per semitone and centres the notes in the region.
-        let step = (2.0f32).min((inner.height() - 4.0) / (hi - lo).max(1.0));
-        let mid = (lo + hi) / 2.0;
-        for n in &region.notes {
-            let nx = full.left() + n.start * beat_px;
-            if nx > inner.right() || nx + n.len * beat_px < inner.left() {
-                continue;
-            }
-            let ny = inner.center().y - (n.pitch as f32 - mid) * step;
-            let nr = Rect::from_min_max(
-                pos2(nx.max(inner.left()), ny - 0.75),
-                pos2(
-                    (nx + (n.len * beat_px).max(2.0)).min(inner.right()),
-                    ny + 0.75,
-                ),
+        if material == Material::Drum {
+            draw_drum_hits(&gb, inner, full.left(), beat_px, &region.notes, ink);
+        } else {
+            // Scaled to the notes the region still shows, so a shortened region fills its height.
+            let (lo, hi) = pitch_range(visible_notes(region, full.width() / beat_px.max(1e-3)));
+            draw_note_lines(
+                &gb,
+                inner,
+                full.left(),
+                beat_px,
+                region.notes.iter(),
+                lo,
+                hi,
+                ink,
             );
-            g.rect_filled(nr, 0.0, ink);
         }
     }
     if edit {
-        draw_fades(g, rr, inner, full, region, fades, beat_px);
+        draw_fades(g, rr, inner, full, region, fades, beat_px, ink);
     }
-    let border = if recording {
-        Color32::from_rgb(120, 22, 22)
-    } else if selected {
-        SELECTED_EDGE
-    } else if silenced {
-        Color32::from_gray(0x44)
-    } else {
-        Color32::from_black_alpha(110)
-    };
-    if selected && !recording {
-        // Logic outlines a selected region in yellow-green with a dark line around it.
-        g.rect_stroke(
-            rr,
-            3.0,
-            Stroke::new(1.0, Color32::from_black_alpha(220)),
-            StrokeKind::Outside,
-        );
-    }
-    g.rect_stroke(rr, 3.0, Stroke::new(1.0, border), StrokeKind::Inside);
 }
 
 /// A small mark at the right of a region's header that tells a Drummer region (a drum with
 /// its sticks) from a Pattern region (a grid of steps).
 fn draw_generated_mark(g: &Painter, head: Rect, drummer: bool, color: Color32) {
-    let c = pos2(head.right() - 10.0, head.center().y);
-    let stroke = Stroke::new(1.0, color);
+    let c = pos2(head.right() - 12.0, head.center().y);
+    let stroke = Stroke::new(1.2, color);
     if drummer {
         g.rect_stroke(
             Rect::from_center_size(c + vec2(0.0, 1.5), vec2(8.0, 4.5)),
@@ -2155,15 +2148,16 @@ fn draw_generated_mark(g: &Painter, head: Rect, drummer: bool, color: Color32) {
         for row in 0..2 {
             for col in 0..3 {
                 let at = c + vec2(col as f32 * 3.6 - 3.6, row as f32 * 3.6 - 1.8);
-                g.rect_filled(Rect::from_center_size(at, vec2(2.6, 2.6)), 0.5, color);
+                g.rect_filled(Rect::from_center_size(at, vec2(2.6, 2.6)), 0.0, color);
             }
         }
     }
 }
 
-/// Real waveform from min/max peaks. `x0`/`full_w` describe the unclipped region.
 /// Shades what the region's fades take away: a triangle from the region's start up to where
-/// the fade in ends, and one down to the region's end for the fade out, with the curve's line.
+/// the fade in ends, and one down to the region's end for the fade out, with the curve's line
+/// in the region's print colour.
+#[allow(clippy::too_many_arguments)]
 fn draw_fades(
     g: &Painter,
     rr: Rect,
@@ -2172,13 +2166,14 @@ fn draw_fades(
     region: &Region,
     (fin, fout): (f32, f32),
     beat_px: f32,
+    ink: Color32,
 ) {
     if fin <= 0.0 && fout <= 0.0 {
         return;
     }
     let g = g.with_clip_rect(g.clip_rect().intersect(rr));
-    let shade = Color32::from_black_alpha(110);
-    let line = Stroke::new(1.2, Color32::from_white_alpha(220));
+    let shade = Color32::from_rgba_unmultiplied(20, 20, 19, 90);
+    let line = Stroke::new(1.5, ink);
     let curve = |x: f32| match region.params.fade_curve {
         prowave_engine::FadeCurve::Linear => x,
         prowave_engine::FadeCurve::EqualPower => (x * std::f32::consts::FRAC_PI_2).sin(),
@@ -2212,100 +2207,86 @@ fn draw_fades(
     }
 }
 
-/// Draws a recorded waveform: `full_x` is the left edge and width of the whole region on
-/// screen, `gain` its region gain (linear) and `reverse` plays it back to front.
+/// Draws a recorded waveform as the Hardware look prints it: ink columns 1.7 points wide
+/// every 3 points and a faint centre line. `x0` is the region's left edge on screen and
+/// `beat_px` points per quarter note; `span` says which part of the file's overview `peaks`
+/// each column shows, so a cut, trimmed or reversed region shows what it plays. `gain` is
+/// the region gain (linear).
 fn draw_peaks(
     g: &Painter,
     body: Rect,
-    (x0, full_w): (f32, f32),
+    (x0, beat_px): (f32, f32),
+    span: &AudioSpan,
     peaks: &[(f32, f32)],
     gain: f32,
-    reverse: bool,
     col: Color32,
 ) {
-    if peaks.is_empty() || full_w <= 0.0 {
+    if peaks.is_empty() || beat_px <= 0.0 {
         return;
     }
     let mid = body.center().y;
     let half = body.height() * 0.48;
-    let mut x = body.left().floor();
+    g.hline(
+        body.x_range(),
+        mid,
+        Stroke::new(0.6, col.gamma_multiply(0.4)),
+    );
+    const PITCH: f32 = 3.0;
+    let secs_at_x = |x: f32| span.secs_at(f64::from((x - x0) / beat_px));
+    // Columns on a grid that moves with the region, so they do not shimmer while scrolling.
+    let mut x = x0 + ((body.left() - x0) / PITCH).floor() * PITCH;
     while x < body.right() {
-        let a = (((x - x0) / full_w) * peaks.len() as f32).max(0.0) as usize;
-        if a >= peaks.len() {
+        if x + PITCH < body.left() {
+            x += PITCH;
+            continue;
+        }
+        let u0 = secs_at_x(x);
+        if u0 >= span.len {
             break;
         }
-        let b =
-            ((((x + 1.0 - x0) / full_w) * peaks.len() as f32) as usize).clamp(a + 1, peaks.len());
-        let (a, b) = if reverse {
-            (peaks.len() - b, peaks.len() - a)
-        } else {
-            (a, b)
+        let Some((lo, hi)) = span.peak_range(peaks, u0, secs_at_x(x + PITCH)) else {
+            x += PITCH;
+            continue;
         };
-        let (lo, hi) = peaks[a..b]
-            .iter()
-            .fold((0f32, 0f32), |(l, h), p| (l.min(p.0), h.max(p.1)));
         let (lo, hi) = (lo * gain, hi * gain);
+        let (top, bottom) = (mid - hi.min(1.0) * half, mid - lo.max(-1.0) * half);
+        let cx = x + PITCH / 2.0;
         g.line_segment(
             [
-                pos2(x, mid - hi.min(1.0) * half),
-                pos2(x, mid - lo.max(-1.0) * half),
+                pos2(cx, top.min(mid - 0.6)),
+                pos2(cx, bottom.max(mid + 0.6)),
             ],
-            Stroke::new(1.0, col),
+            Stroke::new(1.7, col),
         );
-        x += 1.0;
+        x += PITCH;
     }
 }
 
-/// Triangle pointing down (open) or right (folded), drawn as a shape so it needs no font glyph.
-fn disclosure_triangle(g: &Painter, c: Pos2, open: bool, col: Color32) {
-    let pts = if open {
-        vec![
-            c + vec2(-4.0, -2.5),
-            c + vec2(4.0, -2.5),
-            c + vec2(0.0, 3.5),
-        ]
-    } else {
-        vec![
-            c + vec2(-2.5, -4.0),
-            c + vec2(-2.5, 4.0),
-            c + vec2(3.5, 0.0),
-        ]
-    };
-    g.add(Shape::convex_polygon(pts, col, Stroke::NONE));
-}
-
-/// A folder's M and S buttons: they set the same state on every track inside the folder.
-fn folder_buttons(ui: &Ui, g: &Painter, p: &mut Project, i: usize, x: f32, y: f32, selected: bool) {
-    let size = vec2(18.0, 15.0);
+/// A folder's M and S keys: they set the same state on every track inside the folder.
+fn folder_buttons(
+    ui: &Ui,
+    g: &Painter,
+    p: &mut Project,
+    i: usize,
+    (x, y, size, pitch): (f32, f32, Vec2, f32),
+) {
     let (mute, solo) = (p.tracks[i].mute, p.tracks[i].solo);
-    if header_button(
-        ui,
-        g,
-        Rect::from_min_size(pos2(x, y), size),
-        (i, "m"),
-        "M",
-        mute,
-        MUTE_ON,
-        selected,
-    ) {
+    let m = Rect::from_min_size(pos2(x, y), size);
+    if header_button(ui, g, m, (i, "m"), "M", mute) {
         p.set_folder_flags(i, Some(!mute), None);
     }
-    if header_button(
-        ui,
-        g,
-        Rect::from_min_size(pos2(x + 21.0, y), size),
-        (i, "s"),
-        "S",
-        solo,
-        SOLO_ON,
-        selected,
-    ) {
+    let s = Rect::from_min_size(pos2(x + pitch, y), size);
+    if header_button(ui, g, s, (i, "s"), "S", solo) {
         p.set_folder_flags(i, None, Some(!solo));
     }
 }
 
-const SLIDER_W: f32 = 58.0;
-const SLIDER_H: f32 = 14.0;
+/// The header's M/S/R/I keys (4.7): 27×19 on a 31-point pitch.
+const KEY_W: f32 = 27.0;
+const KEY_H: f32 = 19.0;
+const KEY_PITCH: f32 = 31.0;
+/// The header's volume slider (4.9): an 80-point groove.
+const SLIDER_W: f32 = 80.0;
 
 /// Where 0 dB sits on a track header's volume slider (Logic puts unity about two thirds up).
 const SLIDER_UNITY: f32 = 0.65;
@@ -2330,8 +2311,69 @@ fn slider_to_db(f: f32) -> f32 {
     }
 }
 
+/// Where a track header's parts sit (4.2): the number key and the type well, both square and
+/// as tall as the row allows (46 points at the default height, never under 24), the name to
+/// their right with the M/S/R/I keys under it, and the volume slider and pan knob on the
+/// right. On a short row the keys move into a line before the slider, at 20×17.
+#[derive(Debug)]
+struct HeaderLayout {
+    pad: Rect,
+    well: Rect,
+    name_x: f32,
+    /// Centre line of the name.
+    name_y: f32,
+    /// Top of the M/S/R/I keys under the name; `None` on a short row.
+    keys_y: Option<f32>,
+    /// Top of a short row's keys, in a line ending before the slider.
+    inline_keys_y: Option<f32>,
+    slider: Rect,
+    pan: Pos2,
+}
+
+/// A short row's M/S/R/I keys, and their pitch.
+const SMALL_KEY: Vec2 = vec2(20.0, 17.0);
+const SMALL_KEY_PITCH: f32 = 22.0;
+
+fn header_layout(hdr: Rect, indent: f32) -> HeaderLayout {
+    let h = hdr.height();
+    let side = (h - 24.0).clamp(24.0, 46.0).min(h - 4.0);
+    let top = hdr.center().y - side / 2.0;
+    let pad = Rect::from_min_size(pos2(hdr.left() + NUM_W, top), vec2(side, side));
+    let well = Rect::from_min_size(pos2(pad.right() + 10.0 + indent, top), vec2(side, side));
+    let compact = h < 52.0;
+    HeaderLayout {
+        pad,
+        well,
+        name_x: well.right() + 14.0,
+        name_y: if compact { hdr.center().y } else { top + 9.0 },
+        keys_y: (!compact).then_some(pad.bottom() - 15.0),
+        inline_keys_y: (compact && h >= SMALL_KEY.y + 6.0)
+            .then_some(hdr.center().y - SMALL_KEY.y / 2.0 - 1.0),
+        slider: Rect::from_min_size(
+            pos2(hdr.right() - 148.0, hdr.center().y - 2.0),
+            vec2(SLIDER_W, 4.0),
+        ),
+        pan: pos2(hdr.right() - 34.0, hdr.center().y),
+    }
+}
+
+/// The type code printed after a track's keys (4.7).
+fn type_code(kind: TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Instrument => "IN",
+        TrackKind::Audio => "AU",
+        TrackKind::Drummer => "DR",
+        TrackKind::Bus => "BU",
+        TrackKind::Output => "ST",
+        TrackKind::Aux => "AX",
+        TrackKind::Folder => "FD",
+        TrackKind::Vca => "VC",
+        TrackKind::ExternalMidi => "EX",
+    }
+}
+
 /// Draws track `i`'s header and returns the response of its background (for the right-click
-/// menu; the buttons on it handle their own clicks).
+/// menu; the keys on it handle their own clicks).
 fn header(
     ui: &Ui,
     g: &Painter,
@@ -2351,67 +2393,72 @@ fn header(
         !p.header_hidden.contains(&HeaderPart::Volume),
         !p.header_hidden.contains(&HeaderPart::Pan),
     );
-    g.rect_filled(hdr, 0.0, if selected { HEADER_SEL } else { HEADER_BG });
-    g.line_segment(
-        [hdr.left_bottom(), hdr.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x2a)),
-    );
-    let num = Rect::from_min_size(hdr.min, vec2(NUM_W, hdr.height()));
-    if show_number {
-        g.text(
-            num.center(),
-            Align2::CENTER_CENTER,
-            (i + 1).to_string(),
-            FontId::proportional(12.0),
-            TEXT_DIM,
-        );
-    }
+    hw_tracks::header_bg(g, hdr, selected);
     let resp = ui.interact(hdr, id(("hdr", i)), Sense::click());
     if resp.clicked() || context_click(&resp) {
         p.selected_track = i;
     }
 
-    let h = hdr.height();
-    let icon_size = (h - 14.0).clamp(22.0, 40.0);
     let indent = f32::from(p.tracks[i].indent) * INDENT_W;
     let folder = p.tracks[i].kind == TrackKind::Folder;
-    let content_x = hdr.left() + NUM_W + 6.0 + indent;
+    let lay = header_layout(hdr, indent);
+    let pointer = ui.input(|inp| inp.pointer.hover_pos());
+    if show_number {
+        // The number key: pressing it selects the track (it is part of the header's click).
+        let over = pointer.is_some_and(|pt| lay.pad.contains(pt));
+        hw_tracks::number_pad(g, lay.pad, i + 1, selected, over && resp.hovered());
+    }
+    if show_icon {
+        hw_tracks::well(g, lay.well, 4.0);
+        let s = (lay.well.width() * 0.55).clamp(14.0, 26.0);
+        draw_icon(
+            g,
+            Rect::from_center_size(lay.well.center(), vec2(s, s)),
+            track_icon(&p.tracks[i]),
+        );
+    }
+
+    let mut name_x = lay.name_x;
     if folder {
         // Fold arrow: click to hide or show the tracks inside.
-        let arrow = Rect::from_center_size(pos2(content_x + 5.0, hdr.center().y), vec2(14.0, 20.0));
+        let arrow = Rect::from_center_size(pos2(name_x + 5.0, lay.name_y), vec2(16.0, 22.0));
         if ui
             .interact(arrow, id(("fold", i)), Sense::click())
             .clicked()
         {
             p.tracks[i].folded = !p.tracks[i].folded;
         }
-        disclosure_triangle(g, arrow.center(), !p.tracks[i].folded, TEXT_DIM);
+        hw_tracks::disclosure(g, arrow.center(), !p.tracks[i].folded, theme::INK2);
+        name_x += 18.0;
     }
-    let icon = Rect::from_min_size(
-        pos2(
-            content_x + if folder { 14.0 } else { 0.0 },
-            hdr.center().y - icon_size / 2.0,
-        ),
-        vec2(icon_size, icon_size),
-    );
-    if show_icon {
-        draw_icon(g, icon, track_icon(&p.tracks[i]));
-    }
-
-    let name_x = icon.right() + 10.0;
-    let compact = h < 46.0;
-    let name_y = if compact {
-        hdr.center().y
-    } else {
-        hdr.center().y - 9.0
+    // A short row's keys sit in a line before the slider (and its automation LED).
+    let inline_n = {
+        let t = &p.tracks[i];
+        if folder {
+            2
+        } else {
+            2 + usize::from(t.kind.has_regions()) + usize::from(t.kind == TrackKind::Audio)
+        }
     };
-    let name_w = hdr.right() - 122.0 - name_x;
+    let inline_x = lay.slider.left() - 18.0 - inline_n as f32 * SMALL_KEY_PITCH;
+    // Where the keys go: under the name, or in a line before the slider.
+    let key_row = match (lay.keys_y, lay.inline_keys_y, show_buttons) {
+        (Some(y), _, true) => Some((name_x, y, vec2(KEY_W, KEY_H), KEY_PITCH)),
+        (None, Some(y), true) => Some((inline_x, y, SMALL_KEY, SMALL_KEY_PITCH)),
+        _ => None,
+    };
+    let name_end = if lay.keys_y.is_none() && key_row.is_some() {
+        inline_x
+    } else {
+        lay.slider.left()
+    };
+    let name_w = (name_end - 8.0 - name_x).max(20.0);
     if show_name {
         // Double-click the name to rename the track: Return or clicking away keeps it, Escape
         // leaves it as it was.
         let name_rect = Rect::from_min_size(
-            pos2(name_x - 3.0, name_y - 10.0),
-            vec2(name_w.max(20.0) + 3.0, 20.0),
+            pos2(name_x - 3.0, lay.name_y - 11.0),
+            vec2(name_w + 3.0, 22.0),
         );
         let key = id(("rename", i));
         let name_now = p.tracks[i].name.clone();
@@ -2421,35 +2468,44 @@ fn header(
             name_rect,
             key,
             &name_now,
-            FontId::proportional(13.0),
+            theme::font(Face::Silk, 16.0),
         ) {
             p.tracks[i].name = name;
         }
         if !crate::widgets::renaming(ui, key) {
-            let name_galley =
-                g.layout_no_wrap(p.tracks[i].name.clone(), FontId::proportional(13.0), TEXT);
-            let clip = g.with_clip_rect(
-                Rect::from_min_size(pos2(name_x, hdr.top()), vec2(name_w.max(20.0), h))
-                    .intersect(g.clip_rect()),
-            );
-            clip.galley(
-                pos2(name_x, name_y - name_galley.size().y / 2.0),
-                name_galley,
-                TEXT,
+            // 16-point caps; a long name steps down to 14 before it is cut.
+            let upper = name_now.to_uppercase();
+            let width = |size: f32| {
+                hw_tracks::galley(g, &upper, Face::Silk, size, 0.09, theme::INK)
+                    .size()
+                    .x
+                    - 0.09 * size
+            };
+            let size = if width(16.0) <= name_w { 16.0 } else { 14.0 };
+            let shown = hw_tracks::fit(g, &upper, Face::Silk, size, 0.09, name_w);
+            hw_tracks::label(
+                g,
+                pos2(name_x, lay.name_y),
+                Align2::LEFT_CENTER,
+                &shown,
+                Face::Silk,
+                size,
+                0.09,
+                if silenced { theme::PRINT } else { theme::INK },
             );
         }
     }
 
     // A folder only has M and S, which act on everything inside it, and no volume or pan.
     if folder {
-        if !compact && show_buttons {
-            folder_buttons(ui, g, p, i, name_x, hdr.center().y + 3.0, selected);
+        if let Some(row) = key_row {
+            folder_buttons(ui, g, p, i, row);
         }
         return resp;
     }
 
-    // M S R (I) buttons under the name (compact tracks: hidden, like Logic at small heights).
-    // Mute, the fader and the pan show what their envelopes play (Live), with a red LED; one
+    // M S R (I) keys under the name (short tracks: hidden, like Logic at small heights).
+    // Mute, the slider and the pan show what their envelopes play (Live), with an LED; one
     // moved by hand overrides its envelope (see `automation::tick`).
     let audio = p.tracks[i].kind == TrackKind::Audio;
     let beat = p.position_beats;
@@ -2460,138 +2516,98 @@ fn header(
         shown(t, AutoTarget::Volume),
         shown(t, AutoTarget::Pan),
     );
-    if !compact && show_buttons {
-        let by = hdr.center().y + 3.0;
-        let mut bx = name_x;
-        let size = vec2(18.0, 15.0);
-        if header_button(
-            ui,
-            g,
-            Rect::from_min_size(pos2(bx, by), size),
-            (i, "m"),
-            "M",
-            muted,
-            MUTE_ON,
-            selected,
-        ) {
+    if let Some((x0, by, size, pitch)) = key_row {
+        let mut bx = x0;
+        let at = |x: f32| Rect::from_min_size(pos2(x, by), size);
+        if header_button(ui, g, at(bx), (i, "m"), "M", muted) {
             t.mute = !muted;
         }
-        crate::automation_ui::led(g, pos2(bx + 2.0, by + 2.0), &t.auto, AutoTarget::Mute);
-        bx += 21.0;
-        if header_button(
-            ui,
+        crate::automation_ui::led(
             g,
-            Rect::from_min_size(pos2(bx, by), size),
-            (i, "s"),
-            "S",
-            t.solo,
-            SOLO_ON,
-            selected,
-        ) {
+            pos2(bx + size.x - 3.0, by + 3.0),
+            &t.auto,
+            AutoTarget::Mute,
+        );
+        bx += pitch;
+        if header_button(ui, g, at(bx), (i, "s"), "S", t.solo) {
             t.solo = !t.solo;
         }
-        bx += 21.0;
+        bx += pitch;
         // Aux and Folder tracks hold no regions, so there is nothing to record into.
-        if t.kind.has_regions()
-            && header_button(
-                ui,
-                g,
-                Rect::from_min_size(pos2(bx, by), size),
-                (i, "r"),
-                "R",
-                t.rec,
-                REC_ON,
-                selected,
-            )
-        {
-            t.rec = !t.rec;
+        if t.kind.has_regions() {
+            if header_button(ui, g, at(bx), (i, "r"), "R", t.rec) {
+                t.rec = !t.rec;
+            }
+            bx += pitch;
         }
         if audio {
-            bx += 21.0;
-            if header_button(
-                ui,
-                g,
-                Rect::from_min_size(pos2(bx, by), size),
-                (i, "i"),
-                "I",
-                t.monitor,
-                MON_ON,
-                selected,
-            ) {
+            if header_button(ui, g, at(bx), (i, "i"), "I", t.monitor) {
                 t.monitor = !t.monitor;
             }
+            bx += pitch;
+        }
+        let code_room = lay.slider.left() - 12.0 - bx;
+        if lay.keys_y.is_some() && code_room > 16.0 {
+            hw_tracks::label(
+                g,
+                pos2(bx + 3.0, by + size.y / 2.0 + 1.0),
+                Align2::LEFT_CENTER,
+                type_code(t.kind),
+                Face::Lcd,
+                10.0,
+                0.1,
+                theme::PRINT,
+            );
         }
     }
 
     if show_volume {
-        // Volume slider (dB, -60..+6; double-click resets to 0 dB) and pan knob.
-        // Logic's slider: a dark pill with a grey thumb that stays inside it.
-        let sl = Rect::from_min_size(
-            pos2(hdr.right() - 98.0, hdr.center().y - SLIDER_H / 2.0),
-            vec2(SLIDER_W, SLIDER_H),
-        );
-        let travel = (sl.left() + SLIDER_H / 2.0, sl.right() - SLIDER_H / 2.0);
+        // Volume slider (dB, -60..+6; double-click resets to 0 dB). Its groove lights up to the
+        // track's level, a meter in the slot.
+        let sl = lay.slider;
         let resp = ui.interact(
-            sl.expand2(vec2(4.0, 6.0)),
+            sl.expand2(vec2(8.0, 11.0)),
             id(("vol", i)),
             Sense::click_and_drag(),
         );
         if let Some(pt) = resp.interact_pointer_pos() {
-            let f = (pt.x - travel.0) / (travel.1 - travel.0);
+            let f = (pt.x - sl.left()) / sl.width();
             t.volume_db = slider_to_db(f.clamp(0.0, 1.0));
         }
         if resp.double_clicked() {
             t.volume_db = 0.0;
         }
-        g.rect_filled(sl, SLIDER_H / 2.0, Color32::from_rgb(55, 54, 54));
-        // Level meter inside the pill, as in Logic: two thin bars (L over R) that follow the
-        // slider's own scale, green, yellow from -6 dB and red above 0 dB.
         let silent = t.mute || silenced;
-        for (k, peak) in [peaks.0, peaks.1].into_iter().enumerate() {
-            let db = crate::mixer::lin_to_db(peak);
+        let levels = [peaks.0, peaks.1].map(|pk| {
+            let db = crate::mixer::lin_to_db(pk);
             if db <= -60.0 {
-                continue;
+                0.0
+            } else {
+                db_to_slider(db)
             }
-            let y = sl.center().y - 3.0 + k as f32 * 3.5;
-            let x0 = sl.left() + 3.0;
-            let x_at = |db: f32| x0 + (sl.right() - 3.0 - x0) * db_to_slider(db);
-            let mut from = -60.0f32;
-            for edge in [-6.0f32, 0.0, 6.0] {
-                let to = db.min(edge);
-                if to > from {
-                    let r = Rect::from_min_max(pos2(x_at(from), y), pos2(x_at(to), y + 2.5));
-                    let color = if silent {
-                        Color32::from_gray(0x70)
-                    } else {
-                        crate::mixer::meter_colour(to - 0.01)
-                    };
-                    g.rect_filled(r, 1.0, color);
-                }
-                from = edge;
-            }
-        }
-        let knob = pos2(
-            travel.0 + (travel.1 - travel.0) * db_to_slider(vol_shown),
-            sl.center().y,
+        });
+        hw_tracks::slider(
+            g,
+            sl,
+            db_to_slider(vol_shown),
+            Some((&levels, &slider_to_db)),
+            silent,
         );
+        // Its automation LED sits over the slider's left end, clear of the cap (as the pan's
+        // sits at the knob's corner), not beside the slider.
         crate::automation_ui::led(
             g,
-            pos2(sl.left() - 5.0, sl.center().y),
+            pos2(sl.left() + 3.0, sl.center().y - 15.0),
             &t.auto,
             AutoTarget::Volume,
-        );
-        g.circle_filled(knob, SLIDER_H / 2.0 - 1.0, Color32::from_rgb(136, 134, 135));
-        g.circle_stroke(
-            knob,
-            SLIDER_H / 2.0 - 1.0,
-            Stroke::new(1.0, Color32::from_rgb(98, 97, 97)),
         );
     }
 
     if show_pan {
-        let kc = pos2(hdr.right() - 22.0, hdr.center().y);
+        let kc = lay.pan;
+        let d = (hdr.height() * 0.4).clamp(20.0, 28.0);
         let kresp = ui.interact(
-            Rect::from_center_size(kc, vec2(22.0, 22.0)),
+            Rect::from_center_size(kc, vec2(d + 6.0, d + 6.0)),
             id(("pan", i)),
             Sense::click_and_drag(),
         );
@@ -2601,8 +2617,13 @@ fn header(
         if kresp.double_clicked() {
             t.pan = 0.0;
         }
-        crate::widgets::draw_knob(g, kc, 9.0, pan_shown);
-        crate::automation_ui::led(g, kc + vec2(10.0, -9.0), &t.auto, AutoTarget::Pan);
+        hw_tracks::knob(g, kc, d, pan_shown, false);
+        crate::automation_ui::led(
+            g,
+            kc + vec2(d / 2.0 + 2.0, -d / 2.0),
+            &t.auto,
+            AutoTarget::Pan,
+        );
     }
     resp
 }
@@ -2610,34 +2631,106 @@ fn header(
 // ------------------------------------------------------------------ main view
 
 /// Height of the Master strip (Track > Show Master Track).
-const MASTER_STRIP_H: f32 = 36.0;
+const MASTER_STRIP_H: f32 = 56.0;
 /// The name strip at the top of a region: a click there takes the region in Automation Mode.
 const REGION_TITLE_H: f32 = 15.0;
 
-/// The Master strip: its name and the master fader, the same control as the transport's.
+/// The gap between a track row's edges and its regions (4 points at the default height).
+fn region_inset(row_h: f32) -> f32 {
+    (row_h * 0.06).clamp(1.0, 4.0).round()
+}
+
+/// The Master strip, a track row of its own: in the track list its plate (black, an orange
+/// "ST" chip and an orange underline), the master level (the transport's: a meter over a
+/// fader) and VOL / PEAK readouts; the arrange side is floor.
 fn master_strip(ui: &mut Ui, p: &mut Project, rect: Rect, meters: &crate::mixer::Meters) {
     let g = ui.painter_at(rect);
-    g.rect_filled(rect, 0.0, HEADER_BG);
-    g.line_segment(
-        [rect.left_top(), rect.right_top()],
-        Stroke::new(1.0, Color32::from_gray(0x2a)),
+    let head = Rect::from_min_max(rect.min, pos2(rect.left() + HEADER_W, rect.bottom()));
+    let lane = Rect::from_min_max(pos2(head.right(), rect.top()), rect.max);
+    g.rect_filled(lane, 0.0, hw_tracks::FLOOR);
+    hw_tracks::header_bg(&g, head, false);
+    hw_tracks::seam_wide_v(&g, head.right(), head.y_range());
+    hw::seam_h(&g, rect.x_range(), rect.top());
+    let plate = Rect::from_min_size(
+        pos2(head.left() + NUM_W, rect.center().y - 13.0),
+        vec2(118.0, 26.0),
     );
-    g.text(
-        pos2(rect.left() + 12.0, rect.center().y),
+    hw_tracks::drop_shadow(&g, plate, 3.0, 2.0, 40);
+    hw::gradient(
+        &g,
+        plate,
+        3.0,
+        Color32::from_rgb(0x2d, 0x2b, 0x28),
+        Color32::from_rgb(0x16, 0x15, 0x14),
+    );
+    g.rect_filled(
+        Rect::from_min_max(
+            pos2(plate.left(), plate.bottom() - 3.0),
+            plate.right_bottom(),
+        ),
+        egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: 3,
+            se: 3,
+        },
+        theme::ORANGE,
+    );
+    let chip = Rect::from_min_size(
+        pos2(plate.left() + 6.0, plate.center().y - 7.5),
+        vec2(20.0, 13.0),
+    );
+    g.rect_filled(chip, 2.0, theme::ORANGE);
+    hw_tracks::label(
+        &g,
+        chip.center(),
+        Align2::CENTER_CENTER,
+        "ST",
+        Face::Lcd,
+        9.5,
+        0.06,
+        theme::INK,
+    );
+    hw_tracks::label(
+        &g,
+        pos2(chip.right() + 8.0, chip.center().y),
         Align2::LEFT_CENTER,
-        tr("Master"),
-        FontId::proportional(13.0),
-        TEXT,
+        &tr("Master").to_uppercase(),
+        Face::Silk,
+        14.0,
+        0.08,
+        theme::BONE,
     );
-    let slider = Rect::from_min_max(
-        pos2(rect.left() + 96.0, rect.center().y - 11.0),
-        pos2(rect.right() - 16.0, rect.center().y + 11.0),
+    // VOL and PEAK at the right of the track list, the level control between.
+    let ro = Rect::from_min_size(
+        pos2(head.right() - NUM_W - 112.0, rect.center().y - 15.0),
+        vec2(54.0, 30.0),
+    );
+    let pk = ro.translate(vec2(58.0, 0.0));
+    let db = |a: f32| 20.0 * a.max(1e-6).log10();
+    let num = |d: f32| {
+        if d <= -60.0 {
+            "-INF".to_string()
+        } else {
+            format!("{d:.1}")
+        }
+    };
+    hw::lcd_readout(&g, ro, "VOL", &num(db(p.master_vol)));
+    hw::lcd_readout(
+        &g,
+        pk,
+        "PEAK",
+        &num(db(meters.master.0.max(meters.master.1))),
+    );
+    let level = Rect::from_min_max(
+        pos2(plate.right() + 14.0, rect.center().y - 20.0),
+        pos2(ro.left() - 12.0, rect.center().y + 20.0),
     );
     crate::transport::master_volume(
         ui,
         &g,
         p,
-        slider,
+        level,
         Some(meters.master),
         id(("tracks", "master")),
     );
@@ -2682,10 +2775,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             );
             let lane = Rect::from_min_max(pos2(head.right(), top), full.max);
             let g = ui.painter_at(head);
-            g.rect_filled(head, 0.0, HEADER_BG);
+            hw_tracks::header_bg(&g, head, false);
             let cr = Rect::from_min_size(
                 pos2(head.left() + NUM_W, head.top() + 4.0),
-                vec2(HEADER_W - NUM_W, crate::automation_ui::CHOOSER_H),
+                vec2(HEADER_W - 2.0 * NUM_W, crate::automation_ui::CHOOSER_H),
             );
             let strip_key = crate::automation::Strip::Master;
             crate::automation_ui::choosers(ui, &g, p, &mut s.auto, strip_key, cr, None);
@@ -2757,7 +2850,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     v.scroll_y = v
         .scroll_y
         .clamp(0.0, (content_h - lanes.height() + 40.0).max(0.0));
-    v.scroll_x = v.scroll_x.clamp(0.0, 1000.0 * v.bar_w);
+    // As far right as a project can reach (Logic: 9999 bars).
+    v.scroll_x = v
+        .scroll_x
+        .clamp(0.0, crate::model::MAX_SIG_BAR as f32 * v.bar_w);
 
     let beat_px = v.bar_w / bpb as f32;
     // Catch: page the view when the playhead leaves it.
@@ -2773,7 +2869,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
 
     // ---- lanes background + grid
     let g = ui.painter_at(lanes);
-    g.rect_filled(lanes, 0.0, LANE_BG);
+    g.rect_filled(lanes, 0.0, hw_tracks::FLOOR);
     let bars = p.bars_in(beat_of(lanes.left()), beat_of(lanes.right()));
     for (i, &(top, row_h)) in rows.iter().enumerate() {
         if row_h <= 0.0 {
@@ -2782,32 +2878,39 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         let y = lanes.top() + top - scroll_y;
         let row = Rect::from_min_size(pos2(lanes.left(), y), vec2(lanes.width(), row_h));
         if p.selected_track == i {
-            g.rect_filled(row, 0.0, LANE_SEL);
+            g.rect_filled(row, 0.0, hw_tracks::FLOOR_SEL);
         }
         if p.tracks[i].kind == TrackKind::Folder {
-            g.rect_filled(row, 0.0, Color32::from_white_alpha(10));
+            g.rect_filled(row, 0.0, Color32::from_white_alpha(18));
         }
-        g.line_segment(
-            [row.left_bottom(), row.right_bottom()],
-            Stroke::new(1.0, Color32::from_gray(0x22)),
+        g.hline(
+            row.x_range(),
+            row.bottom() - 0.5,
+            Stroke::new(1.0, hw_tracks::LANE_LINE),
         );
     }
+    // Bar lines at 22 % ink, beats at 7 %.
     for bar in &bars {
-        let x = x_of(bar.start);
-        g.line_segment(
-            [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
-            Stroke::new(1.0, Color32::from_gray(0x38)),
-        );
+        let x = x_of(bar.start).round() + 0.5;
+        g.vline(x, lanes.y_range(), Stroke::new(1.0, hw_tracks::BAR_LINE));
         if beat_px * bar.unit as f32 >= 14.0 {
             for k in 1..bar.num {
-                let xb = x_of(bar.start + k as f64 * bar.unit);
-                g.line_segment(
-                    [pos2(xb, lanes.top()), pos2(xb, lanes.bottom())],
-                    Stroke::new(1.0, Color32::from_gray(0x30)),
-                );
+                let xb = x_of(bar.start + k as f64 * bar.unit).round() + 0.5;
+                g.vline(xb, lanes.y_range(), Stroke::new(1.0, hw_tracks::BEAT_LINE));
             }
         }
     }
+    // The cycle tints the lanes it spans.
+    if p.cycle {
+        let band = Rect::from_min_max(
+            pos2(x_of(p.cycle_start).max(lanes.left()), lanes.top()),
+            pos2(x_of(p.cycle_end).min(lanes.right()), lanes.bottom()),
+        );
+        if band.width() > 0.0 {
+            g.rect_filled(band, 0.0, hw_tracks::CYCLE_TINT);
+        }
+    }
+    let bar_xs: Vec<f32> = bars.iter().map(|b| x_of(b.start).round() + 0.5).collect();
 
     // Click on an empty lane: select that track, deselect regions.
     let lane_resp = ui.interact(lanes, id("lanes"), Sense::click());
@@ -2854,6 +2957,56 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             snap_to(b, step)
         }
     };
+    // Seconds against beats, for drawing what audio regions play.
+    let tempo_map = p.tempo_map();
+    // The repeats of looped regions, ghosted and under every region, each with a mark where it
+    // begins (Logic: Loop).
+    for (ti, &(top, row_h)) in rows.iter().enumerate() {
+        let track = &p.tracks[ti];
+        if row_h <= 0.0 || track.regions.iter().all(|r| r.params.loop_beats <= 0.0) {
+            continue;
+        }
+        let y = lanes.top() + top - scroll_y;
+        let base_h =
+            row_h - take_rows_height(track) - crate::automation_ui::lanes_height(&s.auto, track);
+        let inset = region_inset(base_h);
+        for (ri, region) in track.regions.iter().enumerate() {
+            let len = p.region_len_beats(region);
+            for (at, span) in p.loop_repeats(region) {
+                let full = Rect::from_min_max(
+                    pos2(x_of(at), y + inset),
+                    pos2(x_of(at + len), y + base_h - inset),
+                );
+                let shown = Rect::from_min_max(full.min, pos2(x_of(at + span), full.bottom()))
+                    .intersect(lanes);
+                if shown.width() <= 0.0 || shown.height() <= 0.0 {
+                    continue;
+                }
+                let paint = full.shrink2(vec2(1.0, 0.0));
+                draw_region(
+                    &g.with_clip_rect(shown),
+                    paint,
+                    full,
+                    track,
+                    ti + 1,
+                    region,
+                    p.effective_fades(ti, ri),
+                    beat_px,
+                    false,
+                    false,
+                    true,
+                    &bar_xs,
+                    AudioSpan::of(p, &tempo_map, region).as_ref(),
+                );
+                crate::region_loop::repeat_mark(
+                    &g.with_clip_rect(lanes),
+                    full.left(),
+                    full.top(),
+                    full.bottom(),
+                );
+            }
+        }
+    }
     let mut moved = false;
     let mut tool_act: Option<ToolAct> = None;
     for (ti, &(top, row_h)) in rows.iter().enumerate() {
@@ -2867,12 +3020,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         let base_h = row_h
             - take_rows_height(&p.tracks[ti])
             - crate::automation_ui::lanes_height(&s.auto, &p.tracks[ti]);
+        let inset = region_inset(base_h);
         for ri in 0..p.tracks[ti].regions.len() {
             let start_beat = p.region_start_beats(&p.tracks[ti].regions[ri]);
             let len_beats = p.region_len_beats(&p.tracks[ti].regions[ri]);
             let full = Rect::from_min_max(
-                pos2(x_of(start_beat), y + 1.0),
-                pos2(x_of(start_beat + len_beats), y + base_h - 1.0),
+                pos2(x_of(start_beat), y + inset),
+                pos2(x_of(start_beat + len_beats), y + base_h - inset),
             );
             let rr = full.intersect(lanes);
             if rr.width() <= 0.0 || rr.height() <= 0.0 {
@@ -2905,10 +3059,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             if fade_tool && resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
-            // The region's right end: drag to shorten or lengthen it, Option-drag to stretch its
-            // audio to fit (Logic: Time Stretch by dragging).
+            // The lower half of the region's right end: drag to shorten or lengthen it,
+            // Option-drag to stretch its audio to fit (Logic: Time Stretch by dragging). The
+            // upper half loops it (below).
             if v.tool == TrackTool::Pointer && (full.right() - rr.right()).abs() < 0.5 {
-                let grip = Rect::from_min_max(pos2(rr.right() - 5.0, rr.top()), rr.max);
+                let grip = Rect::from_min_max(pos2(rr.right() - 5.0, full.center().y), rr.max);
                 let er = ui.interact(grip, id(("region_end", ti, ri)), Sense::drag());
                 if er.hovered() || er.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -2920,7 +3075,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                     let x = x_of(end);
                     ui.painter_at(lanes).line_segment(
                         [pos2(x, full.top()), pos2(x, full.bottom())],
-                        Stroke::new(2.0, Color32::from_rgb(0xf0, 0xc8, 0x40)),
+                        Stroke::new(2.0, theme::ORANGE),
                     );
                 }
                 if er.drag_stopped() {
@@ -2928,6 +3083,19 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                         tool_act = Some(ToolAct::End(t, r, end, stretch));
                     }
                 }
+            }
+            if v.tool == TrackTool::Pointer {
+                moved |= crate::region_loop::loop_handle(
+                    ui,
+                    p,
+                    (ti, ri),
+                    full,
+                    lanes,
+                    id(("region_loop", ti, ri)),
+                    &x_of,
+                    &beat_of,
+                    &snap_pos,
+                );
             }
             let click_tool = !matches!(v.tool, TrackTool::Pointer | TrackTool::Fade);
             if click_tool && resp.hovered() {
@@ -2948,7 +3116,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                     field,
                     id(("region_name", ti, ri)),
                     &name_now,
-                    FontId::proportional(11.0),
+                    theme::font(Face::Silk, 12.0),
                     resp.clicked(),
                 ) {
                     p.tracks[ti].regions[ri].name = name;
@@ -3017,8 +3185,15 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                         group.push((ti, ri, start_beat));
                     }
                     v.group_drag = group;
+                    v.drag_by = (0.0, 0);
                 }
+                // Option held: a copy (Logic). Taken when the button is let go, so pressing or
+                // letting go of Option on the way switches between moving and copying.
+                let copy = ui.input(|i| i.modifiers.alt);
                 if resp.dragged() {
+                    if copy {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
+                    }
                     if let Some(pt) = resp.interact_pointer_pos() {
                         let nb = snap_pos((beat_of(pt.x) - v.grab_beats).max(0.0));
                         let grabbed = v
@@ -3027,12 +3202,25 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                             .find(|g| (g.0, g.1) == (ti, ri))
                             .map_or(start_beat, |g| g.2);
                         let delta = nb - grabbed;
+                        // The track under the pointer, if every region fits on the track
+                        // as far from its own.
+                        let down = row_at(&rows, pt.y - lanes.top() + scroll_y)
+                            .map_or(v.drag_by.1, |row| row as isize - ti as isize);
+                        let down = if crate::region_edit::fits_rows(p, &v.group_drag, down) {
+                            down
+                        } else {
+                            0
+                        };
+                        v.drag_by = (delta, down);
+                        // A move on the same tracks takes the regions along; a copy or a move
+                        // to other tracks leaves them in place, and what lands follows the
+                        // pointer (drawn after the regions).
+                        let shown = if copy || down != 0 { 0.0 } else { delta };
                         let moves: Vec<(usize, usize, f32)> = v
                             .group_drag
                             .iter()
                             .map(|&(gt, gr, s0)| {
-                                let bar = p.beats_to_bar((s0 + delta).max(0.0)) as f32 + 1.0;
-                                (gt, gr, bar)
+                                (gt, gr, crate::region_edit::landing_bar(p, s0, shown))
                             })
                             .collect();
                         for (gt, gr, bar) in moves {
@@ -3043,14 +3231,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                     }
                 }
                 if resp.drag_stopped() {
+                    // Placed after this frame's regions (a move to another track takes the
+                    // region off this one).
                     let group = std::mem::take(&mut v.group_drag);
-                    crate::automation_ui::follow_moves(p, &s.auto, &group);
-                    moved = true;
-                    // Dropped on another audio region: X-Fade crossfades them, the other
-                    // modes leave them overlapping.
-                    if p.tracks[ti].kind == TrackKind::Audio && overlaps_another(p, ti, ri) {
-                        p.tracks[ti].regions[ri].params.crossfade = v.drag_mode == DragMode::XFade;
-                    }
+                    let (delta, down) = std::mem::take(&mut v.drag_by);
+                    tool_act = Some(ToolAct::Drop(group, delta, down, copy));
                 }
             }
             let (is_audio, muted) = (
@@ -3140,6 +3325,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                         &g,
                         full,
                         &p.tracks[ti],
+                        ti + 1,
                         &p.tracks[ti].regions[ri],
                         folder,
                         beat_px,
@@ -3150,24 +3336,88 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                 }
             }
             let tr = &p.tracks[ti];
+            // Drawn a point in from each end, so neighbouring regions read as separate parts;
+            // where the view cuts a region, its edge stays out of sight.
+            let paint = full
+                .shrink2(vec2(1.0, 0.0))
+                .intersect(lanes.expand2(vec2(4.0, 0.0)));
             draw_region(
                 &g,
-                rr,
+                paint,
                 full,
                 tr,
+                ti + 1,
                 &tr.regions[ri],
                 p.effective_fades(ti, ri),
                 beat_px,
                 selected,
                 rec_targets.contains(&(ti, ri)),
                 silenced_by_solo(p, ti),
+                &bar_xs,
+                AudioSpan::of(p, &tempo_map, &tr.regions[ri]).as_ref(),
             );
+        }
+    }
+    // What a copy or a move to other tracks lands as, following the pointer.
+    let copying = ui.input(|i| i.modifiers.alt);
+    if !v.group_drag.is_empty() && (copying || v.drag_by.1 != 0) {
+        let (delta, down) = v.drag_by;
+        for &(gt, gr, s0) in &v.group_drag {
+            let Some(region) = p.tracks.get(gt).and_then(|t| t.regions.get(gr)) else {
+                continue;
+            };
+            let to = gt.saturating_add_signed(down);
+            let Some(&(top, row_h)) = rows.get(to) else {
+                continue;
+            };
+            let y = lanes.top() + top - scroll_y;
+            let base_h = row_h
+                - take_rows_height(&p.tracks[to])
+                - crate::automation_ui::lanes_height(&s.auto, &p.tracks[to]);
+            let inset = region_inset(base_h);
+            let start = (s0 + delta).max(0.0);
+            let full = Rect::from_min_max(
+                pos2(x_of(start), y + inset),
+                pos2(x_of(start + p.region_len_beats(region)), y + base_h - inset),
+            );
+            let paint = full
+                .shrink2(vec2(1.0, 0.0))
+                .intersect(lanes.expand2(vec2(4.0, 0.0)));
+            if paint.width() > 0.0 && paint.height() > 0.0 {
+                draw_region(
+                    &g,
+                    paint,
+                    full,
+                    &p.tracks[to],
+                    to + 1,
+                    region,
+                    p.effective_fades(gt, gr),
+                    beat_px,
+                    true,
+                    false,
+                    false,
+                    &bar_xs,
+                    AudioSpan::of(p, &tempo_map, region).as_ref(),
+                );
+            }
         }
     }
     if moved {
         p.song_rev += 1;
     }
     match tool_act {
+        Some(ToolAct::Drop(group, delta, down, copy)) => {
+            let xfade = v.drag_mode == DragMode::XFade;
+            let landed =
+                crate::region_edit::drop_regions(p, &s.auto, &group, delta, down, copy, xfade);
+            // The copies (or the regions on their new tracks) are what is selected.
+            if copy || down != 0 {
+                v.select_many(&landed);
+                if let Some(&(t, _)) = landed.first() {
+                    p.selected_track = t;
+                }
+            }
+        }
         Some(ToolAct::Erase(ti, ri)) => {
             if ri < p.tracks[ti].regions.len() {
                 p.tracks[ti].regions.remove(ri);
@@ -3286,9 +3536,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             let base_h = row_h - take_rows_height(t) - below;
             // The track's own lane: over its regions, under their name strips (a click there
             // still takes the region).
+            let inset = region_inset(base_h);
             let main = Rect::from_min_max(
-                pos2(lanes.left(), y + REGION_TITLE_H),
-                pos2(lanes.right(), y + base_h - 1.0),
+                pos2(lanes.left(), y + inset + REGION_TITLE_H),
+                pos2(lanes.right(), y + base_h - inset),
             );
             let shown = t.auto.shown;
             let extra = t.auto.extra.clone();
@@ -3350,7 +3601,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
 
     // ---- headers
     let gh = ui.painter_at(headers);
-    gh.rect_filled(headers, 0.0, Color32::from_gray(0x3a));
+    gh.rect_filled(headers, 0.0, hw_tracks::PANEL_INSPECTOR);
     for (i, &(top, row_h)) in rows.iter().enumerate() {
         if row_h <= 0.0 {
             continue;
@@ -3371,18 +3622,17 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         if chooser > 0.0 {
             let strip = crate::automation::Strip::Track(i);
             let selected = p.selected_track == i;
-            let bg = if selected { HEADER_SEL } else { HEADER_BG };
             let cr = Rect::from_min_size(
                 pos2(headers.left() + NUM_W, hdr.bottom()),
-                vec2(HEADER_W - NUM_W, chooser),
+                vec2(HEADER_W - 2.0 * NUM_W, chooser),
             );
-            gh.rect_filled(
+            hw_tracks::header_bg(
+                &gh,
                 Rect::from_min_max(
                     pos2(headers.left(), hdr.bottom()),
                     pos2(headers.left() + HEADER_W, y + row_h),
                 ),
-                0.0,
-                bg,
+                selected,
             );
             crate::automation_ui::choosers(ui, &gh, p, &mut s.auto, strip, cr, None);
             let n = p.tracks[i].auto.extra.len();
@@ -3392,14 +3642,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                         headers.left() + NUM_W,
                         y + row_h - below + k as f32 * crate::automation_ui::LANE_H,
                     ),
-                    vec2(HEADER_W - NUM_W, crate::automation_ui::CHOOSER_H),
+                    vec2(HEADER_W - 2.0 * NUM_W, crate::automation_ui::CHOOSER_H),
                 );
-                gh.line_segment(
-                    [
-                        pos2(headers.left() + NUM_W, lr.top()),
-                        pos2(headers.left() + HEADER_W, lr.top()),
-                    ],
-                    Stroke::new(1.0, Color32::from_gray(0x2a)),
+                gh.hline(
+                    headers.left() + NUM_W..=headers.left() + HEADER_W,
+                    lr.top() + 0.5,
+                    Stroke::new(1.0, theme::SEAM),
                 );
                 crate::automation_ui::choosers(ui, &gh, p, &mut s.auto, strip, lr, Some(k));
             }
@@ -3464,46 +3712,23 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             }
         }
     }
-    gh.line_segment(
-        [headers.right_top(), headers.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x22)),
-    );
+    hw_tracks::seam_wide_v(&gh, headers.right(), headers.y_range());
 
-    // ---- corner above the headers: "+" (new track), duplicate track, global tracks
+    // ---- corner above the headers: "+" (new track), duplicate track, the column labels
     let gc = ui.painter_at(corner);
-    gc.rect_filled(corner, 0.0, Color32::from_gray(0x3a));
-    gc.line_segment(
-        [corner.left_bottom(), corner.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x24)),
+    gc.rect_filled(corner, 0.0, hw_tracks::PANEL_INSPECTOR);
+    gc.hline(
+        corner.x_range(),
+        corner.bottom() - 0.5,
+        Stroke::new(1.0, theme::INK2),
     );
-    let plus = Rect::from_center_size(
-        pos2(corner.left() + 18.0, corner.center().y),
-        vec2(24.0, 18.0),
+    hw_tracks::seam_wide_v(&gc, corner.right(), corner.y_range());
+    let key_h = (corner.height() - 13.0).max(18.0);
+    let plus = Rect::from_min_size(
+        pos2(corner.left() + 14.0, corner.top() + 6.0),
+        vec2(32.0, key_h),
     );
-    let pr = ui.interact(plus, id("plus"), Sense::click());
-    gc.rect_filled(
-        plus,
-        4.0,
-        if pr.hovered() {
-            Color32::from_gray(0x66)
-        } else {
-            BTN_BG
-        },
-    );
-    gc.line_segment(
-        [
-            plus.center() + vec2(-5.0, 0.0),
-            plus.center() + vec2(5.0, 0.0),
-        ],
-        stroke(TEXT),
-    );
-    gc.line_segment(
-        [
-            plus.center() + vec2(0.0, -5.0),
-            plus.center() + vec2(0.0, 5.0),
-        ],
-        stroke(TEXT),
-    );
+    let pr = glyph_key(ui, &gc, plus, "plus", false, false, Glyph::Plus);
     // "+": the kinds of track to add, as the right-click menu offers them.
     let mut picked = None;
     egui::Popup::menu(&pr).show(|ui| {
@@ -3513,34 +3738,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     if let Some(CtxAction::NewTrack(kind)) = picked {
         p.selected_track = p.add_track(kind);
     }
-    let dup = Rect::from_center_size(
-        pos2(plus.right() + 18.0, corner.center().y),
-        vec2(24.0, 18.0),
-    );
-    let dr = ui.interact(dup, id("dup"), Sense::click());
-    let dup_bg = if dr.hovered() {
-        Color32::from_gray(0x66)
-    } else {
-        BTN_BG
-    };
-    gc.rect_filled(dup, 4.0, dup_bg);
-    gc.rect_stroke(
-        Rect::from_center_size(dup.center() + vec2(1.5, -1.5), vec2(8.0, 7.0)),
-        1.0,
-        stroke(TEXT),
-        StrokeKind::Middle,
-    );
-    gc.rect_filled(
-        Rect::from_center_size(dup.center() + vec2(-1.5, 1.5), vec2(8.0, 7.0)),
-        1.0,
-        dup_bg,
-    );
-    gc.rect_stroke(
-        Rect::from_center_size(dup.center() + vec2(-1.5, 1.5), vec2(8.0, 7.0)),
-        1.0,
-        stroke(TEXT),
-        StrokeKind::Middle,
-    );
+    let dup = plus.translate(vec2(40.0, 0.0));
+    let dr = glyph_key(ui, &gc, dup, "dup", false, false, Glyph::Dup);
     if dr.clicked() {
         if let Some(t) = p.tracks.get(p.selected_track).cloned() {
             p.tracks.insert(p.selected_track + 1, t);
@@ -3553,104 +3752,131 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             p.song_rev += 1;
         }
     }
-    let gt = Rect::from_center_size(
-        pos2(corner.right() - 18.0, corner.center().y),
-        vec2(24.0, 18.0),
+    // Column labels over the headers: the track count, then volume and pan.
+    let col = header_layout(
+        Rect::from_min_size(corner.min, vec2(HEADER_W, v.row_h)),
+        0.0,
     );
-    gc.rect_stroke(
-        Rect::from_center_size(gt.center(), vec2(14.0, 10.0)),
-        1.5,
-        stroke(TEXT_DIM),
-        StrokeKind::Middle,
+    let label_y = corner.top() + 6.0 + key_h / 2.0;
+    hw::silk(
+        &gc,
+        pos2(col.name_x.max(dup.right() + 14.0), label_y),
+        Align2::LEFT_CENTER,
+        &format!("{:02} {}", p.tracks.len(), tr("Tracks")),
+        11.0,
+        theme::PRINT,
     );
-    gc.line_segment(
-        [
-            gt.center() + vec2(-7.0, -1.5),
-            gt.center() + vec2(7.0, -1.5),
-        ],
-        stroke(TEXT_DIM),
+    hw::silk(
+        &gc,
+        pos2(col.slider.left(), label_y),
+        Align2::LEFT_CENTER,
+        "VOL",
+        11.0,
+        theme::PRINT,
+    );
+    hw::silk(
+        &gc,
+        pos2(col.pan.x, label_y),
+        Align2::CENTER_CENTER,
+        tr("Pan"),
+        11.0,
+        theme::PRINT,
     );
 
-    // ---- ruler
+    // ---- ruler: the cycle band on top, bar lines with zero-padded numbers, beat ticks
     let gr = ui.painter_at(ruler);
-    gr.rect_filled(ruler, 0.0, RULER_BG);
-    gr.line_segment(
-        [ruler.left_bottom(), ruler.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x24)),
+    hw::gradient(
+        &gr,
+        ruler,
+        0.0,
+        Color32::from_rgb(0xee, 0xea, 0xe1),
+        Color32::from_rgb(0xe2, 0xdd, 0xd2),
     );
-    // The stretch of the ruler over the selected region turns gold, as in Logic.
+    let numbers_top = ruler.top() + CYCLE_ZONE_H;
+    // The stretch of the ruler over the selected region is shaded.
     let selection = v
         .selected
         .and_then(|(t, r)| p.tracks.get(t)?.regions.get(r))
         .map(|r| (p.region_start_beats(r), p.region_end_beats(r)));
     if let Some((start, end)) = selection {
         let band = Rect::from_min_max(
-            pos2(x_of(start).max(ruler.left()), ruler.top()),
+            pos2(x_of(start).max(ruler.left()), numbers_top),
             pos2(x_of(end).min(ruler.right()), ruler.bottom()),
         );
         if band.width() > 0.0 {
             gr.rect_filled(band, 0.0, RULER_SELECTION);
-            gr.line_segment(
-                [band.left_bottom(), band.right_bottom()],
-                Stroke::new(1.0, RULER_SELECTION_EDGE),
+        }
+    }
+    // The cycle: solid orange while on, a recessed band while off.
+    {
+        let band = Rect::from_min_max(
+            pos2(x_of(p.cycle_start), ruler.top() + 2.0),
+            pos2(x_of(p.cycle_end), ruler.top() + 15.0),
+        );
+        let text = format!(
+            "{} → {}",
+            hw_tracks::bbdt_text(p.bbdt(p.cycle_start)),
+            hw_tracks::bbdt_text(p.bbdt(p.cycle_end))
+        );
+        hw_tracks::cycle_band(&gr, band, p.cycle, &text);
+        if p.cycle {
+            gr.rect_filled(
+                Rect::from_min_size(pos2(band.left(), ruler.top()), vec2(2.0, RULER_H)),
+                0.0,
+                theme::INK,
             );
         }
     }
-    if p.cycle {
-        let band = Rect::from_min_max(
-            pos2(x_of(p.cycle_start), ruler.top() + 2.0),
-            pos2(x_of(p.cycle_end), ruler.bottom() - 1.0),
-        );
-        gr.rect_filled(band, 2.0, CYCLE);
-    }
     let label_every = [1i64, 2, 4, 8, 16, 32]
         .into_iter()
-        .find(|n| *n as f32 * v.bar_w >= 34.0)
+        .find(|n| *n as f32 * v.bar_w >= 40.0)
         .unwrap_or(64);
     for bar in &bars {
         let b = bar.bar0 as i64;
-        let x = x_of(bar.start);
-        let beat = bar.start;
-        let in_cycle = p.cycle && beat >= p.cycle_start && beat < p.cycle_end;
-        let in_selection = selection.is_some_and(|(s0, s1)| beat >= s0 && beat < s1);
-        let col = if in_cycle {
-            Color32::from_gray(0x2a)
-        } else if in_selection {
-            Color32::WHITE
-        } else {
-            TEXT
-        };
+        let x = x_of(bar.start).round() + 0.5;
         if b % label_every == 0 {
-            gr.line_segment(
-                [pos2(x, ruler.top() + 4.0), pos2(x, ruler.bottom())],
-                Stroke::new(1.0, col.gamma_multiply(0.7)),
+            gr.vline(
+                x,
+                numbers_top..=ruler.bottom(),
+                Stroke::new(1.0, theme::INK),
             );
-            gr.text(
-                pos2(x + 3.0, ruler.top() + 4.0),
+            hw_tracks::label(
+                &gr,
+                pos2(x + 5.0, numbers_top + 4.0),
                 Align2::LEFT_TOP,
-                (b + 1).to_string(),
-                FontId::proportional(11.5),
-                col,
+                &format!("{:03}", b + 1),
+                Face::Lcd,
+                12.0,
+                0.0,
+                theme::INK,
             );
         } else {
-            gr.line_segment(
-                [pos2(x, ruler.bottom() - 7.0), pos2(x, ruler.bottom())],
-                Stroke::new(1.0, col.gamma_multiply(0.6)),
+            gr.vline(
+                x,
+                ruler.bottom() - 7.0..=ruler.bottom(),
+                Stroke::new(1.0, theme::INK),
             );
         }
         if beat_px * bar.unit as f32 >= 10.0 {
             for k in 1..bar.num {
-                let xb = x_of(bar.start + k as f64 * bar.unit);
-                gr.line_segment(
-                    [pos2(xb, ruler.bottom() - 4.0), pos2(xb, ruler.bottom())],
-                    Stroke::new(1.0, col.gamma_multiply(0.45)),
+                let xb = x_of(bar.start + k as f64 * bar.unit).round() + 0.5;
+                gr.vline(
+                    xb,
+                    ruler.bottom() - 7.0..=ruler.bottom(),
+                    Stroke::new(1.0, theme::INK2.gamma_multiply(0.6)),
                 );
             }
         }
     }
-    // Upper half: click toggles cycle, drag sets it (snapped to bars). Lower half: locate.
-    let upper = Rect::from_min_max(ruler.min, pos2(ruler.right(), ruler.center().y));
-    let lower = Rect::from_min_max(pos2(ruler.left(), ruler.center().y), ruler.max);
+    gr.hline(
+        ruler.x_range(),
+        ruler.bottom() - 0.5,
+        Stroke::new(1.0, theme::INK2),
+    );
+    // The cycle strip on top: click toggles the cycle, drag sets it (snapped to bars). Under
+    // it: locate.
+    let upper = Rect::from_min_max(ruler.min, pos2(ruler.right(), numbers_top));
+    let lower = Rect::from_min_max(pos2(ruler.left(), numbers_top), ruler.max);
     let up = ui.interact(upper, id("ruler_cycle"), Sense::click_and_drag());
     if up.drag_started() {
         v.cycle_anchor = up
@@ -3680,11 +3906,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         }
     }
 
-    // ---- playhead
+    // ---- playhead: an orange line with an ink edge and the flag in the ruler
     let px = x_of(p.position_beats);
-    // Grab the playhead's head in the ruler and drag it anywhere in the song (back to the
-    // start, past the end of the view, ...). Registered after the ruler so the head wins over
-    // the cycle area; kept alive while dragging even when the head leaves the view.
+    // Grab the playhead's flag in the ruler and drag it anywhere in the song (back to the
+    // start, past the end of the view, ...). Registered after the ruler so the flag wins over
+    // the cycle area; kept alive while dragging even when the flag leaves the view.
     let head_id = id("playhead_head");
     let visible = px >= lanes.left() && px <= lanes.right();
     if visible || ui.ctx().is_being_dragged(head_id) {
@@ -3702,24 +3928,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         }
     }
     if visible {
-        let (line_c, head_c, edge_c) = playhead_colors(p.recording);
+        let (line_c, head_c, _) = playhead_colors(p.recording);
         let gp = ui.painter_at(Rect::from_min_max(ruler.min, area.max));
-        gp.line_segment(
-            [pos2(px, ruler.top() + 6.0), pos2(px, area.bottom())],
-            Stroke::new(1.0, line_c),
-        );
-        let head = vec![
-            pos2(px - 6.0, ruler.top() + 2.0),
-            pos2(px + 6.0, ruler.top() + 2.0),
-            pos2(px + 6.0, ruler.top() + 9.0),
-            pos2(px, ruler.top() + 15.0),
-            pos2(px - 6.0, ruler.top() + 9.0),
-        ];
-        gp.add(Shape::convex_polygon(
-            head,
-            head_c,
-            Stroke::new(1.0, edge_c),
-        ));
+        hw_tracks::playhead_line(&gp, px, numbers_top + 12.0, area.bottom(), line_c);
+        hw_tracks::playhead_flag(&gp, px, numbers_top, head_c);
     }
 }
 
@@ -3758,14 +3970,16 @@ mod row_tests {
     }
 
     #[test]
-    fn the_toolbar_drops_its_least_used_items_first_when_narrow() {
+    fn the_toolbar_keeps_snap_and_the_tool_menu_when_narrow() {
         let all = SNAP_W + DRAG_W + TOOLS_W;
         let f = fit_toolbar(all);
         assert!(f.snap && f.drag && f.tools);
         let f = fit_toolbar(all - 1.0);
-        assert!(f.snap && f.drag && !f.tools, "the tool menu goes first");
+        assert!(f.snap && f.tools && !f.drag, "Drag goes first");
+        let f = fit_toolbar(SNAP_W + TOOLS_W);
+        assert!(f.snap && f.tools && !f.drag);
         let f = fit_toolbar(SNAP_W);
-        assert!(f.snap && !f.drag);
+        assert!(f.snap && !f.tools && !f.drag);
         assert_eq!(
             fit_toolbar(-50.0),
             ToolbarFit {
@@ -4057,5 +4271,419 @@ mod selection_tests {
         v.select_many(&[(0, 1), (2, 0)]);
         assert!(v.is_selected(0, 1) && v.is_selected(2, 0));
         assert!(!v.is_selected(0, 0));
+    }
+}
+
+/// The picture inside a region follows its edits: a cut, a trim, a join, Undo and Redo change
+/// which part of the file's waveform it shows, and a shortened MIDI region scales its notes
+/// to the ones it still shows.
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::model::{AudioRegion, Note, RegionParams};
+
+    /// 8 seconds whose overview rises evenly: bin `i` of `BINS` holds level `i / BINS`, so a
+    /// level tells which second of the file is drawn.
+    const SECS: f64 = 8.0;
+    const BINS: usize = 800;
+
+    fn ramp_audio() -> AudioRegion {
+        let a = AudioRegion {
+            file: prowave_engine::AudioFile {
+                path: "/prowave-preview-test/ramp.wav".into(),
+                sample_rate: 48_000,
+                frames: (SECS * 48_000.0) as u64,
+                channels: 2,
+            },
+            peaks: Default::default(),
+            flex: None,
+        };
+        let peaks = (0..BINS)
+            .map(|i| {
+                let v = i as f32 / BINS as f32;
+                (-v, v)
+            })
+            .collect();
+        let _ = a.peaks.set(peaks);
+        a
+    }
+
+    /// One audio track with the 8-second file on bars 1-5 (120 bpm, 4/4: 2 seconds a bar).
+    fn project() -> Project {
+        let mut p = Project::empty();
+        p.tracks.clear();
+        let mut t = Track::new("Audio 1", TrackKind::Audio);
+        t.regions.push(Region {
+            name: "ramp".into(),
+            start_bar: 1.0,
+            len_bars: 4.0,
+            notes: Vec::new(),
+            controls: Vec::new(),
+            folder: None,
+            generated: None,
+            audio: Some(ramp_audio()),
+            params: RegionParams::default(),
+        });
+        p.tracks.push(t);
+        p
+    }
+
+    /// The file second drawn at `u` seconds into region `ri` (the top of a 10 ms column),
+    /// `None` where the region shows nothing.
+    fn drawn_at(p: &Project, ri: usize, u: f64) -> Option<f64> {
+        let map = p.tempo_map();
+        let r = &p.tracks[0].regions[ri];
+        let span = AudioSpan::of(p, &map, r).unwrap();
+        let peaks = r.audio.as_ref().unwrap().peaks.get().unwrap();
+        span.peak_range(peaks, u, u + 0.01)
+            .map(|(_, hi)| f64::from(hi) * SECS)
+    }
+
+    fn near(got: Option<f64>, want: f64) -> bool {
+        got.is_some_and(|g| (g - want).abs() < 0.03)
+    }
+
+    #[test]
+    fn a_cut_region_draws_the_part_of_the_file_it_plays() {
+        let mut p = project();
+        assert!(near(drawn_at(&p, 0, 0.0), 0.0));
+        assert!(near(drawn_at(&p, 0, 5.0), 5.0));
+        // Cut at bar 2 (2 seconds in).
+        assert!(p.split_region(0, 0, 4.0));
+        assert!(
+            near(drawn_at(&p, 0, 1.5), 1.5),
+            "the left part: the file's start"
+        );
+        assert_eq!(
+            drawn_at(&p, 0, 2.5),
+            None,
+            "nothing after the left part's end"
+        );
+        assert!(
+            near(drawn_at(&p, 1, 0.0), 2.0),
+            "the right part starts where the cut was: {:?}",
+            drawn_at(&p, 1, 0.0)
+        );
+        assert!(near(drawn_at(&p, 1, 5.9), 7.9), "and ends with the file");
+    }
+
+    #[test]
+    fn a_trimmed_end_shows_less_of_the_file_and_never_squeezes_it() {
+        let mut p = project();
+        p.tracks[0].regions[0].len_bars = 2.0;
+        assert!(near(drawn_at(&p, 0, 3.0), 3.0), "same place, same picture");
+        assert_eq!(drawn_at(&p, 0, 4.5), None, "past the new end");
+        // Lengthened past the file: the file plays once, then nothing.
+        p.tracks[0].regions[0].len_bars = 6.0;
+        assert!(near(drawn_at(&p, 0, 7.9), 7.9));
+        assert_eq!(drawn_at(&p, 0, 9.0), None);
+    }
+
+    #[test]
+    fn join_undo_and_redo_bring_the_picture_back() {
+        let mut p = project();
+        let mut h = crate::undo::History::new(&p);
+        assert!(p.split_region(0, 0, 4.0));
+        assert!(h.record(&p));
+        assert!(near(drawn_at(&p, 1, 0.0), 2.0));
+        // Join: one region again, the whole file from its start.
+        assert!(p.join_regions(0, 0));
+        assert_eq!(p.tracks[0].regions.len(), 1);
+        assert!(near(drawn_at(&p, 0, 0.0), 0.0));
+        assert!(near(drawn_at(&p, 0, 6.0), 6.0));
+        // Undo the join: the cut parts and their pictures.
+        assert!(h.undo(&mut p));
+        assert_eq!(p.tracks[0].regions.len(), 2);
+        assert!(near(drawn_at(&p, 1, 0.0), 2.0));
+        // Undo the cut, then redo it.
+        assert!(h.undo(&mut p));
+        assert_eq!(p.tracks[0].regions.len(), 1);
+        assert!(near(drawn_at(&p, 0, 3.0), 3.0));
+        assert!(h.redo(&mut p));
+        assert!(near(drawn_at(&p, 1, 1.0), 3.0));
+    }
+
+    #[test]
+    fn a_reversed_region_draws_its_part_of_the_file_back_to_front() {
+        let mut p = project();
+        assert!(p.split_region(0, 0, 4.0));
+        p.tracks[0].regions[1].params.reverse = true;
+        // The right part plays seconds 2-8 backwards: 8 first, 2 last.
+        assert!(near(drawn_at(&p, 1, 0.0), 8.0));
+        assert!(near(drawn_at(&p, 1, 5.98), 2.0));
+    }
+
+    #[test]
+    fn a_tempo_change_inside_a_region_keeps_its_picture_on_time() {
+        let mut p = project();
+        // 60 bpm from bar 2: bar 2 lasts 4 seconds, so bars 1-5 run past the file's end.
+        p.add_tempo_change(4.0, 60.0);
+        let map = p.tempo_map();
+        let span = AudioSpan::of(&p, &map, &p.tracks[0].regions[0]).unwrap();
+        // Beat 6 (halfway through bar 2) is 2 + 2 seconds in.
+        assert!((span.secs_at(6.0) - 4.0).abs() < 1e-9);
+        assert!((span.beats_at(4.0) - 6.0).abs() < 1e-9);
+        assert!(near(drawn_at(&p, 0, span.secs_at(6.0)), 4.0));
+    }
+
+    #[test]
+    fn a_shortened_midi_region_scales_to_the_notes_it_still_shows() {
+        let note = |start: f32, pitch: u8| Note {
+            start,
+            len: 1.0,
+            pitch,
+            vel: 100,
+            mute: false,
+            lyric: Default::default(),
+        };
+        let mut p = Project::demo();
+        let r = &mut p.tracks[0].regions[0];
+        r.notes = vec![note(0.0, 60), note(2.0, 64), note(12.0, 96)];
+        r.len_bars = 4.0;
+        assert_eq!(pitch_range(visible_notes(r, 16.0)), (60.0, 96.0));
+        r.len_bars = 1.0;
+        assert_eq!(
+            pitch_range(visible_notes(r, 4.0)),
+            (60.0, 64.0),
+            "the note cut off no longer sets the scale"
+        );
+    }
+}
+
+/// Pictures of the Tracks area in the Hardware look, to compare with the design mockup.
+/// Ignored; they check nothing:
+/// `MANUAL_PNG_DIR=… cargo test -p prowave-app tracks_area_pictures -- --ignored`
+#[cfg(test)]
+mod pictures {
+    use super::*;
+    use crate::model::{AudioRegion, Note};
+    use std::path::PathBuf;
+
+    fn out(name: &str) -> PathBuf {
+        // PROWAVE_PNG_DIR, else MANUAL_PNG_DIR, else a folder in the temp directory.
+        let dir = std::env::var_os("PROWAVE_PNG_DIR")
+            .or_else(|| std::env::var_os("MANUAL_PNG_DIR"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("prowave-manual"));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(name)
+    }
+
+    /// A made-up recording with an overview, for drawing (nothing reads the file).
+    fn fake_audio(seconds: f64, seed: u32, punchy: bool) -> AudioRegion {
+        let rate = 48_000u32;
+        let file = prowave_engine::AudioFile {
+            path: "picture.wav".into(),
+            sample_rate: rate,
+            frames: (seconds * f64::from(rate)) as u64,
+            channels: 2,
+        };
+        let n = 2000;
+        let mut s = seed;
+        let peaks: Vec<(f32, f32)> = (0..n)
+            .map(|i| {
+                s = s.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                let noise = (s >> 16) as f32 / 65_536.0;
+                let t = i as f32 / n as f32 * seconds as f32;
+                let env = if punchy {
+                    let ph = (t * 2.0).fract();
+                    0.3 + 0.65 * (-ph * 3.2).exp()
+                } else {
+                    let ph = (t / 2.0).fract();
+                    if ph < 0.06 || (t as i32 % 4 == 1 && ph > 0.55) {
+                        0.02
+                    } else {
+                        0.3 + 0.55 * (ph * 9.0 + t).sin().abs()
+                    }
+                };
+                let a = env * (0.6 + 0.4 * noise);
+                (-a, a)
+            })
+            .collect();
+        let region = AudioRegion {
+            file,
+            peaks: Default::default(),
+            flex: None,
+        };
+        let _ = region.peaks.set(peaks);
+        region
+    }
+
+    fn note(start: f32, len: f32, pitch: u8) -> Note {
+        Note {
+            start,
+            len,
+            pitch,
+            vel: 96,
+            mute: false,
+            lyric: Default::default(),
+        }
+    }
+
+    /// C, A minor, F, G: one chord a bar.
+    const CHORDS: [[u8; 3]; 4] = [[60, 64, 67], [57, 60, 64], [53, 57, 60], [55, 59, 62]];
+
+    /// The electric piano's line: five notes a bar on the chord's tones.
+    fn ep_notes() -> Vec<Note> {
+        let mut out = Vec::new();
+        for bar in 0..12 {
+            let c = CHORDS[bar % 4];
+            let t = bar as f32 * 4.0;
+            for (at, len, pitch) in [
+                (0.0, 0.75, c[0] + 12),
+                (1.0, 0.45, c[1] + 12),
+                (1.5, 0.9, c[2] + 12),
+                (2.5, 0.45, c[1] + 12),
+                (3.0, 0.9, c[2] + 7),
+            ] {
+                out.push(note(t + at, len, pitch));
+            }
+        }
+        out
+    }
+
+    /// The grand piano: the chord stacked on every beat.
+    fn piano_notes() -> Vec<Note> {
+        let mut out = Vec::new();
+        for bar in 0..12 {
+            let c = CHORDS[bar % 4];
+            for beat in 0..4 {
+                let t = bar as f32 * 4.0 + beat as f32;
+                for pitch in c {
+                    out.push(note(t, 0.8, pitch));
+                }
+            }
+        }
+        out
+    }
+
+    /// The pad: each chord held for two bars, with its root an octave down.
+    fn pad_notes() -> Vec<Note> {
+        let mut out = Vec::new();
+        for k in 0..6 {
+            let c = CHORDS[k % 4];
+            let t = k as f32 * 8.0;
+            for pitch in [c[0] - 12, c[0], c[1], c[2]] {
+                out.push(note(t, 7.75, pitch));
+            }
+        }
+        out
+    }
+
+    /// Kick, snare and hi-hat for twelve bars.
+    fn drum_notes() -> Vec<Note> {
+        let mut out = Vec::new();
+        let hit = |start: f32, pitch: u8| Note {
+            start,
+            len: 0.12,
+            pitch,
+            vel: 100,
+            mute: false,
+            lyric: Default::default(),
+        };
+        for bar in 0..12 {
+            for step in 0..16 {
+                let t = bar as f32 * 4.0 + step as f32 * 0.25;
+                if step % 2 == 0 || step == 7 {
+                    out.push(hit(t, 42));
+                }
+                if step == 4 || step == 12 {
+                    out.push(hit(t, 38));
+                }
+                if step == 0 || step == 6 || step == 8 {
+                    out.push(hit(t, 36));
+                }
+            }
+        }
+        out
+    }
+
+    /// The demo song as the mockup shows it: a Drummer pattern, two recordings, the cycle on
+    /// from bar 3, the playhead in bar 4 and the first track selected.
+    fn picture_project() -> (Project, crate::UiState) {
+        let mut p = Project::demo();
+        p.tracks[0].regions[0].notes = ep_notes();
+        p.tracks[1].regions[0].notes = piano_notes();
+        p.tracks[2].regions[0].notes = pad_notes();
+        p.tracks[3].regions[0].notes = drum_notes();
+        // Twelve bars of 4/4 at the demo's tempo.
+        let secs = 48.0 * 60.0 / f64::from(p.tempo);
+        p.tracks[4].regions[0].audio = Some(fake_audio(secs, 31, true));
+        p.tracks[5].regions[0].audio = Some(fake_audio(secs, 97, false));
+        p.cycle = true;
+        p.cycle_start = 8.0;
+        p.cycle_end = 88.0;
+        p.position_beats = 15.8;
+        p.selected_track = 0;
+        let mut s = crate::UiState::new();
+        s.tracks.select_only(0, 0);
+        (p, s)
+    }
+
+    fn render(name: &str, w: f32, h: f32, p: &mut Project, s: &mut crate::UiState) {
+        let meters = crate::mixer::Meters::default();
+        crate::ui_test::render_png(
+            w,
+            h,
+            1.0,
+            theme::BONE,
+            |ui| {
+                theme::apply(ui.ctx());
+                show(ui, p, s, &meters)
+            },
+            &out(name),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "pictures for the design review"]
+    fn tracks_area_pictures() {
+        // The main view, at the mockup's size.
+        let (mut p, mut s) = picture_project();
+        render("tracks-main.png", 1670.0, 560.0, &mut p, &mut s);
+
+        // States: a muted region, a soloed track (the others go dim), R armed, I on, track 1
+        // muted, the cycle off; the global tracks and the Master strip shown.
+        let (mut p, mut s) = picture_project();
+        p.tracks[1].regions[0].params.mute = true;
+        p.tracks[2].solo = true;
+        p.tracks[4].rec = true;
+        p.tracks[5].monitor = true;
+        p.tracks[0].mute = true;
+        p.cycle = false;
+        p.show_master_track = true;
+        s.tracks.show_markers = true;
+        s.tracks.show_signatures = true;
+        s.tracks.show_tempo = true;
+        p.add_marker(0.0);
+        let verse = p.add_marker(16.0);
+        p.markers[verse].name = "Verse".into();
+        p.add_tempo_change(32.0, 132.0);
+        p.set_signature_from(9, (3, 4));
+        s.tracks.select_many(&[(4, 0), (5, 0)]);
+        p.selected_track = 4;
+        render("tracks-states.png", 1670.0, 760.0, &mut p, &mut s);
+
+        // Short tracks on a 13-inch screen.
+        let (mut p, mut s) = picture_project();
+        s.tracks.row_h = 40.0;
+        s.tracks.bar_w = 48.0;
+        render("tracks-compact.png", 1140.0, 420.0, &mut p, &mut s);
+    }
+
+    /// The two recordings edited: the first cut four bars in with its left part trimmed by a
+    /// bar, the second trimmed to half its length. Each part shows what it plays.
+    /// `PROWAVE_PNG_DIR=… cargo test -p prowave-app tracks_area_edit_pictures -- --ignored`
+    #[test]
+    #[ignore = "pictures for the design review"]
+    fn tracks_area_edit_pictures() {
+        let (mut p, mut s) = picture_project();
+        let at = p.region_start_beats(&p.tracks[4].regions[0]) + 16.0;
+        assert!(p.split_region(4, 0, at));
+        p.tracks[4].regions[0].len_bars -= 1.0;
+        p.tracks[5].regions[0].len_bars /= 2.0;
+        s.tracks.select_only(4, 1);
+        render("tracks-edited.png", 1670.0, 560.0, &mut p, &mut s);
     }
 }

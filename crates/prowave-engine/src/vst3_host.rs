@@ -300,6 +300,19 @@ impl ComponentHandler {
         )
     }
 
+    /// An edit of parameter `id` to `value` (normalized): the processor hears it next block
+    /// and the host's interface sees it, as when the plug-in's window makes it.
+    pub fn edit(&self, id: ParamID, value: ParamValue) {
+        if let Ok(mut q) = self.edits.lock() {
+            let _ = q.push((id, value));
+        }
+        if let Ok(mut s) = self.seen.lock() {
+            if s.len() < SEEN_ROOM {
+                s.push((id, value));
+            }
+        }
+    }
+
     /// The edits the plug-in's window made since the last call, in order.
     pub fn take_seen(&self) -> Vec<(ParamID, ParamValue)> {
         self.seen
@@ -321,14 +334,7 @@ impl IComponentHandlerTrait for ComponentHandler {
         kResultOk
     }
     unsafe fn performEdit(&self, id: ParamID, value: ParamValue) -> tresult {
-        if let Ok(mut q) = self.edits.lock() {
-            let _ = q.push((id, value));
-        }
-        if let Ok(mut s) = self.seen.lock() {
-            if s.len() < SEEN_ROOM {
-                s.push((id, value));
-            }
-        }
+        self.edit(id, value);
         kResultOk
     }
     unsafe fn endEdit(&self, _id: ParamID) -> tresult {

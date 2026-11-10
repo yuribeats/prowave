@@ -47,7 +47,7 @@ fn main() {
 
     // Keep the instance alive as long as its window.
     enum Inst {
-        Au(AuInstance),
+        Au(Box<AuInstance>),
         Vst3(Box<Vst3Instance>),
     }
     let (inst, label) = if id.ends_with(".vst3") {
@@ -72,7 +72,7 @@ fn main() {
             return;
         };
         match AuInstance::new(&info, 48_000, 512) {
-            Ok(a) => (Inst::Au(a), format!("{} (AU)", info.label())),
+            Ok(a) => (Inst::Au(Box::new(a)), format!("{} (AU)", info.label())),
             Err(e) => {
                 println!("open failed: {e}");
                 return;

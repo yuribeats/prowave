@@ -527,14 +527,22 @@ pub fn export(p: &Project, only: Option<(usize, usize)>) -> MidiFile {
             if only.is_some_and(|o| o != (ti, ri)) || r.params.mute {
                 continue;
             }
-            let origin = p.region_start_beats(r);
-            played.extend(crate::engine_sync::region_notes(t, r, origin, ti as u16));
-            for c in &r.controls {
-                track.controls.push(FileControl {
-                    tick: ticks(origin + f64::from(c.start), ppq),
-                    num: c.num,
-                    val: c.val,
-                });
+            // A looped region is written out with its repeats.
+            for (origin, span) in crate::engine_sync::plays_of(p, r) {
+                played.extend(crate::engine_sync::played_notes(
+                    t, r, origin, span, ti as u16,
+                ));
+                for c in r
+                    .controls
+                    .iter()
+                    .filter(|c| span.is_none_or(|s| f64::from(c.start) < s - 1e-9))
+                {
+                    track.controls.push(FileControl {
+                        tick: ticks(origin + f64::from(c.start), ppq),
+                        num: c.num,
+                        val: c.val,
+                    });
+                }
             }
         }
         // What the track's MIDI FX make of them.
@@ -656,12 +664,29 @@ pub fn is_midi_path(path: &std::path::Path) -> bool {
 
 /// Reads the MIDI file at `path` into the project; returns how many tracks it made.
 pub fn import_path(p: &mut Project, path: &std::path::Path) -> Result<usize, String> {
+    import_path_at(p, path, 0.0)
+}
+
+/// [`import_path`] with the file's tick 0 on quarter note `at` of the project (its notes and
+/// controllers move; its tempo and signature changes do not).
+pub fn import_path_at(p: &mut Project, path: &std::path::Path, at: f64) -> Result<usize, String> {
     let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     if size > MAX_FILE_BYTES {
         return Err("the file is too big for a MIDI file".into());
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let file = parse(&bytes)?;
+    let mut file = parse(&bytes)?;
+    let shift = (at.max(0.0) * f64::from(file.ppq.max(1))).round() as u64;
+    if shift > 0 {
+        for t in &mut file.tracks {
+            for n in &mut t.notes {
+                n.start = n.start.saturating_add(shift);
+            }
+            for c in &mut t.controls {
+                c.tick = c.tick.saturating_add(shift);
+            }
+        }
+    }
     match import(p, &file) {
         0 => Err("there are no notes in it".into()),
         n => Ok(n),
@@ -681,8 +706,41 @@ pub fn export_path(
     std::fs::write(path, write(&file)).map_err(|e| e.to_string())
 }
 
+/// The tempo and signature changes of `file` as the project's from quarter note `one` (a bar
+/// line) on, the file's tick 0 there; before it the project keeps its own, held up to `one`.
+pub(crate) fn apply_timing_at(p: &mut Project, file: &MidiFile, one: f64) {
+    if one <= 0.0 {
+        apply_timing_from_start(p, file);
+        return;
+    }
+    let ppq = f64::from(file.ppq.max(1));
+    p.tempo_changes.retain(|t| t.beat < one - 1e-6);
+    match p.tempo_changes.last_mut() {
+        Some(t) => t.ramp = false,
+        None => p.tempo_ramp = false,
+    }
+    for &(tick, bpm) in file.tempos.iter().take(MAX_TEMPO_CHANGES) {
+        p.add_tempo_change(one + tick as f64 / ppq, bpm as f32);
+    }
+    // The bar `one` starts (1-based): the file's signatures from it on.
+    let bar_one = p.beats_to_bar(one).round().max(0.0) as u32 + 1;
+    p.sig_changes.retain(|c| c.bar < bar_one);
+    let (mut bar0, mut at_tick, mut sig) = (0.0f64, 0u64, (4u8, 4u8));
+    for &(tick, num, den) in file.signatures.iter().take(MAX_SIGNATURE_CHANGES) {
+        let bar_ticks = ppq * 4.0 * f64::from(sig.0) / f64::from(sig.1);
+        let bar = bar0 + ((tick - at_tick) as f64 / bar_ticks).round();
+        p.set_signature_from(bar_one.saturating_add(bar as u32), (num, den));
+        (bar0, at_tick, sig) = (bar, tick, (num, den));
+    }
+    p.tidy_tempo();
+}
+
 /// The tempo and signature changes of `file` as the project's.
-fn apply_timing(p: &mut Project, file: &MidiFile) {
+pub(crate) fn apply_timing(p: &mut Project, file: &MidiFile) {
+    apply_timing_at(p, file, 0.0);
+}
+
+fn apply_timing_from_start(p: &mut Project, file: &MidiFile) {
     let ppq = f64::from(file.ppq.max(1));
     p.tempo_changes.clear();
     p.tempo_ramp = false;

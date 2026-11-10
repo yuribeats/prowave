@@ -155,6 +155,8 @@ pub struct Engine {
     state: StateReader,
     midi_out: Option<rtrb::Consumer<MidiOutEvent>>,
     mtc_out: Option<rtrb::Consumer<MtcMessage>>,
+    /// The window's end of the preview loop (see [`crate::audition`]).
+    audition: Option<crate::audition::AuditionRemote>,
     sample_rate: u32,
     device_name: String,
     disk: DiskThread,
@@ -428,6 +430,7 @@ impl Engine {
             state,
             midi_out: readers.midi,
             mtc_out: readers.mtc,
+            audition: readers.audition,
             sample_rate: info.sample_rate,
             device_name: info.device_name,
             _output: Output::Wasapi(stream),
@@ -518,6 +521,7 @@ impl Engine {
             state,
             midi_out: readers.midi,
             mtc_out: readers.mtc,
+            audition: readers.audition,
             sample_rate: info.sample_rate,
             device_name: info.device_name,
             _output: Output::Duplex(Box::new(stream)),
@@ -743,6 +747,7 @@ impl Engine {
             state,
             midi_out: readers.midi,
             mtc_out: readers.mtc,
+            audition: readers.audition,
             sample_rate,
             device_name,
             _output: Output::Cpal(stream),
@@ -783,6 +788,12 @@ impl Engine {
     /// plays it out on the project's MTC port. `None` after the first call.
     pub fn take_mtc_out(&mut self) -> Option<rtrb::Consumer<MtcMessage>> {
         self.mtc_out.take()
+    }
+
+    /// The window's end of the preview loop that plays on the output apart from the tracks
+    /// (see [`crate::audition`]).
+    pub fn audition(&mut self) -> Option<&mut crate::audition::AuditionRemote> {
+        self.audition.as_mut()
     }
 
     pub fn shared(&self) -> &Shared {

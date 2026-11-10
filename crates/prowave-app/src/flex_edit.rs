@@ -16,7 +16,10 @@ use crate::model::{AudioRegion, Note, Project, Region, Track, TrackKind};
 use crate::UiState;
 use prowave_engine::{AudioFile, FlexMode, PitchShift, TempoMap, WarpPoint};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The Flex edit of an audio region.
 #[derive(Clone, Debug)]
@@ -33,7 +36,110 @@ pub struct FlexEdit {
     pub rendered: u64,
     /// The Pitch Editor's note edits, made before the Flex markers and pitch moves.
     pub melody: Option<crate::pitch_editor::MelodyEdit>,
+    /// Follow Tempo: the recording's own beats are known, and its markers are made again from
+    /// them whenever the project's tempo (or the region's place) changes, so every beat stays
+    /// on the project's beats.
+    pub follow: Option<TempoFollow>,
+    /// While the sound for new `markers` is being made: the markers of the sound the region
+    /// still plays (None: it plays the sound of `markers`, or the recording when they are
+    /// empty). The region's offset is in the time of the sound it plays, so it never plays one
+    /// sound from a place in another; [`FlexEdit::target_offset`] takes it to the new one.
+    pub played: Option<Vec<WarpPoint>>,
 }
+
+/// The beats of a recording that follows the project's tempo (Logic: Flex and Follow): where
+/// its beat 1 is and where each beat after (or before) it falls, seconds into the file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TempoFollow {
+    /// Seconds into the recording of its beat 1 (the One); before the file's start when the
+    /// recording begins later in the song.
+    pub one_secs: f64,
+    /// Seconds into the recording of whole beats in a row, rising: `beats[k]` is quarter note
+    /// `first + k` counted from the One (the One is 0).
+    pub beats: Vec<f64>,
+    pub first: i64,
+    /// The recording's tempo before its first beat and after its last one.
+    pub bpm: f64,
+}
+
+impl TempoFollow {
+    /// Quarter notes from the One to moment `src` of the recording, through its beats.
+    /// Before the first beat and after the last, the beat next to it goes on at its own length
+    /// (`bpm` when there is only one).
+    pub fn beat_of(&self, src: f64) -> f64 {
+        let b = &self.beats;
+        let n = b.len();
+        let fallback = 60.0 / self.bpm.max(1.0);
+        let len = |i: usize| match (b.get(i), b.get(i + 1)) {
+            (Some(x), Some(y)) if y > x => y - x,
+            _ => fallback,
+        };
+        let first = self.first as f64;
+        let k = b.partition_point(|x| *x <= src);
+        match k.checked_sub(1) {
+            Some(i) if i + 1 < n => first + i as f64 + (src - b[i]) / len(i),
+            Some(i) => first + i as f64 + (src - b[i]) / len(i.saturating_sub(1)),
+            None => first - (b.first().copied().unwrap_or(0.0) - src) / len(0),
+        }
+    }
+
+    /// Whether it has enough beats to follow a tempo.
+    pub fn is_usable(&self) -> bool {
+        self.beats.len() >= 2
+            && self.bpm.is_finite()
+            && self.bpm > 0.0
+            && self.one_secs.is_finite()
+            && self
+                .beats
+                .windows(2)
+                .all(|w| w[1] > w[0] && w[0].is_finite())
+    }
+
+    /// The Flex markers that put each beat on the project's beats when the One is on quarter
+    /// note `one` and the recording starts `s0` seconds into the project (Fit to Grid's
+    /// markers, from beats that are known instead of heard). Empty when nothing would move.
+    pub fn markers(
+        &self,
+        map: &TempoMap,
+        duration: f64,
+        mode: FlexMode,
+        one: f64,
+        s0: f64,
+    ) -> Vec<WarpPoint> {
+        let found = crate::fit_grid::Found {
+            tempo: Some(self.bpm),
+            confidence: 1.0,
+            tagged: true,
+            beats: self.beats.clone(),
+            downbeat: 0,
+            onsets: Vec::new(),
+            mode,
+            duration,
+        };
+        let mut markers =
+            crate::fit_grid::grid_markers(map, &found, self.bpm, one + self.first as f64, s0);
+        // The tail after the last beat goes on at that beat's length (Fit to Grid's tail goes
+        // on at one tempo, which a song with a tempo change does not keep).
+        if let Some(m) = markers
+            .last_mut()
+            .filter(|m| (m.src - duration).abs() < 1e-9)
+        {
+            m.dst = map.seconds_at(one + self.beat_of(duration)) - s0;
+        }
+        if markers
+            .iter()
+            .all(|m| (m.dst - m.src).abs() < FOLLOW_NEUTRAL)
+        {
+            Vec::new()
+        } else {
+            markers
+        }
+    }
+}
+
+/// A Follow Tempo region whose beats all land within this of where they were recorded (seconds)
+/// plays its recording as it is.
+const FOLLOW_NEUTRAL: f64 = 0.0004;
 
 impl FlexEdit {
     pub fn new(original: AudioFile, mode: FlexMode) -> Self {
@@ -44,6 +150,47 @@ impl FlexEdit {
             original,
             rendered: 0,
             melody: None,
+            follow: None,
+            played: None,
+        }
+    }
+
+    /// Which moment of the recording plays `dst` seconds into the result (the inverse of
+    /// [`FlexEdit::place_of`]).
+    pub fn source_of(&self, dst: f64) -> f64 {
+        source_through(&self.markers, dst)
+    }
+
+    /// The markers of the sound the region plays now (see [`FlexEdit::played`]).
+    pub fn played_markers(&self) -> &[WarpPoint] {
+        self.played.as_deref().unwrap_or(&self.markers)
+    }
+
+    /// Where a region that starts `offset` seconds into the sound it plays now starts in the
+    /// sound of `markers` (the same moment of the recording).
+    pub fn target_offset(&self, offset: f64) -> f64 {
+        match &self.played {
+            None => offset,
+            Some(old) => {
+                let src = source_through(old, offset.max(0.0));
+                if src <= 0.0 {
+                    0.0
+                } else {
+                    place_through(&self.markers, src)
+                }
+            }
+        }
+    }
+
+    /// Puts in new markers, whose sound is made in the background: until it is ready the
+    /// region plays the sound it has (see [`FlexEdit::played`]).
+    pub fn set_markers(&mut self, markers: Vec<WarpPoint>) {
+        if self.played.is_none() {
+            self.played = Some(std::mem::take(&mut self.markers));
+        }
+        self.markers = markers;
+        if self.played.as_deref() == Some(&self.markers[..]) {
+            self.played = None;
         }
     }
 
@@ -92,20 +239,42 @@ impl FlexEdit {
 
     /// Where moment `src` of the recording plays, in seconds from the region's start.
     pub fn place_of(&self, src: f64) -> f64 {
-        let mut prev = WarpPoint { src: 0.0, dst: 0.0 };
-        for m in &self.markers {
-            if src < m.src {
-                let span = m.src - prev.src;
-                return if span > 0.0 {
-                    prev.dst + (src - prev.src) * (m.dst - prev.dst) / span
-                } else {
-                    m.dst
-                };
-            }
-            prev = *m;
-        }
-        prev.dst + (src - prev.src)
+        place_through(&self.markers, src)
     }
+}
+
+/// Which moment of the recording plays `dst` seconds into a sound made with `markers`.
+fn source_through(markers: &[WarpPoint], dst: f64) -> f64 {
+    let mut prev = WarpPoint { src: 0.0, dst: 0.0 };
+    for m in markers {
+        if dst < m.dst {
+            let span = m.dst - prev.dst;
+            return if span > 0.0 {
+                prev.src + (dst - prev.dst) * (m.src - prev.src) / span
+            } else {
+                m.src
+            };
+        }
+        prev = *m;
+    }
+    prev.src + (dst - prev.dst)
+}
+
+/// Where moment `src` of the recording plays in a sound made with `markers`.
+fn place_through(markers: &[WarpPoint], src: f64) -> f64 {
+    let mut prev = WarpPoint { src: 0.0, dst: 0.0 };
+    for m in markers {
+        if src < m.src {
+            let span = m.src - prev.src;
+            return if span > 0.0 {
+                prev.dst + (src - prev.src) * (m.dst - prev.dst) / span
+            } else {
+                m.dst
+            };
+        }
+        prev = *m;
+    }
+    prev.dst + (src - prev.src)
 }
 
 /// What a command does once the recording has been read.
@@ -145,6 +314,15 @@ struct Task {
 struct Render {
     fingerprint: u64,
     result: Receiver<Result<AudioFile, String>>,
+    /// Set when no region wants the sound any more: the thread stops at its next step and
+    /// writes nothing. It keeps its place among [`MAX_RENDERS`] until it has stopped.
+    cancel: Arc<AtomicBool>,
+}
+
+impl Render {
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
 }
 
 /// The Flex work running in the background.
@@ -154,12 +332,21 @@ pub struct FlexState {
     renders: Vec<Render>,
     /// Regions whose edits are to be removed (it needs the context, which the menus lack).
     removals: Vec<(usize, usize)>,
+    /// What the Follow Tempo regions were last made for (see [`follow_key`]).
+    followed: u64,
+    /// A [`follow_key`] not followed yet and when it was first seen: the markers are made
+    /// again once it has rested for [`FOLLOW_REST`] (a dragged tempo makes one render, not one
+    /// per frame).
+    waiting: Option<(u64, Instant)>,
 }
 
 impl FlexState {
     /// Whether anything is still being worked on.
     pub fn busy(&self) -> bool {
-        !self.tasks.is_empty() || !self.renders.is_empty() || !self.removals.is_empty()
+        !self.tasks.is_empty()
+            || !self.renders.is_empty()
+            || !self.removals.is_empty()
+            || self.waiting.is_some()
     }
 
     /// Removes the Flex edits of region `r` of track `t` on the next [`poll`].
@@ -344,10 +531,151 @@ pub fn follow_beats(p: &mut Project, t: usize, r: usize, beats: &[f64]) {
     let bar_end = p.beats_to_bar(end);
     let region = &mut p.tracks[t].regions[r];
     if let Some(f) = region.audio.as_mut().and_then(|a| a.flex.as_mut()) {
-        f.markers = markers;
+        f.set_markers(markers);
+        f.follow = None;
     }
     region.len_bars = (bar_end as f32 - (region.start_bar - 1.0)).max(1.0 / 64.0);
     p.song_rev += 1;
+}
+
+/// Makes the markers of a Follow Tempo region (region `r` of track `t`) again for the project's
+/// tempo and the region's place: its beats land on the project's beats, the One where it was.
+/// Returns whether anything changed.
+pub fn follow(p: &mut Project, t: usize, r: usize) -> bool {
+    let Some(region) = p.tracks.get(t).and_then(|x| x.regions.get(r)) else {
+        return false;
+    };
+    let Some(f) = region.audio.as_ref().and_then(|a| a.flex.as_ref()) else {
+        return false;
+    };
+    let Some(fol) = f.follow.as_ref().filter(|x| x.is_usable()) else {
+        return false;
+    };
+    let duration = f.original.duration_secs();
+    if duration <= 0.0 {
+        return false;
+    }
+    // The moment of the recording at the region's start is the same whatever the tempo: the
+    // One's quarter note comes from it, so a moved or trimmed region keeps its beats. The
+    // offset is in the time of the sound the region plays now.
+    let start = p.region_start_beats(region);
+    let src_at_start = source_through(f.played_markers(), region.params.offset_secs.max(0.0));
+    let one = start - fol.beat_of(src_at_start);
+    let file_start = one + fol.beat_of(0.0);
+    let map = p.tempo_map();
+    let s0 = map.seconds_at(file_start);
+    let markers = fol.markers(&map, duration, f.mode, one, s0);
+    let probe = FlexEdit {
+        markers: markers.clone(),
+        ..FlexEdit::new(f.original.clone(), f.mode)
+    };
+    let offset = if src_at_start <= 0.0 {
+        0.0
+    } else {
+        probe.place_of(src_at_start)
+    };
+    let same = f.markers.len() == markers.len()
+        && f.markers
+            .iter()
+            .zip(&markers)
+            .all(|(a, b)| (a.src - b.src).abs() < 1e-7 && (a.dst - b.dst).abs() < 1e-7)
+        && (f.target_offset(region.params.offset_secs) - offset).abs() < 1e-7;
+    if same {
+        return false;
+    }
+    let region = &mut p.tracks[t].regions[r];
+    if let Some(f) = region.audio.as_mut().and_then(|a| a.flex.as_mut()) {
+        // Until the sound for the new markers is made, the region plays the sound it has
+        // from the place it has; the new place comes with the new sound (`poll_renders`).
+        f.set_markers(markers);
+        if f.played.is_none() {
+            region.params.offset_secs = offset;
+        }
+    }
+    p.song_rev += 1;
+    true
+}
+
+/// A number that changes with anything a Follow Tempo region's markers depend on: the tempo
+/// and signature tracks and each such region's place. 0 when there are none.
+fn follow_key(p: &Project) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |w: u64| h = (h ^ w).wrapping_mul(0x0000_0100_0000_01b3);
+    let mut any = false;
+    for (t, track) in p.tracks.iter().enumerate() {
+        for (r, region) in track.regions.iter().enumerate() {
+            let follows = region
+                .audio
+                .as_ref()
+                .and_then(|a| a.flex.as_ref())
+                .is_some_and(|f| f.follow.is_some());
+            if follows {
+                any = true;
+                mix(t as u64);
+                mix(r as u64);
+                mix(u64::from(region.start_bar.to_bits()));
+                mix(region.params.offset_secs.to_bits());
+            }
+        }
+    }
+    if !any {
+        return 0;
+    }
+    for pt in p.tempo_points() {
+        mix(pt.beat.to_bits());
+        mix(u64::from(pt.bpm.to_bits()));
+        mix(u64::from(pt.ramp));
+    }
+    mix(u64::from(p.sig.0) << 8 | u64::from(p.sig.1));
+    for c in &p.sig_changes {
+        mix(u64::from(c.bar) << 16 | u64::from(c.num) << 8 | u64::from(c.den));
+    }
+    h.max(1)
+}
+
+/// How long the tempo and the Follow Tempo regions' places stay the same before their markers
+/// are made again (a tempo being dragged, or followed from a MIDI clock, changes every frame).
+const FOLLOW_REST: Duration = Duration::from_millis(300);
+
+/// Makes the markers of every Follow Tempo region again when the tempo or a place changed and
+/// has rested for [`FOLLOW_REST`].
+fn follow_all(p: &mut Project, st: &mut FlexState) {
+    let key = follow_key(p);
+    if key == st.followed {
+        st.waiting = None;
+        return;
+    }
+    match st.waiting {
+        Some((k, since)) if k == key => {
+            if since.elapsed() < FOLLOW_REST {
+                return;
+            }
+        }
+        _ => {
+            st.waiting = Some((key, Instant::now()));
+            return;
+        }
+    }
+    follow_now(p, st);
+}
+
+/// Makes the markers of every Follow Tempo region again now if the tempo or a place changed
+/// since they were made (no waiting: an Undo step is about to be kept, so the tempo and its
+/// markers go in it together). Returns whether any changed.
+pub fn follow_now(p: &mut Project, st: &mut FlexState) -> bool {
+    st.waiting = None;
+    if follow_key(p) == st.followed {
+        return false;
+    }
+    let mut changed = false;
+    for t in 0..p.tracks.len() {
+        for r in 0..p.tracks[t].regions.len() {
+            changed |= follow(p, t, r);
+        }
+    }
+    // The markers' own changes do not move the key (the offset may: take it as it is now).
+    st.followed = follow_key(p);
+    changed
 }
 
 /// Time Stretch: region `r` of track `t` plays its audio `factor` times as long (2 is half
@@ -370,19 +698,23 @@ pub fn stretch_by(p: &mut Project, t: usize, r: usize, factor: f64) -> bool {
     set_mode(p, t, r, mode);
     let region = &mut p.tracks[t].regions[r];
     if let Some(f) = region.audio.as_mut().and_then(|a| a.flex.as_mut()) {
+        // Stretched by hand: it no longer follows the tempo by its beats.
+        f.follow = None;
         // A marker at the end, so the tail after the last one stretches too.
+        let mut markers = f.markers.clone();
         let end = f.place_of(duration);
-        if f.markers.last().is_none_or(|m| m.src < duration) {
-            f.markers.push(WarpPoint {
+        if markers.last().is_none_or(|m| m.src < duration) {
+            markers.push(WarpPoint {
                 src: duration,
                 dst: end,
             });
         }
-        for m in &mut f.markers {
+        for m in &mut markers {
             m.dst *= factor;
         }
+        // Where the region starts in its sound moves with the sound, when it is made.
+        f.set_markers(markers);
     }
-    region.params.offset_secs *= factor;
     p.song_rev += 1;
     true
 }
@@ -513,7 +845,8 @@ pub fn poll(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
         remove(p, t, r, ctx);
     }
     poll_tasks(p, s);
-    start_renders(p, s);
+    follow_all(p, &mut s.flex);
+    start_renders(ctx, p, s);
     poll_renders(ctx, p, s);
     if s.flex.busy() {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -556,7 +889,8 @@ fn poll_tasks(p: &mut Project, s: &mut UiState) {
                 let bar_end = p.beats_to_bar(end);
                 let region = &mut p.tracks[t].regions[r];
                 if let Some(f) = region.audio.as_mut().and_then(|a| a.flex.as_mut()) {
-                    f.markers = markers;
+                    f.set_markers(markers);
+                    f.follow = None;
                 }
                 // The region covers the whole result.
                 region.len_bars = (bar_end as f32 - (region.start_bar - 1.0)).max(1.0 / 64.0);
@@ -679,8 +1013,35 @@ fn clean_cache(dir: &std::path::Path, days: u64) {
     }
 }
 
-fn start_renders(p: &mut Project, s: &mut UiState) {
+/// The sounds the regions wait for: the fingerprints of the edits not made yet that are not
+/// neutral.
+fn wanted(p: &Project) -> Vec<u64> {
+    p.tracks
+        .iter()
+        .flat_map(|t| &t.regions)
+        .filter_map(|r| r.audio.as_ref()?.flex.as_ref())
+        .filter(|f| !f.is_neutral())
+        .map(FlexEdit::fingerprint)
+        .collect()
+}
+
+/// Stops the renders no region waits for any more (a tempo moved on, an edit changed again):
+/// they write nothing and free their place when their thread has stopped.
+fn cancel_stale(p: &Project, st: &mut FlexState) {
+    if st.renders.iter().all(Render::cancelled) {
+        return;
+    }
+    let wanted = wanted(p);
+    for r in &st.renders {
+        if !wanted.contains(&r.fingerprint) {
+            r.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+fn start_renders(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
     static CLEANED: std::sync::Once = std::sync::Once::new();
+    cancel_stale(p, &mut s.flex);
     for track in &mut p.tracks {
         for region in &mut track.regions {
             let Some(a) = region.audio.as_mut() else {
@@ -688,18 +1049,30 @@ fn start_renders(p: &mut Project, s: &mut UiState) {
             };
             let Some(f) = a.flex.as_mut() else { continue };
             let fp = f.fingerprint();
-            if f.rendered == fp || s.flex.renders.iter().any(|r| r.fingerprint == fp) {
+            if f.rendered == fp
+                || s.flex
+                    .renders
+                    .iter()
+                    .any(|r| r.fingerprint == fp && !r.cancelled())
+            {
                 continue;
             }
             if f.is_neutral() {
-                // Nothing moved: the recording itself plays.
+                // Nothing moved: the recording itself plays, with its own waveform (the
+                // overview of the sound made before would not match it), from the place in it
+                // the region had in the sound before.
+                region.params.offset_secs = f.target_offset(region.params.offset_secs);
+                f.played = None;
                 if a.file.path != f.original.path {
-                    a.file = f.original.clone();
-                    p.song_rev += 1;
+                    if let Some(flex) = a.flex.take() {
+                        *a = crate::import::audio_region(flex.original.clone(), ctx);
+                        a.flex = Some(flex);
+                    }
                 }
                 if let Some(f) = a.flex.as_mut() {
                     f.rendered = fp;
                 }
+                p.song_rev += 1;
                 continue;
             }
             if s.flex.renders.len() >= MAX_RENDERS {
@@ -708,16 +1081,19 @@ fn start_renders(p: &mut Project, s: &mut UiState) {
             }
             CLEANED.call_once(|| clean_cache(&cache_dir(), CACHE_DAYS));
             let edit = f.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let stop = cancel.clone();
             let (tx, result) = channel();
             let spawned = std::thread::Builder::new()
                 .name("prowave-flex-render".into())
                 .spawn(move || {
-                    let _ = tx.send(render(&edit, fp));
+                    let _ = tx.send(render_unless(&edit, fp, &stop));
                 });
             if spawned.is_ok() {
                 s.flex.renders.push(Render {
                     fingerprint: fp,
                     result,
+                    cancel,
                 });
             }
         }
@@ -725,12 +1101,30 @@ fn start_renders(p: &mut Project, s: &mut UiState) {
 }
 
 /// Makes the sound of an edit (or finds it already made).
-fn render(edit: &FlexEdit, fingerprint: u64) -> Result<AudioFile, String> {
+#[cfg(test)]
+pub(crate) fn render(edit: &FlexEdit, fingerprint: u64) -> Result<AudioFile, String> {
+    render_unless(edit, fingerprint, &AtomicBool::new(false))
+}
+
+/// What a render stopped by its `cancel` flag returns.
+const CANCELLED: &str = "cancelled";
+
+/// [`render`], stopped between its steps (and before anything is written) once `cancel` is
+/// set. The edit's own markers are made, never the ones of the sound played before it.
+fn render_unless(
+    edit: &FlexEdit,
+    fingerprint: u64,
+    cancel: &AtomicBool,
+) -> Result<AudioFile, String> {
+    let stopped = || cancel.load(Ordering::Relaxed);
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{fingerprint:016x}.wav"));
     if let Ok(f) = AudioFile::open(&path) {
         return Ok(f);
+    }
+    if stopped() {
+        return Err(CANCELLED.into());
     }
     let sr = edit.original.sample_rate;
     let input = edit.original.read_stereo().map_err(|e| e.to_string())?;
@@ -738,11 +1132,19 @@ fn render(edit: &FlexEdit, fingerprint: u64) -> Result<AudioFile, String> {
         Some(m) if !m.is_neutral() => crate::pitch_editor::render(&edit.original, input, m)?,
         _ => input,
     };
+    if stopped() {
+        return Err(CANCELLED.into());
+    }
+    // AGENT: @engine-agent a cancel flag inside `warp` / `shift_pitch` would stop a stale
+    // render mid-way; today it stops only between them.
     let timed = if edit.markers.is_empty() {
         input
     } else {
         prowave_engine::warp(&input, sr, &edit.markers, edit.mode)
     };
+    if stopped() {
+        return Err(CANCELLED.into());
+    }
     let pitched = if edit.pitch.is_empty() {
         timed
     } else {
@@ -754,6 +1156,9 @@ fn render(edit: &FlexEdit, fingerprint: u64) -> Result<AudioFile, String> {
         };
         prowave_engine::shift_pitch(&timed, sr, &edit.pitch, mode)
     };
+    if stopped() {
+        return Err(CANCELLED.into());
+    }
     prowave_engine::write_wav(&path, &pitched, sr).map_err(|e| e.to_string())?;
     AudioFile::open(&path).map_err(|e| e.to_string())
 }
@@ -764,26 +1169,34 @@ fn poll_renders(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
         Err(TryRecvError::Empty) => true,
         Err(TryRecvError::Disconnected) => false,
         Ok(result) => {
-            done.push((job.fingerprint, result));
+            done.push((job.fingerprint, job.cancelled(), result));
             false
         }
     });
-    for (fp, result) in done {
+    for (fp, cancelled, result) in done {
         let file = match result {
             Ok(f) => f,
+            Err(_) if cancelled => continue,
             Err(e) => {
                 s.status = Some(trf("Flex: cannot make the sound: {}", &[&e]));
                 continue;
             }
         };
+        // Only the regions whose edit this sound is made for; every other keeps its own.
         for track in &mut p.tracks {
             for region in &mut track.regions {
                 let Some(a) = region.audio.as_mut() else {
                     continue;
                 };
-                let Some(mut f) = a.flex.take().filter(|f| f.fingerprint() == fp) else {
+                if a.flex.as_ref().is_none_or(|f| f.fingerprint() != fp) {
+                    continue;
+                }
+                let Some(mut f) = a.flex.take() else {
                     continue;
                 };
+                // The new sound comes with its own place for the region's start.
+                region.params.offset_secs = f.target_offset(region.params.offset_secs);
+                f.played = None;
                 f.rendered = fp;
                 *a = crate::import::audio_region(file.clone(), ctx);
                 a.flex = Some(f);
@@ -1131,6 +1544,270 @@ pub(crate) mod tests {
         );
     }
 
+    /// Follow Tempo: a loop at 100 BPM whose beats are known, in a project at 120, then 90:
+    /// its markers are made again when the tempo changes and every beat lands on the project's.
+    #[test]
+    fn a_follow_tempo_region_keeps_its_beats_on_the_project_beats() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("loop.wav");
+        let beats: Vec<f64> = (0..16).map(|k| 0.25 + k as f64 * 0.6).collect();
+        write_clicks(&wav, &beats, 10.0);
+        let (mut p, t) = project_with(&wav);
+        set_mode(&mut p, t, 0, FlexMode::Rhythmic);
+        let follow = TempoFollow {
+            one_secs: 0.25,
+            beats: beats.clone(),
+            first: 0,
+            bpm: 100.0,
+        };
+        // The recording starts a quarter second before its beat 1: on bar 2 (beat 4).
+        p.tracks[t].regions[0].start_bar = 2.0 - (0.25 / 0.6 / 4.0) as f32;
+        if let Some(f) = p.tracks[t].regions[0]
+            .audio
+            .as_mut()
+            .and_then(|a| a.flex.as_mut())
+        {
+            f.follow = Some(follow);
+        }
+        let mut s = UiState::new();
+        for bpm in [120.0f32, 90.0] {
+            p.tempo = bpm;
+            settle(&mut p, &mut s);
+            let region = &p.tracks[t].regions[0];
+            let a = region.audio.as_ref().unwrap();
+            assert!(!a.flex.as_ref().unwrap().markers.is_empty());
+            let x = a.file.read_stereo().unwrap();
+            let map = p.tempo_map();
+            let s0 = map.seconds_at(p.region_start_beats(region));
+            for k in [0usize, 5, 15] {
+                let want = map.seconds_at(4.0 + k as f64) - s0;
+                let i0 = ((want - 0.01) * 44_100.0) as usize;
+                let i = (i0..i0 + 882).find(|&i| x[i * 2].abs() > 0.3).unwrap();
+                let err = i as f64 / 44_100.0 - want;
+                assert!(err.abs() < 1e-3, "{bpm}: beat {k} off {err}");
+            }
+        }
+    }
+
+    /// A loop at 100 BPM whose beats are known (Follow Tempo, Rhythmic), its beat 1 on bar 2,
+    /// in a project at 120, its sound made.
+    fn follow_project(dir: &std::path::Path, s: &mut UiState) -> (Project, usize) {
+        let wav = dir.join("loop.wav");
+        let beats: Vec<f64> = (0..16).map(|k| 0.25 + k as f64 * 0.6).collect();
+        write_clicks(&wav, &beats, 10.0);
+        let (mut p, t) = project_with(&wav);
+        set_mode(&mut p, t, 0, FlexMode::Rhythmic);
+        p.tracks[t].regions[0].start_bar = 2.0 - (0.25 / 0.6 / 4.0) as f32;
+        if let Some(f) = p.tracks[t].regions[0]
+            .audio
+            .as_mut()
+            .and_then(|a| a.flex.as_mut())
+        {
+            f.follow = Some(TempoFollow {
+                one_secs: 0.25,
+                beats,
+                first: 0,
+                bpm: 100.0,
+            });
+        }
+        settle(&mut p, s);
+        (p, t)
+    }
+
+    /// Whether every Follow Tempo region's markers are the ones for the project's tempo now.
+    fn followed_now(p: &Project) -> bool {
+        let mut q = p.clone();
+        (0..q.tracks.len()).all(|t| (0..q.tracks[t].regions.len()).all(|r| !follow(&mut q, t, r)))
+    }
+
+    /// Where beat `k` of the loop (quarter note 4 + k) is heard in region `r`'s sound, against
+    /// where the project has it, in seconds.
+    fn beat_error(p: &Project, t: usize, r: usize, k: f64) -> f64 {
+        let region = &p.tracks[t].regions[r];
+        let a = region.audio.as_ref().unwrap();
+        let x = a.file.read_stereo().unwrap();
+        let map = p.tempo_map();
+        let s0 = map.seconds_at(p.region_start_beats(region)) - region.params.offset_secs;
+        let want = map.seconds_at(4.0 + k) - s0;
+        let i0 = ((want - 0.01) * 44_100.0) as usize;
+        let i = (i0..i0 + 882)
+            .find(|&i| x[i * 2].abs() > 0.3)
+            .unwrap_or_else(|| panic!("no beat {k} near {want} s"));
+        i as f64 / 44_100.0 - want
+    }
+
+    /// Review id 10: the right half of a cut Follow Tempo region starts seconds into its sound.
+    /// After a tempo change it plays the sound it has from the place it had until the sound for
+    /// the new tempo is made (never the old sound from the new sound's place), then the new one
+    /// from its new place, every beat on the project's.
+    #[test]
+    fn a_cut_follow_region_keeps_its_place_until_its_new_sound_is_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = UiState::new();
+        let (mut p, t) = follow_project(dir.path(), &mut s);
+        assert!(p.split_region(t, 0, 8.0));
+        settle(&mut p, &mut s);
+        let r = &p.tracks[t].regions[1];
+        let (file, offset) = (
+            r.audio.as_ref().unwrap().file.path.clone(),
+            r.params.offset_secs,
+        );
+        assert!(offset > 1.0, "{offset}");
+        assert!(beat_error(&p, t, 1, 6.0).abs() < 1e-3);
+        p.tempo = 90.0;
+        assert!(follow(&mut p, t, 1), "markers made for 90");
+        let r = &p.tracks[t].regions[1];
+        assert_eq!(r.audio.as_ref().unwrap().file.path, file, "not made yet");
+        assert_eq!(
+            r.params.offset_secs, offset,
+            "the sound made for 120 plays from its own place"
+        );
+        settle(&mut p, &mut s);
+        let r = &p.tracks[t].regions[1];
+        assert_ne!(r.audio.as_ref().unwrap().file.path, file);
+        assert!(r.params.offset_secs > offset, "{}", r.params.offset_secs);
+        for k in [4.0, 6.0, 11.0, 15.0] {
+            let e = beat_error(&p, t, 1, k);
+            assert!(e.abs() < 1e-3, "beat {k} off {e}");
+        }
+        assert!(followed_now(&p));
+    }
+
+    /// Review id 11: a tempo dragged (or followed from a clock) changes every frame; no Flex
+    /// render starts until it rests, and then one for the tempo it rests on.
+    #[test]
+    fn a_tempo_still_moving_starts_no_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = UiState::new();
+        let (mut p, t) = follow_project(dir.path(), &mut s);
+        let ctx = egui::Context::default();
+        for i in 0..12 {
+            p.tempo = 100.0 + i as f32;
+            poll(&ctx, &mut p, &mut s);
+            assert!(
+                s.flex.renders.is_empty(),
+                "frame {i}: a render started for a tempo still moving"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        settle(&mut p, &mut s);
+        let f = p.tracks[t].regions[0]
+            .audio
+            .as_ref()
+            .unwrap()
+            .flex
+            .as_ref()
+            .unwrap();
+        assert_eq!(f.rendered, f.fingerprint());
+        assert!(followed_now(&p));
+        for k in [0.0, 7.0, 15.0] {
+            assert!(beat_error(&p, t, 0, k).abs() < 1e-3);
+        }
+    }
+
+    /// Review id 11: a render no region waits for any more is stopped and writes nothing; the
+    /// one a region waits for goes on.
+    #[test]
+    fn a_render_nobody_waits_for_is_cancelled_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("r.wav");
+        write_clicks(&wav, &[0.5, 1.0, 1.5], 2.0);
+        let (mut p, t) = project_with(&wav);
+        set_mode(&mut p, t, 0, FlexMode::Rhythmic);
+        let f = p.tracks[t].regions[0]
+            .audio
+            .as_mut()
+            .unwrap()
+            .flex
+            .as_mut()
+            .unwrap();
+        f.markers = markers_from([(0.5, 0.6), (1.0, 1.1)]);
+        let edit = f.clone();
+        let wanted = edit.fingerprint();
+        let mut st = FlexState::default();
+        let stale = wanted ^ 0x00ff_00ff_00ff_00ff;
+        let mut keep = Vec::new();
+        for fp in [wanted, stale] {
+            let (tx, result) = channel();
+            keep.push(tx);
+            st.renders.push(Render {
+                fingerprint: fp,
+                result,
+                cancel: Arc::new(AtomicBool::new(false)),
+            });
+        }
+        cancel_stale(&p, &mut st);
+        assert!(!st.renders[0].cancelled(), "a region waits for it");
+        assert!(st.renders[1].cancelled(), "nobody waits for it");
+        // A stopped render writes nothing (a fingerprint no sound was made for).
+        let fp = stale ^ std::process::id() as u64;
+        let path = cache_dir().join(format!("{fp:016x}.wav"));
+        let _ = std::fs::remove_file(&path);
+        let r = render_unless(&edit, fp, &AtomicBool::new(true));
+        assert_eq!(r.err().as_deref(), Some(CANCELLED));
+        assert!(!path.exists());
+        // Not stopped, it is made.
+        let made = render(&edit, fp).unwrap();
+        assert_eq!(made.path, path);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The end of a frame as the app has it (`App::track_history`): an edit is recorded for
+    /// Undo.
+    fn frame_end(h: &mut crate::undo::History, p: &mut Project, s: &mut UiState) {
+        h.record_followed(p, &mut s.flex);
+    }
+
+    fn undo(h: &mut crate::undo::History, p: &mut Project, s: &mut UiState) -> bool {
+        h.undo_followed(p, &mut s.flex)
+    }
+
+    fn redo(h: &mut crate::undo::History, p: &mut Project, s: &mut UiState) -> bool {
+        h.redo_followed(p, &mut s.flex)
+    }
+
+    /// Review id 14: a tempo change (Session to Song Tempo, a typed tempo) and the Follow Tempo
+    /// markers made for it are one Undo step; Undo and Redo never leave markers made for
+    /// another tempo.
+    #[test]
+    fn undo_of_a_tempo_change_takes_its_follow_markers_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = UiState::new();
+        let (mut p, t) = follow_project(dir.path(), &mut s);
+        let mut h = crate::undo::History::new(&p);
+        let at_120 = p.tracks[t].regions[0].clone();
+        // The tempo changes in the window, and the frame ends.
+        p.tempo = 90.0;
+        frame_end(&mut h, &mut p, &mut s);
+        // The frames after it: Flex catches up.
+        settle(&mut p, &mut s);
+        frame_end(&mut h, &mut p, &mut s);
+        assert!(followed_now(&p));
+        assert!(undo(&mut h, &mut p, &mut s));
+        settle(&mut p, &mut s);
+        assert!(
+            followed_now(&p),
+            "after Undo, at {} BPM, the markers are another tempo's",
+            p.tempo
+        );
+        assert_eq!(p.tempo, 120.0, "one Undo takes the tempo change back");
+        let f = |r: &Region| {
+            r.audio
+                .as_ref()
+                .unwrap()
+                .flex
+                .as_ref()
+                .unwrap()
+                .markers
+                .clone()
+        };
+        assert_eq!(f(&p.tracks[t].regions[0]), f(&at_120));
+        assert!(redo(&mut h, &mut p, &mut s));
+        settle(&mut p, &mut s);
+        assert_eq!(p.tempo, 90.0);
+        assert!(followed_now(&p));
+    }
+
     #[test]
     fn a_region_without_audio_and_a_gone_region_change_nothing() {
         let mut p = Project::demo();
@@ -1150,5 +1827,61 @@ pub(crate) mod tests {
         settle(&mut q, &mut s);
         assert!(q.tracks[t].regions.is_empty());
         settle(&mut p, &mut s);
+    }
+
+    /// Flex edits taken back until nothing moves: the region plays its recording again and its
+    /// waveform is the recording's, not the overview of the sound made before.
+    #[test]
+    fn a_flex_edit_back_to_neutral_draws_the_recordings_waveform() {
+        use crate::model::RegionParams;
+        let original = AudioFile::open(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../prowave-engine/tests/fixtures/tone.caf"),
+        )
+        .unwrap();
+        let made = AudioFile {
+            path: "/prowave-flex-test/made.wav".into(),
+            ..original.clone()
+        };
+        let stale = vec![(-0.9f32, 0.9f32); 7];
+        let audio = AudioRegion {
+            file: made,
+            peaks: Default::default(),
+            flex: Some(FlexEdit::new(original.clone(), FlexMode::Polyphonic)),
+        };
+        let _ = audio.peaks.set(stale.clone());
+        let old = audio.peaks.clone();
+        let mut p = Project::empty();
+        p.tracks.clear();
+        let mut t = Track::new("Audio 1", TrackKind::Audio);
+        t.regions.push(Region {
+            name: "r".into(),
+            start_bar: 1.0,
+            len_bars: 1.0,
+            notes: Vec::new(),
+            controls: Vec::new(),
+            folder: None,
+            generated: None,
+            audio: Some(audio),
+            params: RegionParams::default(),
+        });
+        p.tracks.push(t);
+        let mut s = UiState::new();
+        let ctx = egui::Context::default();
+        start_renders(&ctx, &mut p, &mut s);
+        let a = p.tracks[0].regions[0].audio.as_ref().unwrap();
+        assert_eq!(a.file.path, original.path, "the recording plays again");
+        assert!(a.flex.is_some(), "the Flex edit stays on the region");
+        assert!(!std::sync::Arc::ptr_eq(&a.peaks, &old), "a new overview");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let fresh = loop {
+            if let Some(v) = a.peaks.get() {
+                break v.clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "no overview made");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(fresh, original.peaks(fresh.len()).unwrap());
+        assert_ne!(fresh, stale);
     }
 }

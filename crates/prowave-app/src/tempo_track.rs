@@ -9,19 +9,20 @@
 //! - Double-click a point, or right-click > Delete Tempo Change: removes it.
 use crate::i18n::tr;
 use crate::model::{Project, MAX_BPM, MIN_BPM};
+use crate::theme::{self, Face};
+use crate::tracks_area::hw_tracks;
 use crate::widgets::{context_click, context_menu};
-use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Sense, Shape, Stroke, Ui};
+use egui::{pos2, vec2, Align2, Color32, Rect, Sense, Shape, Stroke, Ui};
 
 /// Height of the Tempo track, in points.
 /// The closest two tempo points may be, in quarter notes.
 const MIN_GAP: f64 = 0.25;
 
-pub const HEIGHT: f32 = 46.0;
+pub const HEIGHT: f32 = 50.0;
 
-const LINE: Color32 = Color32::from_rgb(0x5f, 0xc8, 0x6a);
-const FILL: Color32 = Color32::from_rgba_premultiplied(0x18, 0x34, 0x1b, 0x60);
-const BG: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
-const HEADER_BG: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+/// The tempo line: printed in ink on the recessed lane, with a faint ink fill under it.
+const LINE: Color32 = theme::INK;
+const FILL: Color32 = Color32::from_rgba_premultiplied(2, 2, 2, 28);
 /// Margin above and below the slowest and fastest tempo, in BPM.
 const MARGIN: f32 = 8.0;
 /// Padding inside the lane, in points.
@@ -75,36 +76,32 @@ pub fn show(
 
     // ---- header
     let gh = ui.painter_at(header);
-    gh.rect_filled(header, 0.0, HEADER_BG);
-    gh.line_segment(
-        [header.left_bottom(), header.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x22)),
+    hw_tracks::global_header(&gh, header, tr("Tempo"));
+    // The tempo at the playhead on a small LCD, the lane's range printed beside it.
+    let glass = Rect::from_min_max(
+        pos2(header.right() - 112.0, header.top() + 6.0),
+        pos2(header.right() - 20.0, header.bottom() - 7.0),
     );
-    gh.text(
-        pos2(header.left() + 12.0, header.center().y - 7.0),
-        Align2::LEFT_CENTER,
-        tr("Tempo"),
-        FontId::proportional(13.0),
-        Color32::from_gray(0xdc),
+    crate::hw::lcd_readout(
+        &gh,
+        glass,
+        "BPM",
+        &format!("{:.1}", p.tempo_at(p.position_beats)),
     );
-    gh.text(
-        pos2(header.left() + 12.0, header.center().y + 9.0),
-        Align2::LEFT_CENTER,
-        format!("{:.1} bpm", p.tempo_at(p.position_beats)),
-        FontId::proportional(11.0),
-        LINE,
-    );
-    gh.text(
-        pos2(header.right() - 10.0, header.center().y),
+    hw_tracks::label(
+        &gh,
+        pos2(glass.left() - 10.0, header.center().y),
         Align2::RIGHT_CENTER,
-        format!("{:.0}–{:.0}", r.0, r.1),
-        FontId::proportional(10.0),
-        Color32::from_gray(0x8a),
+        &format!("{:.0}–{:.0}", r.0, r.1),
+        Face::Bold,
+        10.0,
+        0.04,
+        theme::PRINT,
     );
 
     // ---- lane: double-click an empty spot to add a tempo change
     let g = ui.painter_at(lane);
-    g.rect_filled(lane, 0.0, BG);
+    hw_tracks::global_lane(&g, lane);
     let lane_resp = ui.interact(lane, egui::Id::unique("tempo_track_lane"), Sense::click());
     if lane_resp.double_clicked() {
         if let Some(pt) = lane_resp.interact_pointer_pos() {
@@ -144,7 +141,7 @@ pub fn show(
             Stroke::NONE,
         ));
     }
-    g.add(Shape::line(line, Stroke::new(1.5, LINE)));
+    g.add(Shape::line(line, Stroke::new(2.0, LINE)));
 
     // ---- points
     let mut delete = None;
@@ -210,15 +207,21 @@ pub fn show(
                 ui.close();
             }
         });
+        // A point is a small ink head; the one under the pointer lights orange.
         let hot = resp.hovered() || resp.dragged() || context_click(&resp);
-        g.circle_filled(at, if hot { 4.5 } else { 3.5 }, LINE);
+        g.circle_filled(at + vec2(0.0, 1.0), 4.5, theme::BONE_HI);
+        g.circle_filled(at, 4.5, if hot { theme::ORANGE } else { theme::INK });
+        g.circle_stroke(at, 4.5, Stroke::new(1.0, theme::INK));
         if hot || resp.dragged() {
-            g.text(
-                at + vec2(6.0, -4.0),
+            hw_tracks::label(
+                &g,
+                at + vec2(8.0, -3.0),
                 Align2::LEFT_BOTTOM,
-                format!("{bpm:.0}"),
-                FontId::proportional(11.0),
-                Color32::WHITE,
+                &format!("{bpm:.0}"),
+                Face::Bold,
+                11.0,
+                0.04,
+                theme::INK,
             );
         }
     }
@@ -232,18 +235,7 @@ pub fn show(
         }
     }
 
-    // ---- playhead
-    let x = x_of(p.position_beats);
-    if x >= lane.left() && x <= lane.right() {
-        g.line_segment(
-            [pos2(x, lane.top()), pos2(x, lane.bottom())],
-            Stroke::new(1.0, Color32::WHITE),
-        );
-    }
-    g.line_segment(
-        [lane.left_bottom(), lane.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(0x1a)),
-    );
+    // The playhead runs through this lane from the Tracks area's ruler.
 }
 
 #[cfg(test)]

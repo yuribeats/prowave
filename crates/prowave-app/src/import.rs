@@ -65,7 +65,7 @@ pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result
     p.tracks.push(Track {
         name: name.clone(),
         kind: TrackKind::Audio,
-        color: egui::Color32::from_rgb(0x3f, 0x5f, 0xc0),
+        color: crate::theme::TRACK_PALETTE[2],
         mute: false,
         solo: false,
         rec: false,

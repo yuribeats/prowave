@@ -31,10 +31,13 @@
 //! Not here: the Polyphonic algorithm. Editing the notes of a chord needs each note's sound
 //! separated from the others and made again on its own; without that, moving one note of a
 //! chord moves the whole chord's sound, which would only pretend to be a polyphonic editor.
+use crate::hw::{self, Cap};
+use crate::hw_sampler as hk;
 use crate::i18n::{tr, trf};
 use crate::model::{Project, TrackKind};
+use crate::theme::{self, Face};
 use crate::{Bottom, UiState};
-use egui::{pos2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui};
+use egui::{pos2, Color32, Pos2, Rect, Sense, Shape, Stroke, Ui};
 use prowave_engine::melody::{find_notes, pitch_centre, Algorithm, Blob, NoteAnalysis};
 use prowave_engine::note_render::{self, NoteChange, SegmentCache};
 use prowave_engine::{AudioFile, FlexMode, PitchTrack, WarpPoint};
@@ -1077,17 +1080,59 @@ impl Clock {
     }
 }
 
-const BG: Color32 = Color32::from_gray(0x24);
-const ROW_IN: Color32 = Color32::from_gray(0x2e);
-const ROW_OUT: Color32 = Color32::from_gray(0x27);
-const TEXT: Color32 = Color32::from_gray(0xdd);
-const DIM: Color32 = Color32::from_gray(0x9a);
-const BLOB: Color32 = Color32::from_rgb(0xd8, 0x8f, 0x32);
-const BLOB_SEL: Color32 = Color32::from_rgb(0xff, 0xc4, 0x5c);
-const CURVE: Color32 = Color32::from_rgb(0x3a, 0x22, 0x08);
+// The Hardware look: the notes on the arrange floor (rows of bone, the key's notes lighter),
+// black note blobs with a bone pitch curve, selected ones in signal orange.
+const ROW_IN: Color32 = theme::GRID_BG;
+const ROW_OUT: Color32 = theme::BONE3;
+const TEXT: Color32 = theme::INK;
+const BLOB: Color32 = theme::REGION;
+const CURVE: Color32 = theme::ON_DARK;
+const CURVE_SEL: Color32 = theme::ORANGE;
+/// The key column at the left, the bar ruler on top, the LCD status bar at the bottom.
 const RULER_W: f32 = 46.0;
-const TIME_H: f32 = 18.0;
-const STATUS_H: f32 = 20.0;
+const TIME_H: f32 = 30.0;
+const STATUS_H: f32 = 42.0;
+/// One row of the control bar: a bracket line over a row of keys.
+const BAR_ROW_H: f32 = 48.0;
+/// Rows that are black keys on a piano.
+const BLACK_KEYS: [i32; 5] = [1, 3, 6, 8, 10];
+
+/// A tab key of the control bar: a fixed minimum width, its caption in the silkscreen face,
+/// pressed in with its LED lit while `on`.
+fn tab_key(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
+    let g = ui.painter().clone();
+    let w = (hw::silk_width(&g, label, 12.0) + 34.0).max(92.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, hk::ROW_KEY_H + 3.0), Sense::click());
+    let rect = Rect::from_min_size(rect.min, egui::vec2(w, hk::ROW_KEY_H));
+    let face = hw::paint_key(
+        &g,
+        rect,
+        Cap::Bone,
+        on || resp.is_pointer_button_down_on(),
+        resp.hovered(),
+    );
+    hw::led_sized(&g, pos2(face.left() + 10.0, face.center().y), 2.5, on);
+    hw::silk(
+        &g,
+        pos2(face.center().x + 6.0, face.center().y),
+        egui::Align2::CENTER_CENTER,
+        label,
+        12.0,
+        theme::INK,
+    );
+    resp
+}
+
+/// A bracketed group of controls in a control-bar row: `add` lays them out, then the bracket
+/// is drawn over them at `y`, and a gutter follows.
+fn group<R>(ui: &mut Ui, y: f32, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let x0 = ui.cursor().min.x;
+    let r = add(ui);
+    let x1 = ui.min_rect().right();
+    hk::bracket(ui.painter(), x0, x1, y, label);
+    ui.add_space(18.0);
+    r
+}
 
 fn note_name(m: f32) -> String {
     const NAMES: [&str; 12] = [
@@ -1104,15 +1149,16 @@ fn note_name(m: f32) -> String {
 /// Draws the Pitch Editor in `ui` (the editor pane).
 pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let area = ui.available_rect_before_wrap();
-    ui.painter().rect_filled(area, 0.0, BG);
+    hw::chassis(ui.painter(), area);
     let Some((t, r)) = target(p, s) else {
         ui.allocate_rect(area, Sense::hover());
-        ui.painter().text(
+        hw::silk(
+            ui.painter(),
             area.center(),
             egui::Align2::CENTER_CENTER,
             tr("Double-click an audio region to edit its notes"),
-            FontId::proportional(14.0),
-            TEXT,
+            14.0,
+            theme::PRINT,
         );
         return;
     };
@@ -1128,83 +1174,173 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let fifths = crate::score::fifths(p.key);
     let duration = file.duration_secs();
 
-    // Row 1: name, algorithm, tools, pitch grid.
+    // The control bar: a lit faceplate with two rows of bracketed groups and a seam under it.
     let mut new_algorithm = algorithm;
     let v = &mut s.pitch_ed;
-    ui.horizontal(|ui| {
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new(tr("Pitch Editor")).strong().color(TEXT));
-        ui.label(egui::RichText::new(&p.tracks[t].regions[r].name).color(DIM));
-        ui.separator();
-        egui::ComboBox::from_id_salt("pitch-algorithm")
-            .selected_text(algorithm_label(algorithm))
-            .show_ui(ui, |ui| {
-                for a in Algorithm::ALL {
-                    ui.selectable_value(&mut new_algorithm, a, algorithm_label(a));
-                }
-                ui.add_enabled(false, egui::Button::new(tr("Polyphonic (not available)")));
-            });
-        ui.separator();
-        for tool in Tool::ALL {
-            if ui.selectable_label(v.tool == tool, tool.label()).clicked() {
-                v.tool = tool;
-            }
+    let bar_r = Rect::from_min_size(area.min, egui::vec2(area.width(), 2.0 * BAR_ROW_H + 10.0));
+    {
+        let g = ui.painter();
+        hw::faceplate(g, bar_r, 0.0, true);
+        for (x, y, a) in [
+            (bar_r.left() + 9.0, bar_r.top() + 11.0, 30.0),
+            (bar_r.right() - 9.0, bar_r.top() + 11.0, -40.0),
+            (bar_r.left() + 9.0, bar_r.bottom() - 10.0, 75.0),
+            (bar_r.right() - 9.0, bar_r.bottom() - 10.0, 10.0),
+        ] {
+            hw::screw(g, pos2(x, y), 4.0, a);
         }
-        ui.separator();
-        ui.label(egui::RichText::new(tr("Pitch Grid")).color(DIM));
-        egui::ComboBox::from_id_salt("pitch-snap")
-            .selected_text(v.snap.label())
-            .show_ui(ui, |ui| {
+        hw::seam_h(g, bar_r.x_range(), bar_r.bottom());
+        hw::seam_h(g, bar_r.x_range(), bar_r.bottom() + 1.0);
+    }
+    let row_rect = |i: usize| {
+        Rect::from_min_max(
+            pos2(
+                bar_r.left() + 24.0,
+                bar_r.top() + 6.0 + i as f32 * BAR_ROW_H,
+            ),
+            pos2(
+                bar_r.right() - 24.0,
+                bar_r.top() + 6.0 + (i + 1) as f32 * BAR_ROW_H,
+            ),
+        )
+    };
+    let row_ui = |ui: &mut Ui, r: Rect| {
+        let mut c = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(pos2(r.left(), r.top() + 16.0), r.max))
+                .layout(egui::Layout::left_to_right(egui::Align::Min)),
+        );
+        c.spacing_mut().item_spacing = egui::vec2(hk::GUTTER, 0.0);
+        c.set_clip_rect(r.expand(4.0));
+        c
+    };
+    // Row 1: the wordmark and the region, the algorithm, the tools (VIEW), the pitch grid.
+    {
+        let rr = row_rect(0);
+        let by = rr.top() + 7.0;
+        let mut row = row_ui(ui, rr);
+        let ui = &mut row;
+        let g = ui.painter().clone();
+        let (tr_rect, _) = ui.allocate_exact_size(egui::vec2(150.0, hk::ROW_KEY_H), Sense::hover());
+        let w = hw::text(
+            &g,
+            pos2(tr_rect.left(), tr_rect.center().y - 7.0),
+            egui::Align2::LEFT_CENTER,
+            "PITCH EDITOR",
+            Face::SilkX,
+            14.0,
+            TEXT,
+        );
+        let name = p.tracks[t].regions[r].name.to_uppercase();
+        let name = hw::fit(&g, &name, Face::Lcd, 9.0, w.width() - 8.0);
+        if !name.is_empty() {
+            hk::chip(
+                &g,
+                pos2(w.left(), tr_rect.center().y + 9.0),
+                &name,
+                9.0,
+                false,
+            );
+        }
+        ui.add_space(10.0);
+        group(ui, by, tr("Algorithm"), |ui| {
+            hk::dropdown(
+                ui,
+                "pitch-algorithm",
+                124.0,
+                algorithm_label(algorithm),
+                |ui| {
+                    for a in Algorithm::ALL {
+                        if ui
+                            .selectable_label(new_algorithm == a, algorithm_label(a))
+                            .clicked()
+                        {
+                            new_algorithm = a;
+                            ui.close();
+                        }
+                    }
+                    ui.add_enabled(false, egui::Button::new(tr("Polyphonic (not available)")));
+                },
+            );
+        });
+        group(ui, by, "VIEW", |ui| {
+            for tool in Tool::ALL {
+                let on = v.tool == tool;
+                if tab_key(ui, tool.label(), on).clicked() {
+                    v.tool = tool;
+                }
+            }
+        });
+        let mut snap = v.snap;
+        group(ui, by, tr("Pitch Grid"), |ui| {
+            hk::dropdown(ui, "pitch-snap", 124.0, v.snap.label(), |ui| {
                 for sn in Snap::ALL {
-                    ui.selectable_value(&mut v.snap, sn, sn.label());
+                    if ui.selectable_label(snap == sn, sn.label()).clicked() {
+                        snap = sn;
+                        ui.close();
+                    }
                 }
             });
-    });
-    // Row 2: the macros.
+        });
+        v.snap = snap;
+    }
+    // Row 2: the macros and the vertical zoom.
     let mut correct = false;
     let mut quantize = false;
-    ui.horizontal(|ui| {
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(tr("Correct Pitch"))
-                .strong()
-                .color(TEXT),
-        );
-        ui.label(egui::RichText::new(tr("Centre")).color(DIM));
-        ui.add(
-            egui::Slider::new(&mut v.centre, 0.0..=1.0)
-                .custom_formatter(|x, _| format!("{:.0} %", x * 100.0)),
-        );
-        ui.label(egui::RichText::new(tr("Drift")).color(DIM));
-        ui.add(
-            egui::Slider::new(&mut v.drift, 0.0..=1.0)
-                .custom_formatter(|x, _| format!("{:.0} %", x * 100.0)),
-        );
-        correct = ui.button(tr("Apply")).clicked();
-        ui.separator();
-        ui.label(
-            egui::RichText::new(tr("Quantize Time"))
-                .strong()
-                .color(TEXT),
-        );
-        let grid_name = crate::note_edit::GRIDS
-            .iter()
-            .find(|(_, g)| (f64::from(*g) - v.grid).abs() < 1e-6)
-            .map_or("1/16 Note", |(n, _)| n);
-        egui::ComboBox::from_id_salt("pitch-grid")
-            .selected_text(tr(grid_name))
-            .show_ui(ui, |ui| {
+    let pct = |x: f32| format!("{:.0} %", x * 100.0);
+    {
+        let rr = row_rect(1);
+        let by = rr.top() + 7.0;
+        let mut row = row_ui(ui, rr);
+        let ui = &mut row;
+        group(ui, by, tr("Correct Pitch"), |ui| {
+            hk::silk(ui, tr("Centre"), 11.0, theme::INK2);
+            hk::slider(ui, "pitch-centre", 96.0, &mut v.centre, 0.0, 1.0, false);
+            hk::readout(ui, &pct(v.centre), 56.0);
+            ui.add_space(6.0);
+            hk::silk(ui, tr("Drift"), 11.0, theme::INK2);
+            hk::slider(ui, "pitch-drift", 96.0, &mut v.drift, 0.0, 1.0, false);
+            hk::readout(ui, &pct(v.drift), 56.0);
+            correct = hk::row_key(ui, tr("Apply"), Cap::Dark, false, None).clicked();
+        });
+        group(ui, by, tr("Quantize Time"), |ui| {
+            let grid_name = crate::note_edit::GRIDS
+                .iter()
+                .find(|(_, g)| (f64::from(*g) - v.grid).abs() < 1e-6)
+                .map_or("1/16 Note", |(n, _)| n);
+            let mut grid = v.grid;
+            hk::dropdown(ui, "pitch-grid", 118.0, tr(grid_name), |ui| {
                 for (name, g) in crate::note_edit::GRIDS {
-                    ui.selectable_value(&mut v.grid, f64::from(g), tr(name));
+                    if ui
+                        .selectable_label((grid - f64::from(g)).abs() < 1e-9, tr(name))
+                        .clicked()
+                    {
+                        grid = f64::from(g);
+                        ui.close();
+                    }
                 }
             });
-        ui.label(egui::RichText::new(tr("Strength")).color(DIM));
-        ui.add(
-            egui::Slider::new(&mut v.strength, 0.0..=1.0)
-                .custom_formatter(|x, _| format!("{:.0} %", x * 100.0)),
-        );
-        quantize = ui.button(tr("Apply")).clicked();
-    });
+            v.grid = grid;
+            ui.add_space(6.0);
+            hk::silk(ui, tr("Strength"), 11.0, theme::INK2);
+            hk::slider(ui, "pitch-strength", 96.0, &mut v.strength, 0.0, 1.0, false);
+            hk::readout(ui, &pct(v.strength), 56.0);
+            quantize = hk::row_key(ui, tr("Apply"), Cap::Dark, false, None).clicked();
+        });
+        // The rows' height, the plot's centre kept where it is.
+        group(ui, by, "ZOOM", |ui| {
+            let mut row_h = v.row_h;
+            if hk::slider(ui, "pitch-vzoom", 110.0, &mut row_h, 4.0, 28.0, false)
+                && v.plot.height() > 10.0
+            {
+                let centre = v.top - v.plot.height() / v.row_h / 2.0;
+                v.row_h = row_h;
+                v.top = (centre + v.plot.height() / row_h / 2.0).clamp(12.0, 127.0);
+            }
+        });
+    }
+    ui.allocate_rect(bar_r.expand2(egui::vec2(0.0, 1.0)), Sense::hover());
+    ui.add_space(2.0);
 
     if new_algorithm != algorithm {
         v.algorithm = new_algorithm;
@@ -1236,12 +1372,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 || tr("Analysing…").to_string(),
                 |e| trf("Pitch Editor: {}", &[&e]),
             );
-        g.text(
+        hw::silk(
+            &g,
             canvas.center(),
             egui::Align2::CENTER_CENTER,
-            msg,
-            FontId::proportional(14.0),
-            TEXT,
+            &msg,
+            14.0,
+            theme::INK2,
         );
         return;
     };
@@ -1259,6 +1396,22 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         pos2(canvas.right(), canvas.bottom() - STATUS_H),
     );
     v.plot = plot;
+    // The floor, the key column at the left (a recessed strip of piano keys) and the bar ruler
+    // on top.
+    g.rect_filled(plot, 0.0, ROW_OUT);
+    let keys = Rect::from_min_max(
+        pos2(canvas.left(), plot.top()),
+        pos2(plot.left() - 3.0, plot.bottom()),
+    );
+    let bars = Rect::from_min_max(canvas.min, pos2(canvas.right(), plot.top()));
+    g.rect_filled(
+        Rect::from_min_max(canvas.min, pos2(plot.left(), plot.bottom())),
+        0.0,
+        theme::BONE,
+    );
+    hw::recess(&g, keys, 0.0);
+    hw::gradient(&g, bars, 0.0, theme::BONE_HI, theme::BONE);
+    hw::seam_v(&g, plot.left() - 3.0, plot.y_range());
     // Fit the view to the region the first time it is shown.
     let key = (t, r, file.path.clone());
     if v.fitted.as_ref() != Some(&key) && plot.width() > 10.0 {
@@ -1314,29 +1467,55 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         .collect();
     let lo_m = m_of(plot.bottom()).floor() as i32;
     let hi_m = top.ceil() as i32;
+    let gk = g.with_clip_rect(keys.intersect(g.clip_rect()));
     for m in lo_m..=hi_m {
         let y0 = y_of(m as f32 + 0.5);
         let row = Rect::from_min_max(pos2(plot.left(), y0), pos2(plot.right(), y0 + row_h));
-        // Out of the key (Scale), or a black key (otherwise), a little darker.
-        const WHITE: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
+        let pc = m.rem_euclid(12);
+        let black = BLACK_KEYS.contains(&pc);
+        // Out of the key (Scale), or a black key (otherwise): the darker row.
         let in_key = !pitched
             || if v.snap == Snap::Scale {
-                pcs.contains(&m.rem_euclid(12))
+                pcs.contains(&pc)
             } else {
-                WHITE.contains(&m.rem_euclid(12))
+                !black
             };
         g.rect_filled(
             row.intersect(plot),
             0.0,
             if in_key { ROW_IN } else { ROW_OUT },
         );
-        if m.rem_euclid(12) == 0 && pitched {
-            g.line_segment(
-                [
-                    pos2(plot.left(), y0 + row_h),
-                    pos2(plot.right(), y0 + row_h),
-                ],
-                Stroke::new(1.0, Color32::from_gray(0x44)),
+        if pc == 0 && pitched {
+            g.hline(
+                plot.x_range(),
+                (y0 + row_h).round() - 0.5,
+                Stroke::new(1.0, theme::INK.gamma_multiply(0.25)),
+            );
+        }
+        // The key: bone for a white key, ink for a black one, a seam between.
+        let key = Rect::from_min_max(
+            pos2(keys.left() + 3.0, y0),
+            pos2(keys.right() - 2.0, y0 + row_h),
+        );
+        if pitched {
+            if black {
+                gk.rect_filled(
+                    Rect::from_min_max(key.min, pos2(key.right() - 12.0, key.bottom())),
+                    egui::CornerRadius {
+                        ne: 2,
+                        se: 2,
+                        nw: 0,
+                        sw: 0,
+                    },
+                    theme::INK,
+                );
+            } else {
+                gk.rect_filled(key, 0.0, theme::BONE_HI);
+            }
+            gk.hline(
+                key.x_range(),
+                (y0 + row_h).round() - 0.5,
+                Stroke::new(1.0, theme::SEAM),
             );
         }
         let label = if pitched {
@@ -1344,20 +1523,30 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         } else {
             format!("{:+}", m - line as i32)
         };
+        let yc = y_of(m as f32);
         if row_h >= 9.0
-            && y_of(m as f32) > plot.top() + 4.0
+            && yc > plot.top() + 5.0
+            && yc < plot.bottom() - 5.0
             && (pitched || (m - line as i32) % 2 == 0)
         {
-            g.text(
-                pos2(canvas.left() + 4.0, y_of(m as f32)),
-                egui::Align2::LEFT_CENTER,
+            let (color, x) = if black && pitched {
+                (theme::ON_DARK_DIM, key.right() - 15.0)
+            } else {
+                (
+                    if pc == 0 || !pitched {
+                        theme::INK
+                    } else {
+                        theme::INK2
+                    },
+                    key.right() - 4.0,
+                )
+            };
+            gk.text(
+                pos2(x, yc),
+                egui::Align2::RIGHT_CENTER,
                 label,
-                FontId::proportional((row_h * 0.75).min(11.0)),
-                if m.rem_euclid(12) == 0 || !pitched {
-                    TEXT
-                } else {
-                    DIM
-                },
+                theme::font(Face::Bold, (row_h * 0.8).min(10.0)),
+                color,
             );
         }
     }
@@ -1369,32 +1558,76 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     if b1 - b0 < 2000.0 {
         let mut b = b0;
         while b <= b1 {
-            let x = x_of(clock.secs(b));
+            let x = x_of(clock.secs(b)).round() + 0.5;
             let bar_no = p.beats_to_bar(b);
             let bar = (bar_no - bar_no.round()).abs() < 1e-6;
-            g.line_segment(
-                [pos2(x, plot.top()), pos2(x, plot.bottom())],
-                Stroke::new(1.0, Color32::from_gray(if bar { 0x50 } else { 0x36 })),
+            g.vline(
+                x,
+                plot.y_range(),
+                Stroke::new(
+                    1.0,
+                    theme::INK.gamma_multiply(if bar { 0.32 } else { 0.10 }),
+                ),
             );
             if bar {
-                g.text(
-                    pos2(x + 3.0, canvas.top() + TIME_H / 2.0),
+                g.vline(
+                    x,
+                    canvas.top() + 16.0..=plot.top(),
+                    Stroke::new(1.0, theme::INK2),
+                );
+                hw::text(
+                    &g,
+                    pos2(x + 4.0, canvas.top() + 10.0),
                     egui::Align2::LEFT_CENTER,
-                    format!("{}", bar_no.round() as i64 + 1),
-                    FontId::proportional(11.0),
+                    &format!("{:03}", bar_no.round() as i64 + 1),
+                    Face::Bold,
+                    12.0,
                     TEXT,
+                );
+            } else {
+                g.vline(
+                    x,
+                    plot.top() - 7.0..=plot.top(),
+                    Stroke::new(1.0, theme::INK2.gamma_multiply(0.7)),
                 );
             }
             b += 1.0;
         }
     }
-    // The region's edges.
-    for sec in [clock.offset, clock.offset + region_secs] {
-        let x = x_of(sec);
-        g.line_segment(
-            [pos2(x, plot.top()), pos2(x, plot.bottom())],
-            Stroke::new(1.5, Color32::from_rgb(0x5a, 0x8f, 0xd8)),
+    // The project's cycle as an orange band along the ruler's top.
+    if p.cycle && p.cycle_end > p.cycle_start {
+        let (xa, xb) = (
+            x_of(clock.secs(p.cycle_start)).max(plot.left()),
+            x_of(clock.secs(p.cycle_end)).min(plot.right()),
         );
+        if xb > xa {
+            g.rect_filled(
+                Rect::from_x_y_ranges(xa..=xb, canvas.top()..=canvas.top() + 5.0),
+                0.0,
+                theme::ORANGE,
+            );
+        }
+    }
+    hw::seam_h(&g, canvas.x_range(), plot.top() - 1.0);
+    // Outside the region the floor is shaded, its edges dashed.
+    for (sec, before) in [(clock.offset, true), (clock.offset + region_secs, false)] {
+        let x = x_of(sec);
+        let shade = if before {
+            Rect::from_x_y_ranges(plot.left()..=x.min(plot.right()), plot.y_range())
+        } else {
+            Rect::from_x_y_ranges(x.max(plot.left())..=plot.right(), plot.y_range())
+        };
+        if shade.width() > 0.0 {
+            g.rect_filled(shade, 0.0, theme::INK.gamma_multiply(0.10));
+        }
+        if x > plot.left() + 1.0 && x < plot.right() {
+            g.extend(Shape::dashed_line(
+                &[pos2(x, plot.top()), pos2(x, plot.bottom())],
+                Stroke::new(1.0, theme::INK2),
+                4.0,
+                3.0,
+            ));
+        }
     }
 
     // The interaction.
@@ -1645,37 +1878,64 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             .step_by(step)
             .map(|f| (x_of(n.place(PitchTrack::time_of(f))), half(f)))
             .collect();
-        let fill = if sel { BLOB_SEL } else { BLOB };
+        // The note: a region-style body (3 px corners, ink edge; selected: orange edge and
+        // header line), the loudness inside it as a lighter envelope.
+        let body_h = (row_h * 0.92).max(8.0);
+        let body = Rect::from_min_max(
+            pos2(x0 + 0.5, yc - body_h / 2.0),
+            pos2(x1.max(x0 + 3.0) - 0.5, yc + body_h / 2.0),
+        );
+        g.rect_filled(body, 3.0, BLOB);
         if pts.len() >= 2 {
-            let mut poly: Vec<Pos2> = pts.iter().map(|(x, h)| pos2(*x, yc - h)).collect();
-            poly.extend(pts.iter().rev().map(|(x, h)| pos2(*x, yc + h)));
-            // One mesh (a strip of triangles), so no seams show between its pieces.
+            let gb = g.with_clip_rect(body.shrink(1.0).intersect(g.clip_rect()));
+            let shade = if sel {
+                Color32::from_rgb(0x4a, 0x2a, 0x1a)
+            } else {
+                theme::CAP_TOP
+            };
             let mut mesh = egui::epaint::Mesh::default();
             for (x, h) in &pts {
-                mesh.colored_vertex(pos2(*x, yc - h), fill);
-                mesh.colored_vertex(pos2(*x, yc + h), fill);
+                let h = h.min(body_h / 2.0);
+                mesh.colored_vertex(pos2(*x, yc - h), shade);
+                mesh.colored_vertex(pos2(*x, yc + h), shade);
             }
             for k in 0..pts.len() as u32 - 1 {
                 let a = 2 * k;
                 mesh.add_triangle(a, a + 1, a + 2);
                 mesh.add_triangle(a + 1, a + 3, a + 2);
             }
-            g.add(Shape::mesh(mesh));
-            g.add(Shape::closed_line(
-                poly,
-                Stroke::new(
-                    if sel { 1.5 } else { 1.0 },
-                    Color32::from_rgb(0x7a, 0x4a, 0x12),
-                ),
-            ));
-        } else {
-            g.rect_filled(
-                Rect::from_min_max(pos2(x0, yc - 3.0), pos2(x1.max(x0 + 2.0), yc + 3.0)),
-                2.0,
-                fill,
+            gb.add(Shape::mesh(mesh));
+        }
+        if sel {
+            g.hline(
+                body.x_range().shrink(2.0),
+                body.top() + 1.5,
+                Stroke::new(2.0, theme::ORANGE),
             );
         }
-        // The pitch curve through it, as it will sound.
+        g.rect_stroke(
+            body,
+            3.0,
+            if sel {
+                Stroke::new(1.5, theme::ORANGE)
+            } else {
+                Stroke::new(1.0, theme::INK)
+            },
+            egui::StrokeKind::Inside,
+        );
+        // A note split from the one before it: a bone cut at the join.
+        if i > 0 && connected(&shown[i - 1], n) {
+            g.vline(x0, body.y_range(), Stroke::new(2.0, theme::BONE_HI));
+            g.line_segment(
+                [
+                    pos2(x0 - 3.0, body.top() - 3.0),
+                    pos2(x0 + 3.0, body.top() + 2.0),
+                ],
+                Stroke::new(1.0, theme::INK2),
+            );
+        }
+        // The pitch curve, as it will sound: solid inside the note, faint and dotted where it
+        // drifts out of it.
         if pitched {
             let line: Vec<Pos2> = (fa..fb)
                 .filter_map(|f| {
@@ -1685,26 +1945,40 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                     Some(pos2(x_of(n.place(PitchTrack::time_of(f))), y_of(m)))
                 })
                 .collect();
+            let inside = body.shrink2(egui::vec2(0.0, 1.5));
+            let color = if sel { CURVE_SEL } else { CURVE };
             for w in line.windows(2) {
-                if (w[1].x - w[0].x).abs() < 12.0 {
-                    g.line_segment([w[0], w[1]], Stroke::new(1.5, CURVE));
+                if (w[1].x - w[0].x).abs() >= 12.0 {
+                    continue;
+                }
+                if inside.contains(w[0]) && inside.contains(w[1]) {
+                    g.line_segment(
+                        [w[0], w[1]],
+                        Stroke::new(if sel { 2.0 } else { 1.5 }, color),
+                    );
+                } else {
+                    g.extend(Shape::dotted_line(
+                        &[w[0], w[1]],
+                        theme::TEXT_DIM.gamma_multiply(0.4),
+                        2.0,
+                        0.6,
+                    ));
                 }
             }
         }
         // The formant beam (Formant Tool) and the level (Amplitude Tool).
         if v.tool == Tool::Formant || n.formant.abs() > 0.01 {
             let yb = yc - row_h.max(6.0) * 0.9 - n.formant * row_h * 0.25;
-            g.line_segment(
-                [pos2(x0, yb), pos2(x1, yb)],
-                Stroke::new(2.0, Color32::from_rgb(0x8f, 0xd0, 0xff)),
-            );
+            g.line_segment([pos2(x0, yb), pos2(x1, yb)], Stroke::new(2.0, theme::INK2));
         }
         if v.tool == Tool::Amplitude && sel {
-            g.text(
+            hw::text(
+                &g,
                 pos2(x0, yc - row_h - 4.0),
                 egui::Align2::LEFT_BOTTOM,
-                format!("{:+.1} dB", n.gain_db),
-                FontId::proportional(11.0),
+                &format!("{:+.1} dB", n.gain_db),
+                Face::Bold,
+                10.5,
                 TEXT,
             );
         }
@@ -1713,51 +1987,137 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let ph = clock.secs(p.position_beats);
     if ph >= scroll {
         let x = x_of(ph);
-        g.line_segment(
-            [pos2(x, plot.top()), pos2(x, plot.bottom())],
-            Stroke::new(1.0, Color32::WHITE),
-        );
+        if x >= plot.left() && x <= plot.right() {
+            g.vline(x, plot.y_range(), Stroke::new(4.0, theme::INK));
+            g.vline(x, plot.y_range(), Stroke::new(2.0, theme::ORANGE));
+            // The head on the ruler.
+            let y = plot.top() - 1.0;
+            g.add(Shape::convex_polygon(
+                vec![
+                    pos2(x - 7.0, y - 13.0),
+                    pos2(x + 7.0, y - 13.0),
+                    pos2(x + 7.0, y - 6.0),
+                    pos2(x, y),
+                    pos2(x - 7.0, y - 6.0),
+                ],
+                theme::ORANGE,
+                Stroke::new(1.0, theme::INK),
+            ));
+        }
     }
-    // The status line: what is selected.
+    // The status bar: an LCD with a cell per value of the selected note.
     let status = Rect::from_min_max(pos2(canvas.left(), plot.bottom()), canvas.max);
-    g.rect_filled(status, 0.0, Color32::from_gray(0x1c));
-    let text = match v.selected.as_slice() {
-        [] => trf("{} notes", &[&shown.len()]),
+    g.rect_filled(status, 0.0, theme::BONE);
+    let glass = hw::lcd(&g, status.shrink2(egui::vec2(2.0, 2.0)));
+    let cells: Vec<(&str, String)> = match v.selected.as_slice() {
         [i] => match shown.get(*i) {
             Some(n) => {
-                let pitch = if n.pitch > 0.0 {
+                let (note, cents) = if n.pitch > 0.0 {
                     let cents = ((n.heard() - n.heard().round()) * 100.0).round();
-                    format!("{} {cents:+.0} ct", note_name(n.heard()))
+                    (note_name(n.heard()), format!("{cents:+.0}"))
                 } else {
-                    format!("{:+.2} st", n.shift)
+                    ("--".to_string(), format!("{:+.2}", n.shift))
                 };
-                trf(
-                    "{}  ·  drift {} %  ·  modulation {} %  ·  formant {} st  ·  {} dB",
-                    &[
-                        &pitch,
-                        &format!("{:.0}", n.drift * 100.0),
-                        &format!("{:.0}", n.modulation * 100.0),
-                        &format!("{:+.1}", n.formant),
-                        &format!("{:+.1}", n.gain_db),
-                    ],
-                )
+                vec![
+                    ("NOTE", note),
+                    ("CENTS", cents),
+                    ("DRIFT %", format!("{:.0}", n.drift * 100.0)),
+                    ("MOD %", format!("{:.0}", n.modulation * 100.0)),
+                    ("FORMANT ST", format!("{:+.1}", n.formant)),
+                    ("GAIN DB", format!("{:+.1}", n.gain_db)),
+                ]
             }
-            None => String::new(),
+            None => Vec::new(),
         },
+        [] => vec![("NOTES", format!("{}", shown.len()))],
+        many => vec![("SELECTED", format!("{}", many.len()))],
+    };
+    let cell_w = 136.0;
+    for (i, (label, value)) in cells.iter().enumerate() {
+        let x = glass.left() + i as f32 * cell_w;
+        if x + cell_w > glass.right() {
+            break;
+        }
+        // The label at the cell's left, the value in segments at its right.
+        hw::text(
+            &g,
+            pos2(x + 8.0, glass.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            Face::Lcd,
+            8.0,
+            theme::LCD_INK.gamma_multiply(0.7),
+        );
+        let h = (glass.height() - 10.0).clamp(8.0, 15.0);
+        hw::seg(
+            &g,
+            pos2(
+                x + cell_w - 10.0 - hw::seg_width(value, h),
+                glass.center().y - h / 2.0,
+            ),
+            value,
+            h,
+            theme::LCD_INK,
+            true,
+        );
+        if i > 0 {
+            g.vline(
+                x,
+                glass.y_range().shrink(5.0),
+                Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.25)),
+            );
+        }
+    }
+    // The whole reading in words, on hover.
+    if let [i] = v.selected.as_slice() {
+        if let Some(n) = shown.get(*i) {
+            let pitch = if n.pitch > 0.0 {
+                let cents = ((n.heard() - n.heard().round()) * 100.0).round();
+                format!("{} {cents:+.0} ct", note_name(n.heard()))
+            } else {
+                format!("{:+.2} st", n.shift)
+            };
+            let words = trf(
+                "{}  ·  drift {} %  ·  modulation {} %  ·  formant {} st  ·  {} dB",
+                &[
+                    &pitch,
+                    &format!("{:.0}", n.drift * 100.0),
+                    &format!("{:.0}", n.modulation * 100.0),
+                    &format!("{:+.1}", n.formant),
+                    &format!("{:+.1}", n.gain_db),
+                ],
+            );
+            let _ = ui
+                .interact(
+                    status,
+                    ui.make_persistent_id("pitch-status"),
+                    Sense::hover(),
+                )
+                .on_hover_text(words);
+        }
+    }
+    // What the editor says about the selection, and whether the sound is being made.
+    let note_text = match v.selected.as_slice() {
+        [] => trf("{} notes", &[&shown.len()]),
+        [_] => String::new(),
         many => trf("{} notes selected", &[&many.len()]),
     };
     let busy = if s.flex.busy() {
-        format!("  ·  {}", tr("rendering…"))
+        tr("rendering…").to_string()
     } else {
-        String::new()
+        note_text
     };
-    g.text(
-        pos2(status.left() + 8.0, status.center().y),
-        egui::Align2::LEFT_CENTER,
-        format!("{text}{busy}"),
-        FontId::proportional(11.0),
-        TEXT,
-    );
+    if !busy.is_empty() {
+        hw::text(
+            &g,
+            pos2(glass.right() - 8.0, glass.center().y),
+            egui::Align2::RIGHT_CENTER,
+            &busy.to_uppercase(),
+            Face::Lcd,
+            10.0,
+            theme::LCD_INK,
+        );
+    }
     if let Some(list) = commit_notes {
         commit(p, t, r, algorithm, list);
     }
@@ -1940,8 +2300,19 @@ mod tests {
         let out = std::env::var_os("PROWAVE_UI_PNG_DIR")
             .map_or_else(|| dir.path().to_path_buf(), PathBuf::from)
             .join("pitch-editor.png");
-        crate::ui_test::render_png(1100.0, 420.0, 1.0, BG, |ui| show(ui, &mut p, &mut s), &out)
-            .unwrap();
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        crate::ui_test::render_png(
+            1400.0,
+            460.0,
+            2.0,
+            theme::BG,
+            |ui| {
+                theme::apply(ui.ctx());
+                show(ui, &mut p, &mut s)
+            },
+            &out,
+        )
+        .unwrap();
         assert!(std::fs::metadata(&out).unwrap().len() > 10_000);
 
         // A real vocal too, when one is given (PROWAVE_PITCH_EDITOR_SOURCE, seconds from
@@ -1959,8 +2330,18 @@ mod tests {
             let file = p.tracks[t].regions[0].audio.as_ref().unwrap().file.clone();
             analysis_for(&file, Algorithm::Melodic).unwrap();
             let out = out.with_file_name("pitch-editor-real.png");
-            crate::ui_test::render_png(1400.0, 520.0, 1.0, BG, |ui| show(ui, &mut p, &mut s), &out)
-                .unwrap();
+            crate::ui_test::render_png(
+                1400.0,
+                520.0,
+                1.0,
+                theme::BG,
+                |ui| {
+                    theme::apply(ui.ctx());
+                    show(ui, &mut p, &mut s)
+                },
+                &out,
+            )
+            .unwrap();
         }
     }
 

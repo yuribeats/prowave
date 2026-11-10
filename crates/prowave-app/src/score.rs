@@ -5,16 +5,18 @@
 //! not one note value tied together.
 //!
 //! The notation is a reading of the notes, not a second copy of them: starts and lengths are
-//! rounded to sixteenths for the drawing only. There are no beams, voices or chord symbols
-//! yet. Click on a staff to add a note (a quarter note at the nearest eighth, spelled in the
+//! rounded to sixteenths for the drawing only. The bars are set as systems that fill the
+//! width, spaced by duration with room for every glyph. There are no beams, voices or chord
+//! symbols yet. Click on a staff to add a note (a quarter note at the nearest eighth, spelled in the
 //! key), right-click a note to delete it.
+use crate::hw;
 use crate::i18n::tr;
 use crate::model::{Note, Project};
-use crate::widgets::TEXT_DIM;
+use crate::piano_roll::caption;
+use crate::theme::{self, Face};
 use crate::UiState;
 use egui::{
-    epaint::CubicBezierShape, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape,
-    Stroke, Ui,
+    epaint::CubicBezierShape, pos2, vec2, Align2, Color32, Pos2, Rect, Sense, Shape, Stroke, Ui,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,13 +24,14 @@ use std::sync::Arc;
 /// Distance between two staff lines, in points.
 const SPACE: f32 = 9.0;
 const HALF: f32 = SPACE / 2.0;
-const INK: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
-const STAFF_INK: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
-const PAPER: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2b);
+/// Music is printed in black on a bone sheet set into the chassis.
+const INK: Color32 = theme::INK;
+const STAFF_INK: Color32 = theme::INK2;
+const PAPER: Color32 = theme::BONE_HI;
 /// Width reserved at the left for the clefs.
 const CLEF_W: f32 = 50.0;
-/// The height of the strip with the key picker above the staves.
-const STRIP_H: f32 = 26.0;
+/// The margin of chassis around the sheet.
+const SHEET_PAD: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Staff {
@@ -446,7 +449,7 @@ pub fn signature_steps(fifths: i8, staff: Staff) -> Vec<i32> {
 }
 
 /// Where the staves are: the y of the bottom line of each.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Staves {
     treble_bottom: f32,
     bass_bottom: f32,
@@ -484,19 +487,90 @@ impl Staves {
 /// What the editor remembers between frames.
 pub struct ScoreView {
     pub beat_px: f32,
-    scroll_x: f32,
+    scroll_y: f32,
     /// The layout of the notes on show, and what it was made from.
     cache: Option<(u64, Arc<Vec<Item>>)>,
+    /// Where the systems were drawn last frame (clicks, tests).
+    systems: Vec<System>,
 }
 
 impl Default for ScoreView {
     fn default() -> Self {
         Self {
             beat_px: 56.0,
-            scroll_x: 0.0,
+            scroll_y: 0.0,
             cache: None,
+            systems: Vec::new(),
         }
     }
+}
+
+/// One line of music (a system): a grand staff holding some whole bars.
+#[derive(Clone, Debug)]
+struct System {
+    /// The y of the bottom lines of its staves.
+    lay: Staves,
+    /// Its bars (first, one past the last) in the bar list.
+    bars: (usize, usize),
+    /// Beats and where they are drawn: the bar lines and the start of every column of notes
+    /// and rests. Positions in between are interpolated.
+    anchors: Vec<(f32, f32)>,
+    /// Its left and right ends (the staff lines).
+    left: f32,
+    right: f32,
+}
+
+impl System {
+    fn top(&self) -> f32 {
+        self.lay.treble_bottom - 4.0 * SPACE - SYS_TOP
+    }
+
+    fn bottom(&self) -> f32 {
+        self.lay.bass_bottom + SYS_BOTTOM
+    }
+
+    fn beats(&self) -> (f32, f32) {
+        (
+            self.anchors.first().map_or(0.0, |a| a.0),
+            self.anchors.last().map_or(0.0, |a| a.0),
+        )
+    }
+
+    /// Where `beat` is drawn (clamped to the system's bars).
+    fn x_of(&self, beat: f32) -> f32 {
+        interpolate(&self.anchors, beat, |a| a.0, |a| a.1)
+    }
+
+    /// The beat drawn at `x`.
+    fn beat_at(&self, x: f32) -> f32 {
+        interpolate(&self.anchors, x, |a| a.1, |a| a.0)
+    }
+}
+
+/// Piecewise-linear lookup in `pts` (sorted by `key`).
+fn interpolate(
+    pts: &[(f32, f32)],
+    at: f32,
+    key: impl Fn(&(f32, f32)) -> f32,
+    val: impl Fn(&(f32, f32)) -> f32,
+) -> f32 {
+    let Some(first) = pts.first() else {
+        return 0.0;
+    };
+    if at <= key(first) {
+        return val(first);
+    }
+    for w in pts.windows(2) {
+        let (k0, k1) = (key(&w[0]), key(&w[1]));
+        if at <= k1 {
+            if k1 - k0 <= EPS {
+                return val(&w[1]);
+            }
+            let t = (at - k0) / (k1 - k0);
+            return val(&w[0]) + (val(&w[1]) - val(&w[0])) * t;
+        }
+    }
+    pts.last().map_or(0.0, val)
 }
 
 /// The start of every bar of the region and, last, its end, in beats from its start.
@@ -512,41 +586,171 @@ fn bar_lines(p: &Project, origin: f64, len: f64) -> Vec<f32> {
     v
 }
 
-/// Draws the score of the (not generated) region `ri` of track `ti` in `body`.
-pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize, body: Rect) {
-    let g = ui.painter_at(body);
-    g.rect_filled(body, 0.0, PAPER);
+/// The room a system keeps above its treble staff (bar numbers, ledger lines) and below its
+/// bass staff, and between its two staves.
+const SYS_TOP: f32 = 40.0;
+const SYS_BOTTOM: f32 = 34.0;
+const STAFF_GAP: f32 = 66.0;
+/// Room after a bar line before the first note, and the narrowest a column may be.
+const BAR_PAD: f32 = 12.0;
+const MIN_COL: f32 = 20.0;
+/// Room an accidental takes in front of its note.
+const ACC_W: f32 = 12.0;
+
+/// The columns of a bar: each time something starts in it, with its offset from the bar line,
+/// and the bar's natural width (time spaced, with room for every glyph).
+fn bar_columns(items: &[Item], b0: f32, b1: f32, beat_px: f32) -> (Vec<(f32, f32)>, f32) {
+    let lo = items.partition_point(|it| it.at() < b0 - EPS);
+    let hi = items.partition_point(|it| it.at() < b1 - EPS);
+    let here = &items[lo..hi.max(lo)];
+    let mut times: Vec<f32> = Vec::new();
+    for it in here {
+        if times.last().is_none_or(|t| it.at() > t + EPS) {
+            times.push(it.at());
+        }
+    }
+    if times.first().is_none_or(|t| *t > b0 + EPS) {
+        times.insert(0, b0);
+    }
+    let mut cols = Vec::new();
+    let mut off = BAR_PAD;
+    for (k, &t) in times.iter().enumerate() {
+        let next = times.get(k + 1).copied().unwrap_or(b1);
+        let at_t = here.iter().filter(|it| (it.at() - t).abs() < EPS);
+        let mut accidentals = 0;
+        let mut extra = 0.0f32;
+        for it in at_t {
+            if let Item::Note(n) = it {
+                if n.accidental.is_some() {
+                    accidentals += 1;
+                }
+                if dotted(n.value) {
+                    extra = extra.max(6.0);
+                }
+                if n.value < 1.0 - EPS {
+                    extra = extra.max(8.0);
+                }
+            }
+        }
+        off += ACC_W * f32::from(u8::from(accidentals > 0))
+            + if accidentals > 1 { ACC_W * 0.7 } else { 0.0 };
+        cols.push((t, off));
+        off += ((next - t) * beat_px).max(MIN_COL + extra);
+    }
+    (cols, off + 4.0)
+}
+
+/// Draws the score of the (not generated) region `ri` of track `ti` in `area`: its menu row
+/// (editor keys, key, zoom), then the music on a sheet set into a faceplate, as systems of
+/// whole bars that fill the width, stacked down the page.
+pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize, area: Rect) {
+    use crate::piano_roll::{BRACKET_Y, KEY_H, KEY_Y, TOOLBAR_H};
+    let g0 = ui.painter_at(area);
+    hw::chassis(&g0, area);
     let (origin, len_beats) = {
         let r = &p.tracks[ti].regions[ri];
         (p.region_start_beats(r), p.region_len_beats(r))
     };
-    // ---- the key
-    let strip = Rect::from_min_size(body.min, vec2(body.width(), STRIP_H));
+    // ---- the menu row: editor keys, the key, zoom
+    let strip = Rect::from_min_size(area.min, vec2(area.width(), TOOLBAR_H.min(area.height())));
+    crate::piano_roll::menu_row(&g0, strip);
+    let top = strip.top();
+    let (mode, right) = crate::piano_roll::editor_keys(ui, &g0, strip.left() + 10.0, top, 1, true);
+    if let Some(i) = mode {
+        s.score_tab = i == 1;
+    }
     let mut key = p.key;
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(strip.shrink2(vec2(10.0, 2.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.label(tr("Key:"));
-            egui::ComboBox::from_id_salt("score_key")
-                .selected_text(key_label(key))
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for (name, _) in KEYS {
-                        if ui.selectable_label(key == name, key_label(name)).clicked() {
-                            key = name;
-                        }
-                    }
-                });
-        },
+    let field = Rect::from_min_size(pos2(right + 18.0, top + KEY_Y + 1.0), vec2(150.0, 26.0));
+    hw::bracket(
+        &g0,
+        field.left(),
+        field.right(),
+        top + BRACKET_Y,
+        caption(tr("Key:")),
     );
+    let resp = crate::widgets::popup_button(
+        ui,
+        &g0,
+        field,
+        egui::Id::unique("score_key"),
+        &key_label(key),
+    );
+    egui::Popup::menu(&resp).show(|ui| {
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                for (name, _) in KEYS {
+                    if ui.selectable_label(key == name, key_label(name)).clicked() {
+                        key = name;
+                        ui.close();
+                    }
+                }
+            });
+    });
     if key != p.key {
         p.key = key;
         p.song_rev += 1;
     }
+    // Zoom: how wide a beat is, which sets how many bars a system holds.
+    {
+        let (lo, hi) = (20f32.ln(), 200f32.ln());
+        let cy = top + KEY_Y + KEY_H / 2.0;
+        let hz = Rect::from_min_size(pos2(strip.right() - 132.0, cy - 7.0), vec2(120.0, 14.0));
+        if hz.left() > field.right() + 60.0 {
+            let t = ((s.score.beat_px.ln() - lo) / (hi - lo)).clamp(0.0, 1.0);
+            if let Some(n) =
+                crate::widgets::slider_h(ui, &g0, hz, egui::Id::unique("score_zoom"), t, true)
+            {
+                s.score.beat_px = (lo + n * (hi - lo)).exp();
+            }
+            let c = pos2(hz.left() - 14.0, cy);
+            let st = Stroke::new(1.6, theme::INK2);
+            g0.line_segment([c - vec2(7.0, 0.0), c + vec2(7.0, 0.0)], st);
+            for (tip, d) in [(c - vec2(7.0, 0.0), 1.0), (c + vec2(7.0, 0.0), -1.0)] {
+                g0.add(Shape::convex_polygon(
+                    vec![tip, tip + vec2(4.0 * d, 3.5), tip + vec2(4.0 * d, -3.5)],
+                    theme::INK2,
+                    Stroke::NONE,
+                ));
+            }
+            hw::bracket(
+                &g0,
+                hz.left() - 24.0,
+                hz.right(),
+                top + BRACKET_Y,
+                tr("Zoom"),
+            );
+        }
+    }
     let fifths = fifths(p.key);
-    let body = Rect::from_min_max(pos2(body.left(), strip.bottom()), body.max);
+
+    // ---- the faceplate, and the sheet in a recess on it
+    let plate = Rect::from_min_max(
+        pos2(area.left() + SHEET_PAD, strip.bottom() + SHEET_PAD),
+        area.max - vec2(SHEET_PAD, SHEET_PAD),
+    );
+    if plate.width() < 40.0 || plate.height() < 40.0 {
+        return;
+    }
+    hw::faceplate(&g0, plate, 4.0, false);
+    for c in [
+        plate.left_top() + vec2(9.0, 9.0),
+        plate.right_top() + vec2(-9.0, 9.0),
+        plate.left_bottom() + vec2(9.0, -9.0),
+        plate.right_bottom() + vec2(-9.0, -9.0),
+    ] {
+        hw::screw(&g0, c, 3.5, 30.0);
+    }
+    let well = plate.shrink2(vec2(20.0, 12.0));
+    hw::recess(&g0, well, 3.0);
+    let sheet = well.shrink(4.0);
+    g0.rect_filled(
+        sheet.translate(vec2(0.0, 1.5)),
+        2.0,
+        theme::INK.gamma_multiply(0.12),
+    );
+    g0.rect_filled(sheet, 2.0, PAPER);
+    let g = ui.painter_at(sheet);
 
     // A note just added sounds for a moment.
     if let Some((pitch, until)) = s.score_heard {
@@ -558,105 +762,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
                 .request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
-    // What stands before the first note: the key signature and the time signature.
-    let lead = 14.0 + fifths.unsigned_abs() as f32 * 9.0 + 30.0;
-    let v = &mut s.score;
-    if ui
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|pt| body.contains(pt))
-    {
-        let (d, m) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
-        if m.command && d.y != 0.0 {
-            v.beat_px = (v.beat_px * (1.0 + d.y * 0.003)).clamp(20.0, 200.0);
-        } else {
-            v.scroll_x -= d.x + d.y;
-        }
-    }
-    let max_scroll =
-        (len_beats as f32 * v.beat_px + 40.0 - (body.width() - CLEF_W - lead)).max(0.0);
-    v.scroll_x = v.scroll_x.clamp(0.0, max_scroll);
-    let (beat_px, scroll_x) = (v.beat_px, v.scroll_x);
-
-    let lay = Staves {
-        treble_bottom: body.top() + 40.0 + 4.0 * SPACE,
-        bass_bottom: body.top() + 40.0 + 4.0 * SPACE + 70.0 + 4.0 * SPACE,
-    };
-    let left = body.left() + CLEF_W;
-    let x_of = |beat: f32| left + lead + beat * beat_px - scroll_x;
-    let beat_at = |x: f32| (x - x_of(0.0)) / beat_px;
-    let score = Rect::from_min_max(pos2(left, body.top()), body.max);
-    let gs = ui.painter_at(score);
-
-    // ---- staves, clefs, key and time signature
-    let (num, den) = p.signature_of_bar(p.beats_to_bar(origin).floor().max(0.0) as u32);
-    for (staff, bottom) in [
-        (Staff::Treble, lay.treble_bottom),
-        (Staff::Bass, lay.bass_bottom),
-    ] {
-        for k in 0..5 {
-            let y = bottom - k as f32 * SPACE;
-            g.line_segment(
-                [pos2(body.left() + 6.0, y), pos2(body.right(), y)],
-                Stroke::new(1.0, STAFF_INK),
-            );
-        }
-        match staff {
-            Staff::Treble => treble_clef(&g, pos2(body.left() + 24.0, lay.y(staff, 39))),
-            Staff::Bass => bass_clef(&g, pos2(body.left() + 24.0, lay.y(staff, 33))),
-        }
-        // The signatures do not scroll: they stay at the left of the staff.
-        let sig_x = left + 6.0;
-        for (i, step) in signature_steps(fifths, staff).into_iter().enumerate() {
-            let at = pos2(sig_x + i as f32 * 9.0, lay.y(staff, step));
-            if fifths > 0 {
-                sharp(&g, at);
-            } else {
-                flat(&g, at);
-            }
-        }
-        let tx = sig_x + fifths.unsigned_abs() as f32 * 9.0 + 12.0;
-        for (text, y) in [
-            (num.to_string(), bottom - 3.0 * SPACE),
-            (den.to_string(), bottom - SPACE),
-        ] {
-            g.text(
-                pos2(tx, y),
-                Align2::CENTER_CENTER,
-                text,
-                FontId::proportional(17.0),
-                INK,
-            );
-        }
-    }
-    g.line_segment(
-        [
-            pos2(body.left() + 6.0, lay.treble_bottom - 4.0 * SPACE),
-            pos2(body.left() + 6.0, lay.bass_bottom),
-        ],
-        Stroke::new(2.0, STAFF_INK),
-    );
-    let bars = bar_lines(p, origin, len_beats);
-    for (i, &b) in bars.iter().enumerate().take(bars.len().saturating_sub(1)) {
-        let x = x_of(b);
-        if x < score.left() - 2.0 || x > score.right() + 2.0 {
-            continue;
-        }
-        for (top, bottom) in [
-            (lay.treble_bottom - 4.0 * SPACE, lay.treble_bottom),
-            (lay.bass_bottom - 4.0 * SPACE, lay.bass_bottom),
-        ] {
-            gs.line_segment([pos2(x, top), pos2(x, bottom)], Stroke::new(1.0, STAFF_INK));
-        }
-        gs.text(
-            pos2(x + 3.0, lay.treble_bottom - 4.0 * SPACE - 14.0),
-            Align2::LEFT_CENTER,
-            format!("{}", i + 1),
-            FontId::proportional(10.0),
-            TEXT_DIM,
-        );
-    }
 
     // ---- notes and rests: laid out again only when something changed
+    let bars = bar_lines(p, origin, len_beats);
     let print = fingerprint(&p.tracks[ti].regions[ri].notes, &bars, fifths);
     let items = match &s.score.cache {
         Some((seen, items)) if *seen == print => items.clone(),
@@ -666,51 +774,276 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
             items
         }
     };
-    // Only the items in view are drawn (the layout is sorted by position).
-    let (from, to) = (beat_at(score.left() - 24.0), beat_at(score.right() + 24.0));
-    let lo = items.partition_point(|it| it.at() < from - 4.0);
-    let hi = items.partition_point(|it| it.at() <= to);
-    let visible = &items[lo..hi.max(lo)];
-    for it in visible {
-        match it {
-            Item::Note(n) => {
-                draw_note(&gs, &lay, x_of(n.at), n);
-                if let Some(next) = n.tie_to {
-                    draw_tie(&gs, &lay, x_of(n.at), x_of(next), n);
-                }
-            }
-            Item::Rest(r) => draw_rest(&gs, &lay, x_of(r.at), r),
+    let v = &mut s.score;
+    if ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|pt| sheet.contains(pt))
+    {
+        let (d, m) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
+        if m.command && d.y != 0.0 {
+            v.beat_px = (v.beat_px * (1.0 + d.y * 0.003)).clamp(20.0, 200.0);
+        } else {
+            v.scroll_y -= d.y;
         }
     }
-    let playhead = (p.position_beats - origin) as f32;
-    if playhead >= 0.0 && f64::from(playhead) <= len_beats {
-        let x = x_of(playhead);
-        gs.line_segment(
-            [
-                pos2(x, lay.treble_bottom - 4.0 * SPACE - 20.0),
-                pos2(x, lay.bass_bottom + 20.0),
-            ],
-            Stroke::new(1.0, Color32::from_rgb(0xff, 0xd0, 0x40)),
-        );
-    }
-    g.text(
-        pos2(body.right() - 10.0, body.bottom() - 10.0),
-        Align2::RIGHT_BOTTOM,
-        tr("Click to add a note, right-click a note to delete it"),
-        FontId::proportional(11.0),
-        TEXT_DIM,
-    );
+    let beat_px = v.beat_px;
 
-    // ---- editing
-    let resp = ui.interact(score, egui::Id::unique(("score", ti, ri)), Sense::click());
+    // ---- systems: whole bars packed to the width, then spread to fill it
+    let sig_w = fifths.unsigned_abs() as f32 * 9.0;
+    let clef_x = sheet.left() + 30.0;
+    let music_left = clef_x + CLEF_W - 12.0;
+    let lead_first = sig_w + 46.0;
+    let lead_other = sig_w + 12.0;
+    let nbars = bars.len().saturating_sub(1);
+    let cols: Vec<(Vec<(f32, f32)>, f32)> = (0..nbars)
+        .map(|w| bar_columns(&items, bars[w], bars[w + 1], beat_px))
+        .collect();
+    let sys_h = SYS_TOP + 4.0 * SPACE + STAFF_GAP + 4.0 * SPACE + SYS_BOTTOM;
+    let mut systems: Vec<System> = Vec::new();
+    let mut w = 0;
+    while w < nbars {
+        let lead = if systems.is_empty() {
+            lead_first
+        } else {
+            lead_other
+        };
+        let room = (sheet.right() - 10.0 - music_left - lead).max(40.0);
+        let mut end = w;
+        let mut used = 0.0;
+        while end < nbars && (end == w || used + cols[end].1 <= room) {
+            used += cols[end].1;
+            end += 1;
+        }
+        // Spread the bars over the width; the last system only when it is mostly full.
+        let last = end == nbars;
+        let scale = if last && used < room * 0.65 {
+            1.0
+        } else {
+            room / used.max(1.0)
+        };
+        let top_y = sheet.top() + 8.0 + systems.len() as f32 * sys_h - v.scroll_y;
+        let treble_bottom = top_y + SYS_TOP + 4.0 * SPACE;
+        let lay = Staves {
+            treble_bottom,
+            bass_bottom: treble_bottom + STAFF_GAP + 4.0 * SPACE,
+        };
+        let mut anchors = Vec::new();
+        let mut x = music_left + lead;
+        for (b, (bar_cols, bw)) in cols.iter().enumerate().take(end).skip(w) {
+            anchors.push((bars[b], x));
+            for &(t, off) in bar_cols {
+                if t > bars[b] + EPS {
+                    anchors.push((t, x + off * scale));
+                } else {
+                    // The bar's first column: the bar line stays an anchor of its own.
+                    anchors.push((t + EPS * 0.5, x + off * scale));
+                }
+            }
+            x += bw * scale;
+        }
+        anchors.push((bars[end], x));
+        systems.push(System {
+            lay,
+            bars: (w, end),
+            anchors,
+            left: clef_x - 8.0,
+            right: if last && scale == 1.0 {
+                x
+            } else {
+                sheet.right() - 10.0
+            },
+        });
+        w = end;
+    }
+    let content_h = systems.len() as f32 * sys_h + 16.0;
+    let max_scroll = (content_h - sheet.height()).max(0.0);
+    v.scroll_y = v.scroll_y.clamp(0.0, max_scroll);
+
+    // ---- drawing, system by system
+    let (num, den) = p.signature_of_bar(p.beats_to_bar(origin).floor().max(0.0) as u32);
+    let start_bar = p.beats_to_bar(origin).floor().max(0.0) as usize;
+    let playhead = (p.position_beats - origin) as f32;
+    let staff_st = Stroke::new(1.0, STAFF_INK);
+    for (k, sys) in systems.iter().enumerate() {
+        if sys.bottom() < sheet.top() || sys.top() > sheet.bottom() {
+            continue;
+        }
+        let lay = sys.lay;
+        let (t_top, b_bot) = (lay.treble_bottom - 4.0 * SPACE, lay.bass_bottom);
+        for bottom in [lay.treble_bottom, lay.bass_bottom] {
+            for line in 0..5 {
+                let y = bottom - line as f32 * SPACE;
+                g.hline(sys.left..=sys.right, y, staff_st);
+            }
+        }
+        // The system's line and brace at its left.
+        g.vline(sys.left, t_top..=b_bot, Stroke::new(2.0, INK));
+        brace(&g, sys.left - 4.0, t_top, b_bot);
+        treble_clef(&g, pos2(clef_x + 10.0, lay.y(Staff::Treble, 39)));
+        bass_clef(&g, pos2(clef_x + 8.0, lay.y(Staff::Bass, 33)));
+        for staff in [Staff::Treble, Staff::Bass] {
+            for (i, step) in signature_steps(fifths, staff).into_iter().enumerate() {
+                let at = pos2(music_left + 4.0 + i as f32 * 9.0, lay.y(staff, step));
+                if fifths > 0 {
+                    sharp(&g, at);
+                } else {
+                    flat(&g, at);
+                }
+            }
+            if k == 0 {
+                let tx = music_left + sig_w + 16.0;
+                let bottom = match staff {
+                    Staff::Treble => lay.treble_bottom,
+                    Staff::Bass => lay.bass_bottom,
+                };
+                for (text, y) in [
+                    (num.to_string(), bottom - 3.0 * SPACE),
+                    (den.to_string(), bottom - SPACE),
+                ] {
+                    hw::text(
+                        &g,
+                        pos2(tx, y),
+                        Align2::CENTER_CENTER,
+                        &text,
+                        Face::SilkX,
+                        22.0,
+                        INK,
+                    );
+                }
+            }
+        }
+        // Bar lines through both staves, bar numbers over them; a double line at the end.
+        for (b, &at) in bars
+            .iter()
+            .enumerate()
+            .take(sys.bars.1 + 1)
+            .skip(sys.bars.0)
+        {
+            let x = sys.x_of(at);
+            let end = b == nbars;
+            if b > sys.bars.0 || k > 0 {
+                g.vline(x, t_top..=b_bot, Stroke::new(1.0, INK));
+            }
+            if end {
+                g.vline(x - 4.0, t_top..=b_bot, Stroke::new(1.0, INK));
+                g.vline(x + 0.5, t_top..=b_bot, Stroke::new(3.0, INK));
+            }
+            if b < sys.bars.1 {
+                let bx = if b == sys.bars.0 { x - 4.0 } else { x };
+                g.vline(
+                    bx,
+                    t_top - 18.0..=t_top - 12.0,
+                    Stroke::new(1.0, theme::PRINT),
+                );
+                hw::text(
+                    &g,
+                    pos2(bx + 3.0, t_top - 15.0),
+                    Align2::LEFT_CENTER,
+                    &crate::piano_roll::bar_label((start_bar + b + 1) as u32),
+                    Face::Lcd,
+                    10.0,
+                    theme::INK2,
+                );
+            }
+        }
+        // The notes and rests of its bars.
+        let (b0, b1) = sys.beats();
+        let lo = items.partition_point(|it| it.at() < b0 - EPS);
+        let hi = items.partition_point(|it| it.at() < b1 - EPS);
+        let here = &items[lo..hi.max(lo)];
+        // Notes that start together on a staff make a chord with one stem.
+        let mut chords: Vec<Vec<NoteItem>> = Vec::new();
+        for it in here {
+            match it {
+                Item::Rest(r) => {
+                    let x = if r.value >= 4.0 - EPS {
+                        // A whole bar's rest sits in the middle of its bar.
+                        let b = bars.partition_point(|b| *b <= r.at + EPS).saturating_sub(1);
+                        (sys.x_of(bars[b]) + sys.x_of(bars[(b + 1).min(nbars)])) / 2.0
+                    } else {
+                        sys.x_of(r.at) + 4.0
+                    };
+                    draw_rest(&g, &lay, x, r);
+                }
+                Item::Note(n) => {
+                    let same = chords
+                        .iter_mut()
+                        .rev()
+                        .take_while(|c| (c[0].at - n.at).abs() < EPS)
+                        .find(|c| c[0].staff == n.staff);
+                    match same {
+                        Some(c) => c.push(*n),
+                        None => chords.push(vec![*n]),
+                    }
+                }
+            }
+        }
+        for chord in &chords {
+            let x = sys.x_of(chord[0].at) + 4.0;
+            draw_chord(&g, &lay, x, chord);
+            for c in chord {
+                if let Some(next) = c.tie_to {
+                    let x1 = if next < b1 - EPS {
+                        sys.x_of(next) + 4.0
+                    } else {
+                        sys.right + 6.0
+                    };
+                    draw_tie(&g, &lay, x, x1, c);
+                }
+            }
+        }
+        if playhead >= b0 && playhead < b1 + EPS && f64::from(playhead) <= len_beats {
+            let x = sys.x_of(playhead);
+            let span = Rect::from_min_max(pos2(x, t_top - 10.0), pos2(x, b_bot + 12.0));
+            crate::piano_roll::playhead(&g, &g, x, span, span.top() - 15.0);
+        }
+    }
+    // A scroll bar when the systems run past the sheet.
+    if max_scroll > 0.0 {
+        let track = Rect::from_min_max(
+            pos2(well.right() + 4.0, well.top()),
+            pos2(well.right() + 14.0, well.bottom()),
+        );
+        let th = track.height() - 4.0;
+        let thumb_h = (th * sheet.height() / content_h).clamp(24.0, th);
+        let ty = track.top() + 2.0 + (th - thumb_h) * (v.scroll_y / max_scroll);
+        let thumb = Rect::from_min_size(pos2(track.left() + 2.0, ty), vec2(6.0, thumb_h));
+        let r = ui.interact(
+            thumb,
+            egui::Id::unique(("score_vbar", ti, ri)),
+            Sense::drag(),
+        );
+        if r.dragged() {
+            v.scroll_y += r.drag_delta().y * max_scroll / (th - thumb_h).max(1.0);
+        }
+        crate::piano_roll::paint_scrollbar(&g0, track, thumb, r.hovered() || r.dragged());
+    }
+    v.systems = systems;
+
+    // ---- editing: click a staff to add a note, right-click a note to delete it
+    let resp = ui
+        .interact(sheet, egui::Id::unique(("score", ti, ri)), Sense::click())
+        .on_hover_text(tr("Click to add a note, right-click a note to delete it"));
     let Some(pt) = resp.interact_pointer_pos() else {
         return;
     };
-    let beat = beat_at(pt.x);
+    let Some(sys) = s
+        .score
+        .systems
+        .iter()
+        .find(|sys| pt.y >= sys.top() && pt.y < sys.top() + sys_h)
+        .cloned()
+    else {
+        return;
+    };
+    let lay = sys.lay;
     if resp.secondary_clicked() {
-        let hit = visible.iter().find_map(|it| match it {
+        let (b0, b1) = sys.beats();
+        let hit = items.iter().find_map(|it| match it {
             Item::Note(n)
-                if (x_of(n.at) - pt.x).abs() < 8.0
+                if n.at >= b0 - EPS
+                    && n.at < b1 - EPS
+                    && (sys.x_of(n.at) + 4.0 - pt.x).abs() < 8.0
                     && (lay.y(n.staff, n.step) - pt.y).abs() < HALF + 1.0 =>
             {
                 Some(n.note)
@@ -721,7 +1054,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
             p.tracks[ti].regions[ri].notes.remove(note);
             p.song_rev += 1;
         }
-    } else if resp.clicked() && beat >= 0.0 && f64::from(beat) < len_beats {
+    } else if resp.clicked() && pt.x <= sys.right {
+        let beat = sys.beat_at(pt.x - 4.0);
+        if beat < 0.0 || f64::from(beat) >= len_beats {
+            return;
+        }
         let (staff, step) = lay.step_at(pt.y);
         let pitch = pitch_in_key(step, fifths);
         // On the staff it was clicked on, not past the other one's middle C.
@@ -746,71 +1083,164 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
     }
 }
 
+/// Where a note at `beat` on `step` of `staff` was drawn last frame (tests).
+#[cfg(test)]
+fn point_of(v: &ScoreView, beat: f32, staff: Staff, step: i32) -> Option<Pos2> {
+    let sys = v.systems.iter().find(|s| {
+        let (a, b) = s.beats();
+        beat >= a - EPS && beat < b
+    })?;
+    Some(pos2(sys.x_of(beat) + 4.0, sys.lay.y(staff, step)))
+}
+
 // ------------------------------------------------------------------------- drawing
 
-fn draw_note(g: &egui::Painter, lay: &Staves, x: f32, n: &NoteItem) {
-    let y = lay.y(n.staff, n.step);
-    let bottom = bottom_step(n.staff);
-    // Ledger lines for notes above or below the staff.
-    let (lo, hi) = (bottom, bottom + 8);
-    let ledger = |step: i32| {
-        let ly = lay.y(n.staff, step);
-        g.line_segment(
-            [pos2(x - 9.0, ly), pos2(x + 9.0, ly)],
-            Stroke::new(1.0, STAFF_INK),
-        );
+/// A notehead at `c`: an oval tilted up to the right, filled, or hollow for half and whole
+/// notes.
+fn notehead(g: &egui::Painter, c: Pos2, value: f32) {
+    let oval = |rx: f32, ry: f32, tilt: f32| -> Vec<Pos2> {
+        let (sn, cs) = tilt.to_radians().sin_cos();
+        (0..24)
+            .map(|k| {
+                let a = k as f32 / 24.0 * std::f32::consts::TAU;
+                let (x, y) = (rx * a.cos(), ry * a.sin());
+                c + vec2(x * cs - y * sn, x * sn + y * cs)
+            })
+            .collect()
     };
-    if n.step < lo {
-        for step in (n.step..lo).filter(|st| (lo - st) % 2 == 0) {
-            ledger(step);
-        }
-    }
-    if n.step > hi {
-        for step in ((hi + 1)..=n.step).filter(|st| (st - hi) % 2 == 0) {
-            ledger(step);
-        }
-    }
-    let head = pos2(x, y);
-    let radius = vec2(5.6, 4.2);
-    if n.value >= 2.0 {
-        g.add(Shape::ellipse_stroke(head, radius, Stroke::new(1.6, INK)));
+    if value >= 4.0 - EPS {
+        g.add(Shape::convex_polygon(
+            oval(6.6, 4.4, 0.0),
+            INK,
+            Stroke::NONE,
+        ));
+        g.add(Shape::convex_polygon(
+            oval(2.6, 3.6, -35.0),
+            PAPER,
+            Stroke::NONE,
+        ));
+    } else if value >= 2.0 - EPS {
+        g.add(Shape::convex_polygon(
+            oval(5.8, 4.1, -22.0),
+            INK,
+            Stroke::NONE,
+        ));
+        g.add(Shape::convex_polygon(
+            oval(4.6, 1.9, -22.0),
+            PAPER,
+            Stroke::NONE,
+        ));
     } else {
-        g.add(Shape::ellipse_filled(head, radius, INK));
+        g.add(Shape::convex_polygon(
+            oval(5.8, 4.1, -22.0),
+            INK,
+            Stroke::NONE,
+        ));
     }
-    match n.accidental {
-        Some(Accidental::Sharp) => sharp(g, pos2(x - 13.0, y)),
-        Some(Accidental::Flat) => flat(g, pos2(x - 12.0, y)),
-        Some(Accidental::Natural) => natural(g, pos2(x - 12.0, y)),
-        None => {}
-    }
-    if dotted(n.value) {
-        g.circle_filled(pos2(x + 9.0, y - 2.0), 1.6, INK);
-    }
-    if n.value < 4.0 {
-        // The stem goes up for notes below the middle line of their staff.
-        let up = n.step < bottom + 4;
-        let (sx, y0, y1) = if up {
-            (x + 5.2, y - 1.0, y - 3.4 * SPACE)
-        } else {
-            (x - 5.2, y + 1.0, y + 3.4 * SPACE)
-        };
-        g.line_segment([pos2(sx, y0), pos2(sx, y1)], Stroke::new(1.2, INK));
-        let flags = if n.value <= 0.375 {
-            2
-        } else if n.value <= 0.75 {
-            1
-        } else {
-            0
-        };
-        for f in 0..flags {
-            let dy = f as f32 * 5.0;
-            let (a, b) = if up {
-                (pos2(sx, y1 + dy), pos2(sx + 8.0, y1 + 12.0 + dy))
-            } else {
-                (pos2(sx, y1 - dy), pos2(sx + 8.0, y1 - 12.0 - dy))
-            };
-            g.line_segment([a, b], Stroke::new(1.6, INK));
+}
+
+/// The notes of one staff that start together: their heads (a second's upper head on the
+/// other side of the stem), accidentals staggered so they do not collide, dots, ledger lines,
+/// and one stem with the flags of the shortest value.
+fn draw_chord(g: &egui::Painter, lay: &Staves, x: f32, chord: &[NoteItem]) {
+    let Some(first) = chord.first() else { return };
+    let staff = first.staff;
+    let bottom = bottom_step(staff);
+    let mut steps: Vec<i32> = chord.iter().map(|n| n.step).collect();
+    steps.sort_unstable();
+    let (low, high) = (steps[0], steps[steps.len() - 1]);
+    // The stem goes up when the notes sit mostly below the middle line.
+    let up = (low + high) < 2 * (bottom + 4);
+    let head_w = 5.6;
+    // Ledger lines for notes above or below the staff.
+    let ledger = |step: i32| {
+        let ly = lay.y(staff, step);
+        g.hline(x - 9.0..=x + 9.0, ly, Stroke::new(1.2, STAFF_INK));
+    };
+    let hi_line = bottom + 8;
+    if low < bottom {
+        for step in (low..bottom).filter(|st| (bottom - st) % 2 == 0) {
+            ledger(step);
         }
+    }
+    if high > hi_line {
+        for step in ((hi_line + 1)..=high).filter(|st| (st - hi_line) % 2 == 0) {
+            ledger(step);
+        }
+    }
+    // Heads: a note a step from the one before it goes to the other side of the stem.
+    let mut ordered: Vec<NoteItem> = chord.to_vec();
+    ordered.sort_by_key(|n| n.step);
+    let mut flipped = vec![false; ordered.len()];
+    for k in 1..ordered.len() {
+        if ordered[k].step - ordered[k - 1].step == 1 && !flipped[k - 1] {
+            flipped[k] = true;
+        }
+    }
+    let shift = if up {
+        2.0 * head_w - 0.6
+    } else {
+        -(2.0 * head_w - 0.6)
+    };
+    let mut acc_k = 0;
+    for (k, n) in ordered.iter().enumerate().rev() {
+        let y = lay.y(staff, n.step);
+        let hx = if flipped[k] { x + shift } else { x };
+        notehead(g, pos2(hx, y), n.value);
+        if dotted(n.value) {
+            // A dot sits in a space: a note on a line puts it in the space above.
+            let on_line = (n.step - bottom) % 2 == 0;
+            let dy = if on_line { -HALF } else { 0.0 };
+            let dx = if flipped.iter().any(|f| *f) && up {
+                shift
+            } else {
+                0.0
+            };
+            g.circle_filled(pos2(x + dx + 10.0, y + dy), 1.7, INK);
+        }
+        if let Some(a) = n.accidental {
+            let ax = x - head_w - 7.0 - (acc_k % 2) as f32 * 8.0;
+            acc_k += 1;
+            match a {
+                Accidental::Sharp => sharp(g, pos2(ax, y)),
+                Accidental::Flat => flat(g, pos2(ax + 1.0, y)),
+                Accidental::Natural => natural(g, pos2(ax + 1.0, y)),
+            }
+        }
+    }
+    let value = chord.iter().map(|n| n.value).fold(f32::INFINITY, f32::min);
+    if value >= 4.0 - EPS {
+        return;
+    }
+    let (sx, y0, y1) = if up {
+        let y = lay.y(staff, low);
+        (x + head_w - 0.6, y - 1.0, lay.y(staff, high) - 3.5 * SPACE)
+    } else {
+        let y = lay.y(staff, high);
+        (x - head_w + 0.6, y + 1.0, lay.y(staff, low) + 3.5 * SPACE)
+    };
+    g.line_segment([pos2(sx, y0), pos2(sx, y1)], Stroke::new(1.3, INK));
+    let flags = if value <= 0.375 {
+        2
+    } else if value <= 0.75 {
+        1
+    } else {
+        0
+    };
+    for f in 0..flags {
+        let d = f as f32 * 6.5;
+        let dir = if up { 1.0 } else { -1.0 };
+        let a = pos2(sx, y1 + d * dir);
+        curve(
+            g,
+            [
+                a,
+                a + vec2(1.0, 5.0 * dir),
+                a + vec2(8.5, 7.0 * dir),
+                a + vec2(6.5, 16.0 * dir),
+            ],
+            Stroke::new(1.8, INK),
+        );
     }
 }
 
@@ -818,79 +1248,125 @@ fn dotted(value: f32) -> bool {
     [0.75, 1.5, 3.0].iter().any(|d| (value - d).abs() < 1e-3)
 }
 
-/// A curved line between two notes of the same pitch.
+/// A tie from the note at `x0` to the next piece at `x1`, curved away from the stem: under the
+/// noteheads when the stem goes up, over them when it goes down.
 fn draw_tie(g: &egui::Painter, lay: &Staves, x0: f32, x1: f32, n: &NoteItem) {
     let y = lay.y(n.staff, n.step);
-    // Opposite the stem, so it stays clear of it.
     let below = n.step < bottom_step(n.staff) + 4;
-    let dy = if below { 6.0 } else { -6.0 };
-    let (a, b) = (pos2(x0 + 6.0, y + dy * 0.6), pos2(x1 - 6.0, y + dy * 0.6));
-    if b.x <= a.x {
+    let dir = if below { 1.0 } else { -1.0 };
+    let (a, b) = (pos2(x0 + 4.0, y + 5.0 * dir), pos2(x1 - 4.0, y + 5.0 * dir));
+    if b.x <= a.x + 2.0 {
         return;
     }
-    let sag = dy * 1.4;
-    g.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(
-        [
-            a,
-            pos2(a.x + (b.x - a.x) * 0.25, a.y + sag),
-            pos2(a.x + (b.x - a.x) * 0.75, a.y + sag),
-            b,
-        ],
-        false,
-        Color32::TRANSPARENT,
-        Stroke::new(1.3, INK),
-    )));
+    let sag = dir * (4.0 + (b.x - a.x).min(200.0) * 0.02);
+    // A crescent: two curves, thick in the middle, drawn as one filled band.
+    let pts = |bulge: f32| -> Vec<Pos2> {
+        (0..=16)
+            .map(|k| {
+                let t = k as f32 / 16.0;
+                let s = 4.0 * t * (1.0 - t);
+                pos2(
+                    a.x + (b.x - a.x) * t,
+                    a.y + (b.y - a.y) * t + sag * s * bulge,
+                )
+            })
+            .collect()
+    };
+    let (outer, inner) = (pts(1.0), pts(0.72));
+    for k in 0..16 {
+        let mut mesh = egui::epaint::Mesh::default();
+        mesh.colored_vertex(outer[k], INK);
+        mesh.colored_vertex(outer[k + 1], INK);
+        mesh.colored_vertex(inner[k + 1], INK);
+        mesh.colored_vertex(inner[k], INK);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        g.add(Shape::mesh(mesh));
+    }
+    g.add(Shape::line(outer, Stroke::new(0.8, INK)));
 }
 
 fn draw_rest(g: &egui::Painter, lay: &Staves, x: f32, r: &RestItem) {
     let bottom = bottom_step(r.staff);
     let line = |k: i32| lay.y(r.staff, bottom + 2 * k); // line 0 (bottom) .. 4 (top)
     let v = r.value;
+    let p = |cx: f32, cy: f32, dx: f32, dy: f32| pos2(cx + dx * SPACE, cy + dy * SPACE);
     if v >= 4.0 - 1e-3 {
         // A whole rest hangs from the fourth line.
         g.rect_filled(
-            Rect::from_min_size(pos2(x - 5.0, line(3)), vec2(10.0, HALF)),
+            Rect::from_min_size(pos2(x - 6.0, line(3)), vec2(12.0, HALF + 0.5)),
             0.0,
             INK,
         );
     } else if v >= 2.0 - 1e-3 {
         // A half rest sits on the middle line.
         g.rect_filled(
-            Rect::from_min_size(pos2(x - 5.0, line(2) - HALF), vec2(10.0, HALF)),
+            Rect::from_min_size(pos2(x - 6.0, line(2) - HALF - 0.5), vec2(12.0, HALF + 0.5)),
             0.0,
             INK,
         );
     } else if v >= 1.0 - 1e-3 {
-        // A quarter rest: a zigzag down the middle of the staff.
-        let top = line(3);
-        let pts = vec![
-            pos2(x - 2.0, top),
-            pos2(x + 3.0, top + SPACE * 0.55),
-            pos2(x - 3.0, top + SPACE * 1.1),
-            pos2(x + 3.0, top + SPACE * 1.7),
-            pos2(x - 1.0, top + SPACE * 2.2),
-            pos2(x - 3.0, top + SPACE * 2.0),
-            pos2(x + 1.0, top + SPACE * 2.6),
-        ];
-        g.add(Shape::line(pts, Stroke::new(1.6, INK)));
-    } else {
-        // Eighth and sixteenth rests: a slanted stroke with a dot for each flag.
-        let flags = if v <= 0.25 + 1e-3 { 2 } else { 1 };
-        let top = line(3) - 1.0;
+        // A quarter rest: a thin stroke down, a thick one back, a thin one down and the hook.
+        let c = line(2);
+        let thin = Stroke::new(1.4, INK);
+        g.line_segment([p(x, c, -0.3, -1.5), p(x, c, 0.35, -0.65)], thin);
         g.line_segment(
-            [
-                pos2(x + 3.0, top),
-                pos2(x - 2.0, top + SPACE * (1.5 + 0.8 * (flags - 1) as f32)),
-            ],
-            Stroke::new(1.3, INK),
+            [p(x, c, 0.35, -0.65), p(x, c, -0.25, 0.1)],
+            Stroke::new(3.4, INK),
         );
+        g.line_segment([p(x, c, -0.25, 0.1), p(x, c, 0.35, 0.8)], thin);
+        curve(
+            g,
+            [
+                p(x, c, 0.35, 0.8),
+                p(x, c, -0.35, 0.45),
+                p(x, c, -0.65, 1.05),
+                p(x, c, -0.05, 1.55),
+            ],
+            Stroke::new(1.8, INK),
+        );
+    } else {
+        // Eighth and sixteenth rests: a slanted stem with a flag and a ball for each.
+        let flags = if v <= 0.25 + 1e-3 { 2 } else { 1 };
+        let c = line(3) - HALF;
+        let top = p(x, c, 0.45, -0.55);
+        let foot = p(x, c, -0.15, 1.1 + (flags - 1) as f32);
+        g.line_segment([top, foot], Stroke::new(1.4, INK));
         for f in 0..flags {
-            g.circle_filled(
-                pos2(x - 2.5 - f as f32 * 1.5, top + 3.0 + f as f32 * 6.0),
-                1.9,
-                INK,
+            let fy = f as f32;
+            let tip = p(x, c, 0.45 - 0.22 * fy, -0.55 + fy);
+            let ball = p(x, c, -0.35 - 0.22 * fy, -0.42 + fy);
+            curve(
+                g,
+                [
+                    ball + vec2(0.0, 1.5),
+                    ball + vec2(2.0, 4.0),
+                    tip + vec2(-3.0, 2.5),
+                    tip,
+                ],
+                Stroke::new(1.4, INK),
             );
+            g.circle_filled(ball, 2.1, INK);
         }
+    }
+}
+
+/// A brace joining the two staves of a system, its point at the middle, left of `x`.
+fn brace(g: &egui::Painter, x: f32, top: f32, bottom: f32) {
+    let h = bottom - top;
+    let n = 40;
+    let at = |t: f32| -> Pos2 {
+        // Out to the left in each half, back in at the ends and to a point at the middle.
+        let u = if t < 0.5 { t * 2.0 } else { (1.0 - t) * 2.0 };
+        let bow = (u * std::f32::consts::PI).sin();
+        let tip = (1.0 - u).powi(6);
+        pos2(x - 5.0 - bow * 3.0 - tip * 6.0, top + h * t)
+    };
+    for k in 0..n {
+        let (t0, t1) = (k as f32 / n as f32, (k + 1) as f32 / n as f32);
+        let u = if t0 < 0.5 { t0 * 2.0 } else { (1.0 - t0) * 2.0 };
+        let w = 1.2 + 4.8 * (u * std::f32::consts::PI).sin();
+        g.line_segment([at(t0), at(t1)], Stroke::new(w, INK));
     }
 }
 
@@ -1318,8 +1794,7 @@ mod tests {
         let mut h = Harness::new(1000.0, 420.0);
         h.settle(|ui| show(ui, &mut p, &mut s, ti, ri, body));
         // Beat 2 on the top line of the treble staff: F5, an F sharp in G major.
-        let lead = 14.0 + 9.0 + 30.0;
-        let at = pos2(CLEF_W + lead + 2.0 * 56.0, STRIP_H + 40.0);
+        let at = point_of(&s.score, 2.0, Staff::Treble, 45).unwrap();
         let has = |p: &Project| {
             p.tracks[ti].regions[ri]
                 .notes
@@ -1337,7 +1812,7 @@ mod tests {
         assert!(!has(&p), "right-click deleted it");
         assert_eq!(p.tracks[ti].regions[ri].notes.len(), before);
         // A click past the end of the region adds nothing.
-        let far = pos2(CLEF_W + lead + 300.0 * 56.0, at.y);
+        let far = pos2(990.0, at.y);
         h.click(far, |ui| show(ui, &mut p, &mut s, ti, ri, body));
         assert_eq!(p.tracks[ti].regions[ri].notes.len(), before);
         // The note sounded for a moment and is let go of.

@@ -99,6 +99,9 @@ impl BlockProcessor for crate::au::AuInstance {
     fn set_parameter_at(&mut self, index: u32, value: f32, offset: u32) {
         crate::au::AuInstance::set_parameter(self, index, value, offset);
     }
+    fn block_transport(&mut self, t: &BlockTransport) {
+        crate::au::AuInstance::set_transport(self, t);
+    }
 }
 
 /// MIDI messages one block can hold for an instrument; more are dropped.
@@ -433,6 +436,10 @@ impl LaneWork {
                 LaneEvent::Transport(f, t) => {
                     if f <= f0 {
                         bt = advance(t, f0 - f, sr);
+                    } else if t.playing && !bt.playing {
+                        // The transport starts inside this process buffer: the plug-ins
+                        // play from its first frame, from before the start.
+                        bt = pre_roll(t, f - f0, sr);
                     }
                     self.last_bt = t;
                     self.last_bt_frame = f;
@@ -527,11 +534,27 @@ impl Stopwatch {
 }
 
 /// `t`, `frames` later.
-fn advance(mut t: BlockTransport, frames: u64, sr: f32) -> BlockTransport {
+pub(crate) fn advance(mut t: BlockTransport, frames: u64, sr: f32) -> BlockTransport {
     if frames > 0 {
         t.sample_pos += frames as i64;
         if t.playing {
             t.beat += frames as f64 / f64::from(sr.max(1.0)) * t.tempo / 60.0;
+        }
+    }
+    t
+}
+
+/// The transport `frames` before `t` starts playing, for a block whose frame `frames` is
+/// the first one played: playing already, its position moved back (a short pre-roll, as
+/// hosts give it), so that [`advance`] by `frames` lands exactly on `t`.
+pub(crate) fn pre_roll(mut t: BlockTransport, frames: u64, sr: f32) -> BlockTransport {
+    t.playing = true;
+    if frames > 0 {
+        t.sample_pos -= frames as i64;
+        t.beat -= frames as f64 / f64::from(sr.max(1.0)) * t.tempo / 60.0;
+        let bar = f64::from(t.sig.0.max(1)) * 4.0 / f64::from(t.sig.1.max(1));
+        while t.beat < t.bar_start_beat {
+            t.bar_start_beat -= bar;
         }
     }
     t
@@ -807,8 +830,12 @@ impl PluginTrack {
     /// [`PluginTrack::push_param`] from the track's automation: on a live track it waits
     /// for the content delay, with the regions it belongs to.
     pub(crate) fn push_param_timeline(&mut self, offset: u32, slot: u8, index: u32, value: f32) {
+        let late = offset.saturating_add(self.content_delay);
         if self.content_delay == 0 {
             self.push_param(offset, slot, index, value);
+        } else if (late as usize) < self.block_n {
+            // Due in this block still (a content delay shorter than the block).
+            self.push_param(late, slot, index, value);
         } else if self.delayed.len() < self.delayed.capacity() {
             let due = self.now + u64::from(offset) + u64::from(self.content_delay);
             let e = ParamEvent {
@@ -852,8 +879,12 @@ impl PluginTrack {
     /// [`PluginTrack::push_midi`] for a message from the track's regions: on a live track it
     /// waits for the content delay, so the regions stay in time while live notes do not wait.
     pub(crate) fn push_midi_timeline(&mut self, offset: u32, status: u8, data1: u8, data2: u8) {
+        let late = offset.saturating_add(self.content_delay);
         if self.content_delay == 0 {
             self.push_midi(offset, status, data1, data2);
+        } else if (late as usize) < self.block_n {
+            // Due in this block still (a content delay shorter than the block).
+            self.push_midi(late, status, data1, data2);
         } else if self.has_inst && self.delayed.len() < self.delayed.capacity() {
             let due = self.now + u64::from(offset) + u64::from(self.content_delay);
             let e = Event {
