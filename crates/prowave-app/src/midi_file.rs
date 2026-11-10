@@ -630,6 +630,7 @@ pub fn import(p: &mut Project, file: &MidiFile) -> usize {
             ft.name.clone()
         };
         p.tracks[ti].regions.push(Region {
+            missing: None,
             name,
             start_bar: start_bar0 as f32 + 1.0,
             len_bars: len_bars as f32,

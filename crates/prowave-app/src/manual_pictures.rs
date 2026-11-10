@@ -8,6 +8,7 @@
 //! - `tracks_area::pictures` → `tracks-main.png`; `transport` → `control-bar-1470.png`
 //! - `musical_typing`, `midi_monitor` → `musical-typing.png`, `midi-monitor.png`
 //! - `file_browser` → `loop-browser.png`, `all-files.png`
+//! - `free_plugins` → `free-plugins.png`, `free-plugins-running.png`
 //! - `pitch_editor` → `pitch-editor.png`; `tune_lane` → `tune-lane-*.png`
 //! - `automation_ui` → `prowave-automation-lanes.png`, `prowave-automation-mixer.png`
 //! - `piano_roll::midi_editor_pictures` → `prowave-midi-shots/*.png` (Piano Roll, Score,

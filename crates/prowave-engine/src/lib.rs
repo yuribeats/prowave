@@ -43,6 +43,7 @@ mod plugin_track;
 mod plugin_window_layout;
 pub mod prerender;
 mod routing;
+pub mod rt_alloc;
 #[cfg(target_os = "macos")]
 mod rt_thread;
 mod sample_buf;

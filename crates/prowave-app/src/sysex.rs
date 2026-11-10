@@ -83,7 +83,7 @@ pub fn target(p: &Project, selected: Option<(usize, usize)>) -> Option<(usize, u
 
 /// A region that keeps its own events: not audio, not a take folder, not generated from settings.
 fn plain(r: &Region) -> bool {
-    r.audio.is_none() && r.folder.is_none() && r.generated.is_none()
+    !r.is_audio() && r.folder.is_none() && r.generated.is_none()
 }
 
 /// Puts `bytes` into region `r` of track `t` at the playhead (or at the region's start if the

@@ -1,8 +1,9 @@
 //! `prowave --dsp-load [seconds] [buffer]`: what the CPU meter reads. Starts the real engine,
 //! reads the peak DSP load every 20 ms (as the meter does each frame) and prints how often the
 //! peak passes 50%, 90% and 100% (an overload: the block took longer than its buffer), with
-//! the overloads Core Audio and the engine counted. Nothing is played aloud: the master is
-//! muted.
+//! the overloads Core Audio and the engine counted, and (release builds) the memory
+//! allocations made on the audio thread since the program started: our own code's and those
+//! inside plug-in calls. Nothing is played aloud: the master is muted.
 //!
 //! - `--vst3 <bundle> [count]`: that many instances of the bundle's first class as Audio FX on
 //!   a track, processing silence.
@@ -142,6 +143,7 @@ pub fn run(args: &[String]) -> i32 {
             load * 100.0
         );
     }
+    println!("{}", crate::alloc_report::terminal_lines());
     0
 }
 
@@ -241,6 +243,7 @@ fn run_sweep(id: &str, secs: f64, live_unit: bool) -> i32 {
             );
         }
     }
+    println!("{}", crate::alloc_report::terminal_lines());
     0
 }
 

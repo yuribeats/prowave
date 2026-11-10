@@ -649,6 +649,9 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether the command replaces state the engine owns. Each one has a place kept for it in
+    /// the garbage queue from when it is sent: the engine either puts the old state there, or
+    /// (when there was none) says so in `Shared::retired_empty`.
     pub(crate) fn retires_state(&self) -> bool {
         matches!(
             self,
@@ -664,6 +667,7 @@ impl Command {
                 | Self::SetInput(_)
                 | Self::SetPlugins { .. }
                 | Self::SetMasterPlugins(_)
+                | Self::SetTrackSoundFont { .. }
         )
     }
 
@@ -798,6 +802,10 @@ pub struct Shared {
     heaviest: std::sync::atomic::AtomicU64,
     /// The Core Audio device whose I/O workgroup the playback thread joins (0: none).
     pub(crate) workgroup_device: Arc<AtomicU32>,
+    /// State-replacing commands (see `Command::retires_state`) the engine has finished that
+    /// replaced nothing, so nothing of theirs comes back through the garbage queue: the place
+    /// kept for it there is free again. Wraps.
+    pub(crate) retired_empty: AtomicU32,
 }
 
 impl Shared {
@@ -812,6 +820,7 @@ impl Shared {
             prerender_underruns: AtomicU32::new(0),
             heaviest: std::sync::atomic::AtomicU64::new(0),
             workgroup_device: Arc::new(AtomicU32::new(0)),
+            retired_empty: AtomicU32::new(0),
         }
     }
 
@@ -958,6 +967,8 @@ pub struct EngineCore {
     sr: f32,
     rx: Consumer<Command>,
     trash: Producer<Garbage>,
+    /// Whether the command being taken has put its old state in `trash`.
+    gave_back: bool,
     shared: Arc<Shared>,
     /// What the UI was last shown; the meters fall back from it.
     shown: EngineState,
@@ -1232,6 +1243,7 @@ impl EngineCore {
             sr: sample_rate.max(1) as f32,
             rx,
             trash,
+            gave_back: false,
             shared,
             shown: EngineState::default(),
             state,
@@ -2333,447 +2345,462 @@ impl EngineCore {
             // Leave owning commands in the queue until their old state can be returned.
             // This is the only garbage producer; the consumer can only free more slots,
             // so the single push below is guaranteed to fit after this check.
-            if next.retires_state() && self.trash.is_full() {
+            let retires = next.retires_state();
+            if retires && self.trash.is_full() {
                 break;
             }
             let Ok(cmd) = self.rx.pop() else { break };
-            match cmd {
-                Command::CountIn {
-                    clicks,
-                    beats_per_click,
-                } => {
-                    if self.playing {
-                        continue;
-                    }
-                    let span = if beats_per_click.is_finite() && beats_per_click > 0.0 {
-                        self.tempo_map.seconds_at(self.beat + beats_per_click)
-                            - self.tempo_map.seconds_at(self.beat)
-                    } else {
-                        0.0
-                    };
-                    self.count_step = ((span * self.sr as f64).round() as u32).max(1);
-                    self.count_left = clicks;
-                    self.count_wait = 0;
-                    self.counting = true;
+            self.gave_back = false;
+            self.take_command(cmd);
+            // Nothing came back for it: the place kept for its old state is free again.
+            if retires && !self.gave_back {
+                self.shared.retired_empty.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Old state on its way back to the UI thread, which frees it. At most one per command.
+    fn give_back(&mut self, old: Garbage) {
+        self.gave_back = self.trash.push(old).is_ok();
+    }
+
+    fn take_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::CountIn {
+                clicks,
+                beats_per_click,
+            } => {
+                if self.playing {
+                    return;
                 }
-                Command::SetInput(feed) => {
-                    let mut feed = feed;
-                    if let Some(f) = feed.as_mut() {
-                        f.set_output_rate(self.sr);
+                let span = if beats_per_click.is_finite() && beats_per_click > 0.0 {
+                    self.tempo_map.seconds_at(self.beat + beats_per_click)
+                        - self.tempo_map.seconds_at(self.beat)
+                } else {
+                    0.0
+                };
+                self.count_step = ((span * self.sr as f64).round() as u32).max(1);
+                self.count_left = clicks;
+                self.count_wait = 0;
+                self.counting = true;
+            }
+            Command::SetInput(feed) => {
+                let mut feed = feed;
+                if let Some(f) = feed.as_mut() {
+                    f.set_output_rate(self.sr);
+                }
+                if let Some(old) = std::mem::replace(&mut self.input, feed) {
+                    self.give_back(Garbage::Input(old));
+                }
+            }
+            Command::SetPlugins { track, plugins } => {
+                let t = track as usize;
+                if t < MAX_TRACKS {
+                    // Notes still out to the instrument before are let go.
+                    let mut i = 0;
+                    while i < self.ext_notes.len() {
+                        if self.ext_notes[i].track == track {
+                            self.ext_notes.swap_remove(i);
+                        } else {
+                            i += 1;
+                        }
                     }
-                    if let Some(old) = std::mem::replace(&mut self.input, feed) {
-                        let _ = self.trash.push(Garbage::Input(old));
+                    if let Some(old) = std::mem::replace(&mut self.plugins[t], plugins) {
+                        // Plug-ins on the playback thread are freed there.
+                        if old.is_away()
+                            && !old.lane_home()
+                            && self.retire.len() < self.retire.capacity()
+                        {
+                            self.retire.push((old.worker(), old.lane_id()));
+                        }
+                        self.give_back(Garbage::Plugins(old));
+                    }
+                    let delay = self.content_delay[t];
+                    if let Some(p) = self.plugins[t].as_mut() {
+                        p.set_track(track);
+                        p.set_content_delay(delay);
+                    }
+                    self.plugin_tracks.retain(|x| *x != track);
+                    if self.plugins[t].is_some() {
+                        self.plugin_tracks.push(track);
+                    }
+                    // New instances learn their automated values at the next reading.
+                    for (lane, last) in self.automation.iter().zip(self.auto_last.iter_mut()) {
+                        if lane.track == track {
+                            *last = f32::NAN;
+                        }
+                    }
+                    self.sort_strips();
+                } else if let Some(p) = plugins {
+                    self.give_back(Garbage::Plugins(p));
+                }
+            }
+            Command::SetMasterPlugins(plugins) => {
+                if let Some(old) = std::mem::replace(&mut self.master_plugins, plugins) {
+                    self.give_back(Garbage::Plugins(old));
+                }
+                // Named in the heaviest plug-in report as the Stereo Out's.
+                if let Some(p) = self.master_plugins.as_mut() {
+                    p.set_track(MASTER_TRACK);
+                }
+                // New instances learn their automated values at the next reading.
+                for (lane, last) in self.automation.iter().zip(self.auto_last.iter_mut()) {
+                    if lane.track == MASTER_TRACK {
+                        *last = f32::NAN;
                     }
                 }
-                Command::SetPlugins { track, plugins } => {
-                    let t = track as usize;
-                    if t < MAX_TRACKS {
-                        // Notes still out to the instrument before are let go.
+                self.master_plugins_changed();
+            }
+            Command::SetMasterPluginsOff(mask) => {
+                if let Some(p) = self.master_plugins.as_mut() {
+                    p.set_effects_off(mask);
+                }
+                self.master_plugins_changed();
+            }
+            Command::SetMidiClock(on) => self.midi_clock = on,
+            Command::SetPluginParam {
+                track,
+                effect,
+                index,
+                value,
+            } => {
+                let p = if track == MASTER_TRACK {
+                    self.master_plugins.as_mut()
+                } else {
+                    self.plugins
+                        .get_mut(track as usize)
+                        .and_then(|p| p.as_mut())
+                };
+                if let Some(p) = p {
+                    p.set_effect_param(usize::from(effect), usize::from(index), value);
+                }
+            }
+            Command::SetMonitors { tracks, count } => {
+                self.monitors = tracks;
+                self.monitor_count = (count as usize).min(MAX_MONITORS);
+            }
+            Command::Play => {
+                self.counting = false;
+                if !self.playing {
+                    self.start_beat = self.beat;
+                    self.start_click = true;
+                }
+                self.playing = true;
+                self.mtc_locate();
+            }
+            Command::Pause => {
+                self.counting = false;
+                self.playing = false;
+                self.kill_voices();
+                self.mtc_locate();
+                self.flush_ahead();
+            }
+            Command::Stop => {
+                self.counting = false;
+                self.playing = false;
+                let b = self.start_beat;
+                self.seek(b);
+                self.flush_ahead();
+            }
+            Command::SetPosition { beat } => {
+                self.seek(beat);
+                if self.playing {
+                    self.flush_ahead();
+                    self.start_click = true;
+                }
+            }
+            Command::SetTempoMap(map) => {
+                let old = std::mem::replace(&mut self.tempo_map, map);
+                self.give_back(Garbage::TempoMap(old));
+                self.reposition_clips();
+                // A tempo edit after the playhead leaves the time where it was.
+                if (self.tempo_map.seconds_at(self.beat) - self.mtc_secs).abs() > 0.001 {
+                    self.mtc_locate();
+                }
+            }
+            Command::SetMtc {
+                on,
+                rate,
+                offset_frames,
+            } => {
+                self.mtc.configure(on, rate);
+                self.mtc_rate = rate;
+                self.mtc_offset_frames = offset_frames;
+                self.mtc_locate();
+            }
+            Command::SetMetronome { on } => self.metronome = on,
+            Command::SetClick { gain_db, accent } => {
+                if gain_db.is_finite() {
+                    self.click_gain = 10f32.powf(gain_db.clamp(-60.0, 0.0) / 20.0);
+                }
+                self.click_accent = accent;
+            }
+            Command::SetTuning { a4_hz } => {
+                if a4_hz.is_finite() {
+                    self.tuning_hz = a4_hz.clamp(MIN_TUNING_HZ, MAX_TUNING_HZ);
+                    let hz = self.tuning_hz;
+                    for player in self.sf.iter_mut().flatten() {
+                        player.set_tuning(hz);
+                    }
+                }
+            }
+            Command::SetMasterGain { linear } => {
+                if linear.is_finite() {
+                    self.master_user = linear.clamp(0.0, 2.0);
+                    // While the Stereo Out lane plays, it rules the master fader.
+                    if !self.auto_master {
+                        let samples = self.smoothing_samples();
+                        self.master.set(self.master_user, samples);
+                    }
+                }
+            }
+            Command::SetCycle {
+                on,
+                start_beat,
+                end_beat,
+            } => {
+                self.cycle = (on
+                    && start_beat.is_finite()
+                    && end_beat.is_finite()
+                    && start_beat >= 0.0
+                    && end_beat > start_beat)
+                    .then_some((start_beat, end_beat));
+            }
+            Command::SetTrackMix { track, mix } => {
+                if let Some(t) = self.song.tracks.get_mut(track as usize) {
+                    *t = mix.sanitized();
+                    self.rebuild_mix(true, Some(track as usize));
+                }
+            }
+            Command::NoteOn { pitch, vel, track } => {
+                self.live_note_on(pitch.min(127), vel.clamp(1, 127), track)
+            }
+            Command::NoteOff { pitch } => self.live_note_off(pitch, None),
+            Command::NoteOffTrack { pitch, track } => self.live_note_off(pitch, Some(track)),
+            Command::SetTrackExternal { track, external } => {
+                if let Some(slot) = self.track_external.get_mut(track as usize) {
+                    let was = std::mem::replace(slot, external);
+                    // Notes already out to the instrument end when the track stops using it.
+                    if was && !external {
                         let mut i = 0;
                         while i < self.ext_notes.len() {
                             if self.ext_notes[i].track == track {
-                                self.ext_notes.swap_remove(i);
+                                let e = self.ext_notes.swap_remove(i);
+                                self.send_midi(e.track, false, e.pitch, 0, !e.live);
                             } else {
                                 i += 1;
                             }
                         }
-                        if let Some(old) = std::mem::replace(&mut self.plugins[t], plugins) {
-                            // Plug-ins on the playback thread are freed there.
-                            if old.is_away()
-                                && !old.lane_home()
-                                && self.retire.len() < self.retire.capacity()
-                            {
-                                self.retire.push((old.worker(), old.lane_id()));
-                            }
-                            let _ = self.trash.push(Garbage::Plugins(old));
-                        }
-                        let delay = self.content_delay[t];
-                        if let Some(p) = self.plugins[t].as_mut() {
-                            p.set_track(track);
-                            p.set_content_delay(delay);
-                        }
-                        self.plugin_tracks.retain(|x| *x != track);
-                        if self.plugins[t].is_some() {
-                            self.plugin_tracks.push(track);
-                        }
-                        // New instances learn their automated values at the next reading.
-                        for (lane, last) in self.automation.iter().zip(self.auto_last.iter_mut()) {
-                            if lane.track == track {
-                                *last = f32::NAN;
-                            }
-                        }
-                        self.sort_strips();
-                    } else if let Some(p) = plugins {
-                        let _ = self.trash.push(Garbage::Plugins(p));
                     }
                 }
-                Command::SetMasterPlugins(plugins) => {
-                    if let Some(old) = std::mem::replace(&mut self.master_plugins, plugins) {
-                        let _ = self.trash.push(Garbage::Plugins(old));
+            }
+            Command::SetTrackPatch { track, patch } => {
+                if let Some(slot) = self.track_patch.get_mut(track as usize) {
+                    *slot = patch.sanitized();
+                }
+            }
+            Command::SetTrackSoundFont { track, player } => {
+                let t = track as usize;
+                if t < MAX_TRACKS {
+                    self.sf_stop_track(track);
+                    let mut player = player;
+                    if let Some(p) = player.as_mut() {
+                        p.set_tuning(self.tuning_hz);
                     }
-                    // Named in the heaviest plug-in report as the Stereo Out's.
-                    if let Some(p) = self.master_plugins.as_mut() {
-                        p.set_track(MASTER_TRACK);
+                    let old = std::mem::replace(&mut self.sf[t], player);
+                    if let Some(mut old) = old {
+                        old.all_notes_off();
+                        self.give_back(Garbage::SoundFont(old));
                     }
-                    // New instances learn their automated values at the next reading.
-                    for (lane, last) in self.automation.iter().zip(self.auto_last.iter_mut()) {
-                        if lane.track == MASTER_TRACK {
-                            *last = f32::NAN;
-                        }
+                    self.sf_tracks.retain(|&x| x as usize != t);
+                    if self.sf[t].is_some() {
+                        self.sf_tracks.push(track);
                     }
-                    self.master_plugins_changed();
+                } else if let Some(p) = player {
+                    self.give_back(Garbage::SoundFont(p));
                 }
-                Command::SetMasterPluginsOff(mask) => {
-                    if let Some(p) = self.master_plugins.as_mut() {
-                        p.set_effects_off(mask);
+            }
+            Command::SetInserts { track, chain } => {
+                let t = track as usize;
+                if t < MAX_TRACKS {
+                    let old = self.chains[t].replace(chain);
+                    if let Some(old) = old {
+                        self.give_back(Garbage::Chain(old));
                     }
-                    self.master_plugins_changed();
+                    self.shown.gain_reduction[t] = 0.0;
+                    self.sort_strips();
+                } else {
+                    self.give_back(Garbage::Chain(chain));
                 }
-                Command::SetMidiClock(on) => self.midi_clock = on,
-                Command::SetPluginParam {
-                    track,
-                    effect,
-                    index,
-                    value,
-                } => {
-                    let p = if track == MASTER_TRACK {
-                        self.master_plugins.as_mut()
-                    } else {
-                        self.plugins
-                            .get_mut(track as usize)
-                            .and_then(|p| p.as_mut())
-                    };
-                    if let Some(p) = p {
-                        p.set_effect_param(usize::from(effect), usize::from(index), value);
+            }
+            Command::SetPdc { track, pdc } => {
+                let t = track as usize;
+                if t < MAX_TRACKS {
+                    if let Some(old) = self.pdc[t].replace(pdc) {
+                        self.give_back(Garbage::Pdc(old));
                     }
+                    self.sort_strips();
+                } else {
+                    self.give_back(Garbage::Pdc(pdc));
                 }
-                Command::SetMonitors { tracks, count } => {
-                    self.monitors = tracks;
-                    self.monitor_count = (count as usize).min(MAX_MONITORS);
+            }
+            Command::SetMasterInserts(chain) => {
+                if let Some(old) = self.master_chain.replace(chain) {
+                    self.give_back(Garbage::Chain(old));
                 }
-                Command::Play => {
-                    self.counting = false;
-                    if !self.playing {
-                        self.start_beat = self.beat;
-                        self.start_click = true;
-                    }
-                    self.playing = true;
-                    self.mtc_locate();
+            }
+            Command::SetConvolver { track, slot, conv } => {
+                let chain = if track == MASTER_TRACK {
+                    self.master_chain.as_mut()
+                } else {
+                    self.chains.get_mut(track as usize).and_then(|c| c.as_mut())
+                };
+                let fx = chain.and_then(|c| c.fx.get_mut(slot as usize));
+                let old = match fx {
+                    Some(fx) => fx.set_convolver(conv),
+                    None => conv,
+                };
+                self.give_back(Garbage::Convolver(old));
+            }
+            Command::SetFx {
+                track,
+                slot,
+                params,
+                bypass,
+            } => {
+                let chain = if track == MASTER_TRACK {
+                    self.master_chain.as_mut()
+                } else {
+                    self.chains.get_mut(track as usize).and_then(|c| c.as_mut())
+                };
+                if let Some(fx) = chain.and_then(|c| c.fx.get_mut(slot as usize)) {
+                    fx.set(params, bypass);
                 }
-                Command::Pause => {
-                    self.counting = false;
-                    self.playing = false;
-                    self.kill_voices();
-                    self.mtc_locate();
-                    self.flush_ahead();
+            }
+            Command::SetRoute { track, route } => {
+                let t = track as usize;
+                if t < MAX_TRACKS {
+                    self.routes[t] = route.sanitized();
+                    self.sort_strips();
+                    self.rebuild_mix(true, Some(t));
                 }
-                Command::Stop => {
-                    self.counting = false;
-                    self.playing = false;
-                    let b = self.start_beat;
-                    self.seek(b);
-                    self.flush_ahead();
+            }
+            Command::SetAutomation(lanes) => {
+                let old = std::mem::replace(&mut self.automation, lanes);
+                self.give_back(Garbage::Automation(old));
+                self.auto_vol.fill(None);
+                self.auto_pan.fill(None);
+                self.auto_on.fill(false);
+                self.auto_mute.fill(false);
+                self.auto_tracks.clear();
+                // Effect parameters go back to what the user set; the lanes that are
+                // played move them again from the next block.
+                for chain in self.chains.iter_mut().flatten() {
+                    chain.restore();
                 }
-                Command::SetPosition { beat } => {
-                    self.seek(beat);
-                    if self.playing {
-                        self.flush_ahead();
-                        self.start_click = true;
-                    }
+                if let Some(chain) = self.master_chain.as_mut() {
+                    chain.restore();
                 }
-                Command::SetTempoMap(map) => {
-                    let old = std::mem::replace(&mut self.tempo_map, map);
-                    let _ = self.trash.push(Garbage::TempoMap(old));
-                    self.reposition_clips();
-                    // A tempo edit after the playhead leaves the time where it was.
-                    if (self.tempo_map.seconds_at(self.beat) - self.mtc_secs).abs() > 0.001 {
-                        self.mtc_locate();
-                    }
-                }
-                Command::SetMtc {
-                    on,
-                    rate,
-                    offset_frames,
-                } => {
-                    self.mtc.configure(on, rate);
-                    self.mtc_rate = rate;
-                    self.mtc_offset_frames = offset_frames;
-                    self.mtc_locate();
-                }
-                Command::SetMetronome { on } => self.metronome = on,
-                Command::SetClick { gain_db, accent } => {
-                    if gain_db.is_finite() {
-                        self.click_gain = 10f32.powf(gain_db.clamp(-60.0, 0.0) / 20.0);
-                    }
-                    self.click_accent = accent;
-                }
-                Command::SetTuning { a4_hz } => {
-                    if a4_hz.is_finite() {
-                        self.tuning_hz = a4_hz.clamp(MIN_TUNING_HZ, MAX_TUNING_HZ);
-                        let hz = self.tuning_hz;
-                        for player in self.sf.iter_mut().flatten() {
-                            player.set_tuning(hz);
+                // Within the room made up front: no allocation.
+                self.auto_last.clear();
+                let n = self.automation.len().min(self.auto_last.capacity());
+                self.auto_last.resize(n, f32::NAN);
+                self.auto_any = self.automation.iter().any(|l| l.follow);
+                let was_master = self.auto_master;
+                self.auto_master = false;
+                // Sends that keep a lane carry on from where they are.
+                for t in 0..MAX_TRACKS {
+                    let was = std::mem::replace(&mut self.auto_send_on[t], [false; MAX_SENDS]);
+                    let sends = self.routes[t].sends;
+                    for ((on, ramp), spec) in was
+                        .iter()
+                        .zip(self.auto_send[t].iter_mut())
+                        .zip(sends.iter())
+                    {
+                        if !on {
+                            ramp.set(send_gain(spec.level), 0);
                         }
                     }
                 }
-                Command::SetMasterGain { linear } => {
-                    if linear.is_finite() {
-                        self.master_user = linear.clamp(0.0, 2.0);
-                        // While the Stereo Out lane plays, it rules the master fader.
-                        if !self.auto_master {
-                            let samples = self.smoothing_samples();
-                            self.master.set(self.master_user, samples);
+                for k in 0..n {
+                    let lane = &self.automation[k];
+                    if !lane.follow {
+                        continue;
+                    }
+                    if lane.track == MASTER_TRACK {
+                        self.auto_master |= lane.target == AutoTarget::Volume;
+                        continue;
+                    }
+                    let t = lane.track as usize;
+                    if t >= MAX_TRACKS
+                        || matches!(
+                            lane.target,
+                            AutoTarget::Fx { .. } | AutoTarget::Plugin { .. }
+                        )
+                    {
+                        continue;
+                    }
+                    if let AutoTarget::Send { slot } = lane.target {
+                        if let Some(on) = self.auto_send_on[t].get_mut(slot as usize) {
+                            *on = true;
                         }
                     }
-                }
-                Command::SetCycle {
-                    on,
-                    start_beat,
-                    end_beat,
-                } => {
-                    self.cycle = (on
-                        && start_beat.is_finite()
-                        && end_beat.is_finite()
-                        && start_beat >= 0.0
-                        && end_beat > start_beat)
-                        .then_some((start_beat, end_beat));
-                }
-                Command::SetTrackMix { track, mix } => {
-                    if let Some(t) = self.song.tracks.get_mut(track as usize) {
-                        *t = mix.sanitized();
-                        self.rebuild_mix(true, Some(track as usize));
+                    if !self.auto_on[t] {
+                        self.auto_on[t] = true;
+                        self.auto_tracks.push(lane.track);
                     }
                 }
-                Command::NoteOn { pitch, vel, track } => {
-                    self.live_note_on(pitch.min(127), vel.clamp(1, 127), track)
+                if was_master && !self.auto_master {
+                    let samples = self.smoothing_samples();
+                    self.master.set(self.master_user, samples);
                 }
-                Command::NoteOff { pitch } => self.live_note_off(pitch, None),
-                Command::NoteOffTrack { pitch, track } => self.live_note_off(pitch, Some(track)),
-                Command::SetTrackExternal { track, external } => {
-                    if let Some(slot) = self.track_external.get_mut(track as usize) {
-                        let was = std::mem::replace(slot, external);
-                        // Notes already out to the instrument end when the track stops using it.
-                        if was && !external {
-                            let mut i = 0;
-                            while i < self.ext_notes.len() {
-                                if self.ext_notes[i].track == track {
-                                    let e = self.ext_notes.swap_remove(i);
-                                    self.send_midi(e.track, false, e.pitch, 0, !e.live);
-                                } else {
-                                    i += 1;
-                                }
-                            }
-                        }
-                    }
+                self.auto_left = 0;
+                self.rebuild_mix(true, None);
+            }
+            Command::SetTestTone { hz, gain } => {
+                self.test_hz = if hz.is_finite() {
+                    hz.clamp(0.0, self.sr * 0.45)
+                } else {
+                    0.0
+                };
+                self.test_gain = if gain.is_finite() {
+                    gain.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+            Command::SetSong(new) => {
+                let old = std::mem::replace(&mut self.song, new);
+                self.give_back(Garbage::Song(old));
+                self.rebuild_mix(false, None);
+                let b = self.beat;
+                self.seek(b);
+            }
+            Command::SetControls(controls) => {
+                let old = std::mem::replace(&mut self.song.controls, controls);
+                self.give_back(Garbage::Controls(old));
+                self.next_control = self.song.controls.partition_point(|c| c.beat < self.beat);
+                // Controllers taken out of the song do not stay applied.
+                self.chase_controls();
+            }
+            Command::SetProcessBuffer { frames } => self.set_process_buffer(frames),
+            Command::SetTrackLive { track, live } => {
+                if let Some(slot) = self.track_live.get_mut(track as usize) {
+                    *slot = live;
                 }
-                Command::SetTrackPatch { track, patch } => {
-                    if let Some(slot) = self.track_patch.get_mut(track as usize) {
-                        *slot = patch.sanitized();
-                    }
-                }
-                Command::SetTrackSoundFont { track, player } => {
-                    let t = track as usize;
-                    if t < MAX_TRACKS {
-                        self.sf_stop_track(track);
-                        let mut player = player;
-                        if let Some(p) = player.as_mut() {
-                            p.set_tuning(self.tuning_hz);
-                        }
-                        let old = std::mem::replace(&mut self.sf[t], player);
-                        if let Some(mut old) = old {
-                            old.all_notes_off();
-                            let _ = self.trash.push(Garbage::SoundFont(old));
-                        }
-                        self.sf_tracks.retain(|&x| x as usize != t);
-                        if self.sf[t].is_some() {
-                            self.sf_tracks.push(track);
-                        }
-                    } else if let Some(p) = player {
-                        let _ = self.trash.push(Garbage::SoundFont(p));
-                    }
-                }
-                Command::SetInserts { track, chain } => {
-                    let t = track as usize;
-                    if t < MAX_TRACKS {
-                        let old = self.chains[t].replace(chain);
-                        if let Some(old) = old {
-                            let _ = self.trash.push(Garbage::Chain(old));
-                        }
-                        self.shown.gain_reduction[t] = 0.0;
-                        self.sort_strips();
-                    } else {
-                        let _ = self.trash.push(Garbage::Chain(chain));
-                    }
-                }
-                Command::SetPdc { track, pdc } => {
-                    let t = track as usize;
-                    if t < MAX_TRACKS {
-                        if let Some(old) = self.pdc[t].replace(pdc) {
-                            let _ = self.trash.push(Garbage::Pdc(old));
-                        }
-                        self.sort_strips();
-                    } else {
-                        let _ = self.trash.push(Garbage::Pdc(pdc));
-                    }
-                }
-                Command::SetMasterInserts(chain) => {
-                    if let Some(old) = self.master_chain.replace(chain) {
-                        let _ = self.trash.push(Garbage::Chain(old));
-                    }
-                }
-                Command::SetConvolver { track, slot, conv } => {
-                    let chain = if track == MASTER_TRACK {
-                        self.master_chain.as_mut()
-                    } else {
-                        self.chains.get_mut(track as usize).and_then(|c| c.as_mut())
-                    };
-                    let fx = chain.and_then(|c| c.fx.get_mut(slot as usize));
-                    let old = match fx {
-                        Some(fx) => fx.set_convolver(conv),
-                        None => conv,
-                    };
-                    let _ = self.trash.push(Garbage::Convolver(old));
-                }
-                Command::SetFx {
-                    track,
-                    slot,
-                    params,
-                    bypass,
-                } => {
-                    let chain = if track == MASTER_TRACK {
-                        self.master_chain.as_mut()
-                    } else {
-                        self.chains.get_mut(track as usize).and_then(|c| c.as_mut())
-                    };
-                    if let Some(fx) = chain.and_then(|c| c.fx.get_mut(slot as usize)) {
-                        fx.set(params, bypass);
-                    }
-                }
-                Command::SetRoute { track, route } => {
-                    let t = track as usize;
-                    if t < MAX_TRACKS {
-                        self.routes[t] = route.sanitized();
-                        self.sort_strips();
-                        self.rebuild_mix(true, Some(t));
-                    }
-                }
-                Command::SetAutomation(lanes) => {
-                    let old = std::mem::replace(&mut self.automation, lanes);
-                    let _ = self.trash.push(Garbage::Automation(old));
-                    self.auto_vol.fill(None);
-                    self.auto_pan.fill(None);
-                    self.auto_on.fill(false);
-                    self.auto_mute.fill(false);
-                    self.auto_tracks.clear();
-                    // Effect parameters go back to what the user set; the lanes that are
-                    // played move them again from the next block.
-                    for chain in self.chains.iter_mut().flatten() {
-                        chain.restore();
-                    }
-                    if let Some(chain) = self.master_chain.as_mut() {
-                        chain.restore();
-                    }
-                    // Within the room made up front: no allocation.
-                    self.auto_last.clear();
-                    let n = self.automation.len().min(self.auto_last.capacity());
-                    self.auto_last.resize(n, f32::NAN);
-                    self.auto_any = self.automation.iter().any(|l| l.follow);
-                    let was_master = self.auto_master;
-                    self.auto_master = false;
-                    // Sends that keep a lane carry on from where they are.
-                    for t in 0..MAX_TRACKS {
-                        let was = std::mem::replace(&mut self.auto_send_on[t], [false; MAX_SENDS]);
-                        let sends = self.routes[t].sends;
-                        for ((on, ramp), spec) in was
-                            .iter()
-                            .zip(self.auto_send[t].iter_mut())
-                            .zip(sends.iter())
-                        {
-                            if !on {
-                                ramp.set(send_gain(spec.level), 0);
-                            }
-                        }
-                    }
-                    for k in 0..n {
-                        let lane = &self.automation[k];
-                        if !lane.follow {
-                            continue;
-                        }
-                        if lane.track == MASTER_TRACK {
-                            self.auto_master |= lane.target == AutoTarget::Volume;
-                            continue;
-                        }
-                        let t = lane.track as usize;
-                        if t >= MAX_TRACKS
-                            || matches!(
-                                lane.target,
-                                AutoTarget::Fx { .. } | AutoTarget::Plugin { .. }
-                            )
-                        {
-                            continue;
-                        }
-                        if let AutoTarget::Send { slot } = lane.target {
-                            if let Some(on) = self.auto_send_on[t].get_mut(slot as usize) {
-                                *on = true;
-                            }
-                        }
-                        if !self.auto_on[t] {
-                            self.auto_on[t] = true;
-                            self.auto_tracks.push(lane.track);
-                        }
-                    }
-                    if was_master && !self.auto_master {
-                        let samples = self.smoothing_samples();
-                        self.master.set(self.master_user, samples);
-                    }
-                    self.auto_left = 0;
-                    self.rebuild_mix(true, None);
-                }
-                Command::SetTestTone { hz, gain } => {
-                    self.test_hz = if hz.is_finite() {
-                        hz.clamp(0.0, self.sr * 0.45)
-                    } else {
-                        0.0
-                    };
-                    self.test_gain = if gain.is_finite() {
-                        gain.clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                }
-                Command::SetSong(new) => {
-                    let old = std::mem::replace(&mut self.song, new);
-                    let _ = self.trash.push(Garbage::Song(old));
-                    self.rebuild_mix(false, None);
-                    let b = self.beat;
-                    self.seek(b);
-                }
-                Command::SetControls(controls) => {
-                    let old = std::mem::replace(&mut self.song.controls, controls);
-                    let _ = self.trash.push(Garbage::Controls(old));
-                    self.next_control = self.song.controls.partition_point(|c| c.beat < self.beat);
-                    // Controllers taken out of the song do not stay applied.
-                    self.chase_controls();
-                }
-                Command::SetProcessBuffer { frames } => self.set_process_buffer(frames),
-                Command::SetTrackLive { track, live } => {
-                    if let Some(slot) = self.track_live.get_mut(track as usize) {
-                        *slot = live;
-                    }
-                }
-                Command::SetOutputDelay { strips, master } => {
-                    let most = (BEAT_HISTORY - AUTO_BLOCK as usize) as u32;
-                    self.output_delay = (strips.min(most), master.min(most));
-                }
-                Command::SetContentDelay { track, frames } => self.set_content_delay(track, frames),
-                Command::SetNotes(notes) => {
-                    let old = std::mem::replace(&mut self.song.notes, notes);
-                    let _ = self.trash.push(Garbage::Notes(old));
-                    self.next_note = self
-                        .song
-                        .notes
-                        .partition_point(|n| n.start_beat < self.beat);
-                }
+            }
+            Command::SetOutputDelay { strips, master } => {
+                let most = (BEAT_HISTORY - AUTO_BLOCK as usize) as u32;
+                self.output_delay = (strips.min(most), master.min(most));
+            }
+            Command::SetContentDelay { track, frames } => self.set_content_delay(track, frames),
+            Command::SetNotes(notes) => {
+                let old = std::mem::replace(&mut self.song.notes, notes);
+                self.give_back(Garbage::Notes(old));
+                self.next_note = self
+                    .song
+                    .notes
+                    .partition_point(|n| n.start_beat < self.beat);
             }
         }
     }
@@ -3997,12 +4024,14 @@ mod tests {
         );
     }
 
-    /// The General MIDI SoundFont named by `PROWAVE_TEST_SF2`, if set (it is not in the repo):
+    /// The General MIDI SoundFont named by `PROWAVE_TEST_SF2` (no SoundFont is in the repo, so the test is
+    /// ignored by default; run it with `-- --ignored` and the variable set):
     /// a real piano note reaches the strip through the engine's own command path.
     #[test]
+    #[ignore = "needs a General MIDI SoundFont file: set PROWAVE_TEST_SF2"]
     fn a_general_midi_piano_plays_through_the_engine_if_a_soundfont_is_provided() {
         let Ok(path) = std::env::var("PROWAVE_TEST_SF2") else {
-            return;
+            panic!("set PROWAVE_TEST_SF2 to a General MIDI SoundFont (.sf2) file");
         };
         let Ok(bytes) = std::fs::read(&path) else {
             panic!("cannot read {path}");

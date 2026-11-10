@@ -133,7 +133,7 @@ fn rack_track(p: &Project) -> Option<usize> {
 /// The region the steps go in: the selected region of the rack's track when it is a plain
 /// MIDI region, else its first one, else a new one-bar region at the first bar.
 fn step_region(p: &mut Project, ti: usize, selected: Option<(usize, usize)>) -> usize {
-    let plain = |r: &Region| r.audio.is_none() && r.generated.is_none() && r.folder.is_none();
+    let plain = |r: &Region| !r.is_audio() && r.generated.is_none() && r.folder.is_none();
     let t = &p.tracks[ti];
     if let Some((st, sr)) = selected {
         if st == ti && t.regions.get(sr).is_some_and(plain) {
@@ -145,6 +145,7 @@ fn step_region(p: &mut Project, ti: usize, selected: Option<(usize, usize)>) -> 
     }
     let name = t.name.clone();
     p.tracks[ti].regions.push(Region {
+        missing: None,
         name,
         start_bar: 1.0,
         len_bars: 1.0,

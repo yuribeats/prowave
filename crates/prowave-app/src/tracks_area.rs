@@ -1628,7 +1628,7 @@ fn material_of(track: &Track, region: &Region) -> Material {
         .generated
         .as_ref()
         .is_some_and(|g| matches!(g.source, crate::model::Generator::Drummer(_)));
-    if region.audio.is_some() || track.kind == TrackKind::Audio {
+    if region.is_audio() || track.kind == TrackKind::Audio {
         Material::Audio
     } else if drummer || track.kind == TrackKind::Drummer {
         Material::Drum
@@ -2037,6 +2037,12 @@ fn draw_region(
         theme::BONE
     };
     let gb = g.with_clip_rect(body.shrink2(vec2(1.0, 0.0)).intersect(g.clip_rect()));
+    // Missing audio: a bare bone body with a hatch across it where the waveform would be.
+    if region.missing.is_some() {
+        let bare = body.shrink(1.0);
+        gb.rect_filled(bare, 0.0, theme::BONE2);
+        hw_tracks::hatch(&gb, bare, 1.5, 7.0, theme::INK.gamma_multiply(0.22));
+    }
     // Bar lines inside the region.
     for &x in bar_xs {
         if x > body.left() + 1.0 && x < body.right() - 1.0 {
@@ -3033,6 +3039,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                 continue;
             }
             let resp = ui.interact(rr, id(("region", ti, ri)), Sense::click_and_drag());
+            // A region whose audio is missing says which file it waits for.
+            let resp = match &p.tracks[ti].regions[ri].missing {
+                Some(m) => resp.on_hover_text(m.shown()),
+                None => resp,
+            };
             // Shift or Command click adds to the selection (or takes the region out of it). A
             // plain click or drag on a region that is selected keeps the whole selection.
             if resp.clicked() && ui.input(|i| i.modifiers.shift || i.modifiers.command) {
@@ -4314,6 +4325,7 @@ mod preview_tests {
         p.tracks.clear();
         let mut t = Track::new("Audio 1", TrackKind::Audio);
         t.regions.push(Region {
+            missing: None,
             name: "ramp".into(),
             start_bar: 1.0,
             len_bars: 4.0,

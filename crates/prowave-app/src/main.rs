@@ -4,7 +4,14 @@
 #[cfg(debug_assertions)]
 #[global_allocator]
 static ALLOC_GUARD: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+// Release builds count it instead (see `prowave-engine` rt_alloc.rs): a plug-in may
+// allocate in its render call, and aborting would lose the session.
+#[cfg(not(debug_assertions))]
+#[global_allocator]
+static ALLOC_COUNTER: prowave_engine::rt_alloc::CountingAlloc =
+    prowave_engine::rt_alloc::CountingAlloc;
 
+mod alloc_report;
 mod apple_loops;
 mod audio_rec;
 mod automation;
@@ -21,6 +28,7 @@ mod file_browser;
 mod file_commands;
 mod fit_grid;
 mod flex_edit;
+mod free_plugins;
 #[cfg(test)]
 mod fx_pictures;
 mod fx_ui;
@@ -172,6 +180,8 @@ pub struct UiState {
     /// Musical Typing (Caps Lock).
     pub typing: musical_typing::Typing,
     pub midi_monitor: midi_monitor::Monitor,
+    /// Window > Get Free Plug-ins.
+    pub free_plugins: free_plugins::FreePlugins,
     /// Native effect parameters moved, for the engine.
     pub native_edits: Vec<native_fx_ui::Edit>,
     /// Pro Wave Tune's Pitch Correction lane: the stroke being drawn, the audio-track grid.
@@ -187,6 +197,8 @@ pub struct UiState {
     /// System overloads so far, and the heaviest plug-in lately (name, load).
     pub overloads: u32,
     pub heaviest: Option<(String, f32)>,
+    /// Allocations on the audio thread, as the release build counts them.
+    pub rt_allocs: alloc_report::AllocReport,
     /// The round trip of a monitored input in milliseconds (shown under the switch).
     pub round_trip_ms: f32,
     pub bottom: Bottom,
@@ -240,6 +252,9 @@ pub struct UiState {
     pub ask_save: Option<file_commands::FileCmd>,
     /// True while the "revert to the last saved version?" prompt is showing.
     pub ask_revert: bool,
+    /// Audio files that could not be read when the project was opened or saved, listed in a
+    /// window until it is closed.
+    pub missing_audio: Vec<String>,
     /// The project picked in File > Open Recent, until `App` has opened it.
     pub recent_pick: Option<std::path::PathBuf>,
     /// File > Open Recent. In memory only until `main` loads the saved list.
@@ -289,6 +304,7 @@ impl UiState {
             show_midi_monitor: false,
             typing: musical_typing::Typing::default(),
             midi_monitor: midi_monitor::Monitor::default(),
+            free_plugins: free_plugins::FreePlugins::default(),
             native_edits: Vec::new(),
             tune: tune_lane::TuneView::default(),
             io_buffer: 64,
@@ -297,6 +313,7 @@ impl UiState {
             playback_load: 0.0,
             overloads: 0,
             heaviest: None,
+            rt_allocs: alloc_report::AllocReport::default(),
             round_trip_ms: 0.0,
             bottom: Bottom::Mixer,
             status: None,
@@ -329,6 +346,7 @@ impl UiState {
             file_cmd: None,
             ask_save: None,
             ask_revert: false,
+            missing_audio: Vec::new(),
             recent_pick: None,
             recent: recent_files::Recent::default(),
             cpu_load: 0.0,
@@ -398,7 +416,7 @@ impl App {
         if std::mem::take(&mut self.ui.update_check) {
             self.updater.start_check(true);
         }
-        let unsaved = || file_commands::content(&self.project) != self.saved;
+        let unsaved = || file_commands::unsaved_polled(&self.project, &self.saved, &self.plugins);
         if self.updater.show(ctx, &unsaved) == updater::Action::Quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -679,9 +697,14 @@ impl App {
             audio_rec::Outcome::Failed(message) => s.status = Some(message),
             audio_rec::Outcome::Nothing => {}
         }
-        if let (Some(feed), Some(sync)) = (s.audio_rec.take_feed(), self.sync.as_mut()) {
-            sync.engine
-                .send(prowave_engine::Command::SetInput(Some(feed)));
+        // The feed is taken once the engine has room for it (a refused one would be lost).
+        if let Some(sync) = self.sync.as_mut() {
+            if sync.engine.can_replace_state() {
+                if let Some(feed) = s.audio_rec.take_feed() {
+                    sync.engine
+                        .send(prowave_engine::Command::SetInput(Some(feed)));
+                }
+            }
         }
         if s.audio_rec.active() {
             ctx.request_repaint();
@@ -728,6 +751,7 @@ impl App {
             self.run_file_cmd(cmd, ctx);
         }
         self.show_save_prompt(ctx);
+        self.show_missing_audio(ctx);
         window_chrome::resize_edges(ctx);
     }
 }
@@ -800,6 +824,7 @@ impl eframe::App for App {
         }
         let mut test_note = None;
         midi_monitor::show(&ctx, &self.project, &mut self.ui, &mut test_note);
+        free_plugins::show(&ctx, &mut self.ui);
         if let (Some((port, ch)), Some(out)) = (test_note, self.midi_out.as_ref()) {
             out.test_note(port, ch);
         }
@@ -819,7 +844,13 @@ impl eframe::App for App {
             sync.low_latency = self.ui.low_latency;
             sync.io_buffer = self.ui.io_buffer;
             // The plug-ins first, so their delay is known to the compensation.
-            for message in self.plugins.sync(&mut self.project, &mut sync.engine, 8192) {
+            for message in plugins::sync_with_history(
+                &mut self.plugins,
+                &mut self.project,
+                &mut self.history,
+                &mut sync.engine,
+                8192,
+            ) {
                 self.ui.status = Some(message);
             }
             self.ui.mixer.master_latency = self.plugins.master_latencies().to_vec();
@@ -912,7 +943,7 @@ impl eframe::App for App {
             self.plugins
                 .show_automation(&self.project, &self.ui.auto, self.project.position_beats);
             groups::propagate(&mut self.project, &mut self.ui.group_watch);
-            if sync.needs_retry() {
+            if sync.needs_retry() || self.plugins.needs_retry() {
                 ctx.request_repaint();
             }
             let load = sync.take_dsp_load();
@@ -920,6 +951,10 @@ impl eframe::App for App {
             let playback = sync.take_worker_load();
             self.ui.playback_load = playback.max(self.ui.playback_load - dt as f32 * 0.8);
             self.ui.overloads = sync.overloads();
+            let counts = prowave_engine::rt_alloc::counts;
+            if let Some(line) = self.ui.rt_allocs.poll(now, counts) {
+                tracing::warn!("{line}");
+            }
             if let Some((track, slot, load)) = sync.take_heaviest_plugin() {
                 let name = plugins::slot_name(&self.project, usize::from(track), slot);
                 let keep = self
@@ -1087,6 +1122,7 @@ impl eframe::App for App {
         smart_tempo::show(&ctx, &mut self.project, &mut self.ui);
         self.show_save_prompt(&ctx);
         self.show_revert_prompt(&ctx);
+        self.show_missing_audio(&ctx);
         self.track_history(&ctx);
         window_chrome::resize_edges(&ctx);
     }

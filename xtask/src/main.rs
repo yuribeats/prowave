@@ -1,9 +1,10 @@
-//! `cargo xtask <task>` — the mandatory checks from AGENTS.md §3, in one place.
+//! `cargo xtask <task>`: the project's checks in one place (AGENTS.md lists them).
 //!
-//! - `check`: fmt, clippy -D warnings, tests, rt-check, miri (when unsafe code exists),
-//!   cargo-deny, wasm-check, and the preset/wasm suites once their crates exist
-//! - `wasm-check`: `cargo check --target wasm32-unknown-unknown` for the wasm-portable crates
-//! - `rt-check`: the no-allocation tests for the audio thread (debug build, assert_no_alloc)
+//! - `check`: fmt, clippy -D warnings, tests, rt-check, miri on the triple buffer and duplex callback tests,
+//!   cargo-deny and wasm-check
+//! - `wasm-check`: `cargo check --target wasm32-unknown-unknown` for the engine (a build check;
+//!   no test runs in the browser)
+//! - `rt-check`: the tests named `*does_not_allocate` (debug build, assert_no_alloc)
 //! - `bench`: release build checked against the lightweight targets (startup, memory, binary
 //!   size, 24-track DSP load); see bench.rs
 //! - `status`: counts the working menu entries and roadmap items for the README; see status.rs
@@ -13,10 +14,13 @@ mod status;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-/// Crates that must build for the browser (AGENTS.md §3.5: DSP parity on wasm32).
+/// Crates that must build for the browser.
 const WASM_CRATES: &[&str] = &["prowave-engine"];
-/// Crates whose `unsafe` code must pass miri (AGENTS.md §3).
-const MIRI_CRATES: &[&str] = &["prowave-engine", "prowave-dsp", "prowave-instruments"];
+/// Crates whose tests without system calls run under miri (the lock-free triple buffer and
+/// the duplex stream's callback).
+const MIRI_CRATES: &[&str] = &["prowave-engine"];
+/// The duplex stream's tests that make no system call (macOS; matches nothing elsewhere).
+const MIRI_DUPLEX_TESTS: &str = "duplex::tests::pure";
 
 fn root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -181,14 +185,25 @@ fn check() -> bool {
         println!("xtask: no `unsafe` code in {MIRI_CRATES:?}; miri skipped");
     } else {
         // Miri needs nightly; `rustup +nightly component add miri`. It runs the lock-free
-        // triple buffer's tests (the engine's other `unsafe` is Windows FFI, which miri cannot
-        // run). On Windows the Stacked Borrows check trips over the test harness's own
+        // triple buffer's tests and, on macOS, the Core Audio callback's on made-up buffer
+        // lists (`duplex::tests::pure`); the engine's other `unsafe` is FFI, which miri
+        // cannot run. On Windows the Stacked Borrows check trips over the test harness's own
         // allocator on every test, so it is turned off there; data races are still checked.
         for c in unsafe_crates {
             steps.push(Step {
                 name: "miri",
                 program: "cargo",
-                args: vec!["+nightly", "miri", "test", "-p", c, "--lib", "triple"],
+                args: vec![
+                    "+nightly",
+                    "miri",
+                    "test",
+                    "-p",
+                    c,
+                    "--lib",
+                    "--",
+                    "triple",
+                    MIRI_DUPLEX_TESTS,
+                ],
                 env: if cfg!(windows) {
                     vec![("MIRIFLAGS", "-Zmiri-disable-stacked-borrows")]
                 } else {
@@ -213,34 +228,6 @@ fn check() -> bool {
     }
 
     steps.extend(wasm_steps());
-
-    if crate_exists("prowave-dsp") {
-        steps.push(step(
-            "preset_compat",
-            "cargo",
-            &[
-                "test",
-                "-p",
-                "prowave-dsp",
-                "--test",
-                "preset_compat",
-                "--",
-                "--nocapture",
-            ],
-        ));
-    } else {
-        println!("xtask: prowave-dsp not created yet; preset_compat skipped");
-    }
-    if crate_exists("prowave-wasm") {
-        steps.push(Step {
-            name: "wasm-pack",
-            program: "wasm-pack",
-            args: vec!["test", "--node", "crates/prowave-wasm"],
-            env: Vec::new(),
-        });
-    } else {
-        println!("xtask: prowave-wasm not created yet; wasm-pack test skipped");
-    }
 
     let mut failed = Vec::new();
     for s in &steps {

@@ -41,8 +41,8 @@ to update this section.
 
 | | Done | Started | Total | Done % |
 | --- | ---: | ---: | ---: | ---: |
-| Menu entries | 95 | 0 | 200 | 47.50% |
-| Roadmap items | 24 | 12 | 77 | 31.17% |
+| Menu entries | 96 | 0 | 201 | 47.76% |
+| Roadmap items | 24 | 14 | 77 | 31.17% |
 <!-- status:end -->
 
 ## Download

@@ -992,6 +992,9 @@ impl EngineSync {
             let layout = audio_layout(p);
             let sent = if self.layout.as_ref() == Some(&layout) {
                 self.song_rev == Some(p.song_rev) || self.send(Command::set_notes(song_notes(p)))
+            } else if !self.ready() {
+                // The files are not opened for a song the engine would refuse.
+                false
             } else {
                 let song = build_song(&self.engine, p);
                 let sent = self.send(Command::SetSong(Box::new(song)));
@@ -1125,6 +1128,10 @@ impl EngineSync {
             if unchanged {
                 continue;
             }
+            // The file is not read for a player the engine would refuse.
+            if !self.ready() {
+                break;
+            }
             let player = match want {
                 Some(sf) => match soundfont_player(sf, sample_rate) {
                     Ok(player) => Some(player),
@@ -1218,6 +1225,9 @@ impl EngineSync {
             let same_kinds = self.fx[i].len() == want.len()
                 && self.fx[i].iter().zip(want).all(|(a, b)| a.kind == b.kind);
             if !same_kinds {
+                if !self.ready() {
+                    return;
+                }
                 let chain = chain_of(want, sr);
                 if !self.send(Command::SetInserts {
                     track: i as u16,
@@ -1405,7 +1415,7 @@ impl EngineSync {
                 .zip(want)
                 .all(|(a, b)| a.kind == b.kind);
         if !same_kinds {
-            if !self.send(Command::SetMasterInserts(chain_of(want, sr))) {
+            if !self.ready() || !self.send(Command::SetMasterInserts(chain_of(want, sr))) {
                 return false;
             }
             self.master_fx = want.to_vec();
@@ -1470,7 +1480,10 @@ impl EngineSync {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => job.running = None,
                 }
             }
-            if let Some(conv) = job.ready.take() {
+            // A finished response waits here until the engine has room for it.
+            if job.ready.is_some() && !self.engine.can_replace_state() {
+                self.retry = true;
+            } else if let Some(conv) = job.ready.take() {
                 let cmd = Command::SetConvolver {
                     track: if key.0 == MASTER_KEY {
                         prowave_engine::MASTER_TRACK
@@ -1512,6 +1525,14 @@ impl EngineSync {
     /// live (every live sound reaches the Stereo Out).
     pub fn master_live(&self, p: &Project) -> bool {
         self.low_latency && live_paths(p).iter().any(|&l| l)
+    }
+
+    /// Whether the engine takes a state-replacing command now; when not, the caller keeps
+    /// redrawing to retry, as after a rejected `send`. Ask before making something costly.
+    fn ready(&mut self) -> bool {
+        let ready = self.engine.can_replace_state();
+        self.retry |= !ready;
+        ready
     }
 
     /// `Engine::send`, remembering a rejection so the caller keeps redrawing to retry.
@@ -1623,6 +1644,7 @@ mod tests {
             pan: 0.0,
             inserts: vec![],
             regions: vec![Region {
+                missing: None,
                 name: "r".into(),
                 start_bar: 1.0,
                 len_bars: 1.0,
@@ -2054,6 +2076,7 @@ mod tests {
         let plain = p.add_track(TrackKind::Instrument);
         for t in [ext, plain] {
             p.tracks[t].regions.push(crate::model::Region {
+                missing: None,
                 name: "r".into(),
                 start_bar: 3.0,
                 len_bars: 2.0,
@@ -2418,11 +2441,13 @@ mod tests {
         assert!(soundfont_player(&sf, 48_000.0).is_err());
     }
 
-    /// The General MIDI SoundFont named by `PROWAVE_TEST_SF2`, if set (it is not in the repo).
+    /// The General MIDI SoundFont named by `PROWAVE_TEST_SF2` (no SoundFont is in the repo, so the test is
+    /// ignored by default; run it with `-- --ignored` and the variable set).
     #[test]
+    #[ignore = "needs a General MIDI SoundFont file: set PROWAVE_TEST_SF2"]
     fn a_soundfont_file_gives_a_player_for_its_preset() {
         let Ok(path) = std::env::var("PROWAVE_TEST_SF2") else {
-            return;
+            panic!("set PROWAVE_TEST_SF2 to a General MIDI SoundFont (.sf2) file");
         };
         let sf = SoundFontUse {
             path,
@@ -2438,6 +2463,7 @@ mod tests {
         p.tracks.clear();
         p.tracks.push(Track::new("Loop", TrackKind::Audio));
         p.tracks[0].regions.push(Region {
+            missing: None,
             name: "Click".into(),
             start_bar: 1.0,
             len_bars: 1.0,

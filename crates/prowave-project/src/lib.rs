@@ -105,6 +105,12 @@ pub struct RegionDoc {
     pub comp: Vec<CompDoc>,
     /// Path inside the archive (`media/…`) for audio regions.
     pub audio: Option<String>,
+    /// Set when the region's audio file could not be read as the project was saved, so the
+    /// archive has no entry for `audio`: the file's path on disk then. The region is kept
+    /// whole, and plays again once that file can be read. Left out otherwise (and by older
+    /// versions).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub audio_source: String,
     pub mute: bool,
     /// Playback quantize grid in beats.
     pub quantize: Option<f32>,
@@ -737,10 +743,24 @@ impl From<zip::result::ZipError> for ProjectError {
 }
 
 /// An audio file to embed: `source` on disk is stored at `zip_path` (`media/…`) in the archive.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaFile {
     pub zip_path: String,
     pub source: PathBuf,
+    /// A project archive that already holds this audio, and its entry there. When `source`
+    /// cannot be read, the entry's bytes are copied over as they are (not unpacked, so an
+    /// entry that is damaged is kept too).
+    pub carry: Option<(PathBuf, String)>,
+}
+
+impl MediaFile {
+    pub fn new(zip_path: impl Into<String>, source: impl Into<PathBuf>) -> Self {
+        Self {
+            zip_path: zip_path.into(),
+            source: source.into(),
+            carry: None,
+        }
+    }
 }
 
 /// True if `p` is a safe archive-relative media path: `media/<name>` with no `..`, root,
@@ -779,19 +799,95 @@ pub fn media_path(index: usize, source: &Path) -> String {
 
 /// Writes the project to `path`. The archive is written next to it first and then renamed, so
 /// a failed save never destroys the previous file.
-pub fn save(path: &Path, doc: &ProjectDoc, media: &[MediaFile]) -> Result<(), ProjectError> {
+///
+/// A media file that cannot be read does not stop the save: its bytes are taken from
+/// [`MediaFile::carry`] when that is there, and otherwise the file is left out, the audio
+/// regions that use it are saved with [`RegionDoc::audio_source`] set, and it is returned (the
+/// caller tells the user). Everything else is saved.
+pub fn save(
+    path: &Path,
+    doc: &ProjectDoc,
+    media: &[MediaFile],
+) -> Result<Vec<MediaFile>, ProjectError> {
     let tmp = path.with_extension(format!("{EXTENSION}.tmp"));
     let written = write_archive(&tmp, doc, media);
     if written.is_err() {
         // Do not leave a half-written archive behind.
         let _ = std::fs::remove_file(&tmp);
     }
-    written?;
+    let missing = written?;
     std::fs::rename(&tmp, path)?;
-    Ok(())
+    Ok(missing)
 }
 
-fn write_archive(tmp: &Path, doc: &ProjectDoc, media: &[MediaFile]) -> Result<(), ProjectError> {
+/// Copies `m.source` into the archive. `Ok(false)` when the file cannot be read (nothing of it
+/// is left in the archive); an error only when the archive cannot be written.
+fn embed_source(
+    zip: &mut ZipWriter<File>,
+    m: &MediaFile,
+    options: SimpleFileOptions,
+) -> Result<bool, ProjectError> {
+    let Ok(mut f) = File::open(&m.source) else {
+        return Ok(false);
+    };
+    zip.start_file(m.zip_path.as_str(), options)?;
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => return Ok(true),
+            Ok(n) => zip.write_all(&buf[..n])?,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                // The file went away half read (a drive pulled out): no part of it stays.
+                zip.abort_file()?;
+                return Ok(false);
+            }
+        }
+    }
+}
+
+/// The archives media is carried over from, each opened once (`None`: it cannot be opened).
+type Archives = Vec<(PathBuf, Option<ZipArchive<File>>)>;
+
+/// Copies the entry [`MediaFile::carry`] names into the archive, byte for byte. `Ok(false)`
+/// when there is none or that archive does not have it.
+fn embed_carried(
+    zip: &mut ZipWriter<File>,
+    m: &MediaFile,
+    archives: &mut Archives,
+) -> Result<bool, ProjectError> {
+    let Some((archive, entry)) = &m.carry else {
+        return Ok(false);
+    };
+    let at = match archives.iter().position(|(p, _)| p == archive) {
+        Some(at) => at,
+        None => {
+            let opened = File::open(archive)
+                .ok()
+                .and_then(|f| ZipArchive::new(f).ok());
+            archives.push((archive.clone(), opened));
+            archives.len() - 1
+        }
+    };
+    let Some(old) = archives[at].1.as_mut() else {
+        return Ok(false);
+    };
+    let Some(index) = old.index_for_name(entry) else {
+        return Ok(false);
+    };
+    let Ok(file) = old.by_index_raw(index) else {
+        return Ok(false);
+    };
+    zip.raw_copy_file_rename(file, m.zip_path.as_str())?;
+    Ok(true)
+}
+
+fn write_archive(
+    tmp: &Path,
+    doc: &ProjectDoc,
+    media: &[MediaFile],
+) -> Result<Vec<MediaFile>, ProjectError> {
+    let mut missing = Vec::new();
     {
         let mut zip = ZipWriter::new(File::create(tmp)?);
         let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -799,28 +895,51 @@ fn write_archive(tmp: &Path, doc: &ProjectDoc, media: &[MediaFile]) -> Result<()
         let stored = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .large_file(true);
-        let mut doc = doc.clone();
-        doc.format_version = FORMAT_VERSION;
-        let json =
-            serde_json::to_vec_pretty(&doc).map_err(|e| ProjectError::Json(e.to_string()))?;
-        zip.start_file(PROJECT_JSON, deflated)?;
-        zip.write_all(&json)?;
+        let mut archives = Archives::new();
         for m in media {
             if !is_media_path(&m.zip_path) {
                 return Err(ProjectError::Zip(format!("bad media path {}", m.zip_path)));
             }
-            zip.start_file(m.zip_path.as_str(), stored)?;
-            let mut f = File::open(&m.source)?;
-            std::io::copy(&mut f, &mut zip)?;
+            if !embed_source(&mut zip, m, stored)? && !embed_carried(&mut zip, m, &mut archives)? {
+                missing.push(m.clone());
+            }
         }
+        // The document last: it says which of the media could not be put in.
+        let mut doc = doc.clone();
+        doc.format_version = FORMAT_VERSION;
+        for r in doc.tracks.iter_mut().flat_map(|t| t.regions.iter_mut()) {
+            let lost = r
+                .audio
+                .as_ref()
+                .and_then(|a| missing.iter().find(|m| &m.zip_path == a));
+            if let Some(m) = lost {
+                r.audio_source = m.source.to_string_lossy().into_owned();
+            }
+        }
+        let json =
+            serde_json::to_vec_pretty(&doc).map_err(|e| ProjectError::Json(e.to_string()))?;
+        zip.start_file(PROJECT_JSON, deflated)?;
+        zip.write_all(&json)?;
         zip.finish()?;
     }
-    Ok(())
+    Ok(missing)
+}
+
+/// The media entries (`media/…`) of the project archive at `path`.
+pub fn media_names(path: &Path) -> Result<Vec<String>, ProjectError> {
+    let zip = ZipArchive::new(File::open(path)?)?;
+    Ok(zip
+        .file_names()
+        .filter_map(|n| n.ok())
+        .filter(|n| is_media_path(n))
+        .map(|n| n.into_owned())
+        .collect())
 }
 
 /// Reads `path`. Media files are extracted into `media_dir` (keeping their `media/…` names);
 /// the returned document's audio paths stay archive-relative, so resolve them with
-/// `media_dir.join(path)`. Entries outside `media/` or escaping the folder are ignored.
+/// `media_dir.join(path)`. Entries outside `media/` or escaping the folder are ignored. A media
+/// entry that cannot be unpacked (damaged) is left out, and the rest of the project loads.
 pub fn load(path: &Path, media_dir: &Path) -> Result<ProjectDoc, ProjectError> {
     load_with_limits(path, media_dir, MAX_JSON_BYTES, MAX_MEDIA_BYTES)
 }
@@ -849,7 +968,9 @@ fn load_with_limits(
     }
     let mut budget = max_media;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i)?;
+        let Ok(mut entry) = zip.by_index(i) else {
+            continue;
+        };
         if entry.is_dir() {
             continue;
         }
@@ -865,7 +986,12 @@ fn load_with_limits(
             std::fs::create_dir_all(parent)?;
         }
         let mut f = File::create(&out)?;
-        let copied = std::io::copy(&mut (&mut entry).take(budget + 1), &mut f)?;
+        let Ok(copied) = std::io::copy(&mut (&mut entry).take(budget + 1), &mut f) else {
+            // A damaged entry: no half-unpacked file is left to be taken for the audio.
+            drop(f);
+            let _ = std::fs::remove_file(&out);
+            continue;
+        };
         if copied > budget {
             drop(f);
             let _ = std::fs::remove_dir_all(media_dir);
@@ -942,10 +1068,7 @@ mod tests {
         let audio = dir.path().join("take 1.wav");
         std::fs::write(&audio, b"RIFF fake audio bytes").unwrap();
         let file = dir.path().join("song.prowave");
-        let media = vec![MediaFile {
-            zip_path: media_path(0, &audio),
-            source: audio.clone(),
-        }];
+        let media = vec![MediaFile::new(media_path(0, &audio), &audio)];
         assert_eq!(media[0].zip_path, "media/0_take 1.wav");
         save(&file, &sample_doc(), &media).unwrap();
 
@@ -1057,10 +1180,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("a.wav");
         std::fs::write(&src, b"x").unwrap();
-        let bad = [MediaFile {
-            zip_path: "../a.wav".into(),
-            source: src,
-        }];
+        let bad = [MediaFile::new("../a.wav", src)];
         assert!(save(&dir.path().join("p.prowave"), &ProjectDoc::default(), &bad).is_err());
         assert!(
             !dir.path().join("p.prowave.tmp").exists(),
@@ -1131,5 +1251,175 @@ mod tests {
         ));
         assert!(!out.exists(), "partial extraction removed");
         assert!(load_with_limits(&file, &out, 1000, 1200).is_ok());
+    }
+    fn audio_doc(zip_path: &str) -> ProjectDoc {
+        ProjectDoc {
+            tracks: vec![TrackDoc {
+                name: "Vox".into(),
+                kind: TrackKindDoc::Audio,
+                regions: vec![RegionDoc {
+                    name: "take".into(),
+                    start_bar: 5.0,
+                    len_bars: 2.5,
+                    audio: Some(zip_path.into()),
+                    gain_db: -3.0,
+                    offset_secs: 1.25,
+                    ..RegionDoc::default()
+                }],
+                ..TrackDoc::default()
+            }],
+            ..ProjectDoc::default()
+        }
+    }
+
+    #[test]
+    fn a_missing_media_file_does_not_stop_the_save_and_the_region_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let here = dir.path().join("here.wav");
+        std::fs::write(&here, b"here").unwrap();
+        let gone = dir.path().join("usb").join("gone.wav");
+        let mut doc = audio_doc("media/1_gone.wav");
+        doc.tracks[0].regions.push(RegionDoc {
+            audio: Some("media/0_here.wav".into()),
+            ..RegionDoc::default()
+        });
+        let media = [
+            MediaFile::new("media/0_here.wav", &here),
+            MediaFile::new("media/1_gone.wav", &gone),
+        ];
+        let file = dir.path().join("song.prowave");
+        let missing = save(&file, &doc, &media).unwrap();
+        assert_eq!(missing, vec![media[1].clone()], "the caller hears which");
+
+        let out = dir.path().join("out");
+        let back = load(&file, &out).unwrap();
+        // Everything about the region is there, and where its file was.
+        let mut expected = doc.clone();
+        expected.tracks[0].regions[0].audio_source = gone.to_string_lossy().into_owned();
+        assert_eq!(back, expected);
+        assert_eq!(
+            std::fs::read(out.join("media/0_here.wav")).unwrap(),
+            b"here"
+        );
+        assert!(!out.join("media/1_gone.wav").exists());
+        assert_eq!(media_names(&file).unwrap(), ["media/0_here.wav"]);
+
+        // Saved again as loaded (the file still away): the same document comes back.
+        let again = dir.path().join("again.prowave");
+        let media = [
+            MediaFile::new("media/0_here.wav", out.join("media/0_here.wav")),
+            MediaFile::new("media/1_gone.wav", &gone),
+        ];
+        assert_eq!(save(&again, &back, &media).unwrap().len(), 1);
+        assert_eq!(load(&again, &dir.path().join("out2")).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_file_without_the_missing_audio_field_loads_and_a_whole_one_does_not_write_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("a.wav");
+        std::fs::write(&audio, b"a").unwrap();
+        let file = dir.path().join("p.prowave");
+        let media = [MediaFile::new("media/0_a.wav", &audio)];
+        assert!(save(&file, &audio_doc("media/0_a.wav"), &media)
+            .unwrap()
+            .is_empty());
+        let mut zip = ZipArchive::new(File::open(&file).unwrap()).unwrap();
+        let mut json = String::new();
+        zip.by_name(PROJECT_JSON)
+            .unwrap()
+            .read_to_string(&mut json)
+            .unwrap();
+        assert!(
+            !json.contains("audio_source"),
+            "older versions see no change"
+        );
+        let back = load(&file, &dir.path().join("m")).unwrap();
+        assert_eq!(back.tracks[0].regions[0].audio_source, "");
+    }
+
+    #[test]
+    fn unreadable_media_is_carried_over_from_the_previous_archive_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("take.wav");
+        let bytes: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(&audio, &bytes).unwrap();
+        let file = dir.path().join("song.prowave");
+        let doc = audio_doc("media/0_take.wav");
+        save(&file, &doc, &[MediaFile::new("media/0_take.wav", &audio)]).unwrap();
+        std::fs::remove_file(&audio).unwrap();
+
+        // Saved over itself and under a new entry name, with the source gone.
+        let media = [MediaFile {
+            carry: Some((file.clone(), "media/0_take.wav".into())),
+            ..MediaFile::new("media/0_0_take.wav", &audio)
+        }];
+        let doc = audio_doc("media/0_0_take.wav");
+        assert!(save(&file, &doc, &media).unwrap().is_empty());
+        let out = dir.path().join("out");
+        let back = load(&file, &out).unwrap();
+        assert_eq!(back, doc, "not marked missing: the audio is in the file");
+        assert_eq!(
+            std::fs::read(out.join("media/0_0_take.wav")).unwrap(),
+            bytes
+        );
+
+        // An archive that does not have the entry: reported, not an error.
+        let media = [MediaFile {
+            carry: Some((file.clone(), "media/nope.wav".into())),
+            ..MediaFile::new("media/0_take.wav", &audio)
+        }];
+        let other = dir.path().join("other.prowave");
+        assert_eq!(save(&other, &doc, &media).unwrap().len(), 1);
+    }
+
+    /// Flips one byte of the stored media entry `name` in the archive at `file`, so its
+    /// checksum no longer matches. Returns the entry's bytes as they now are in the archive.
+    fn damage_entry(file: &Path, name: &str, original: &[u8]) -> Vec<u8> {
+        let mut raw = std::fs::read(file).unwrap();
+        let at = raw
+            .windows(original.len())
+            .position(|w| w == original)
+            .unwrap();
+        raw[at + original.len() / 2] ^= 0xff;
+        let damaged = raw[at..at + original.len()].to_vec();
+        std::fs::write(file, &raw).unwrap();
+        let mut zip = ZipArchive::new(File::open(file).unwrap()).unwrap();
+        let mut sink = Vec::new();
+        assert!(
+            zip.by_name(name).unwrap().read_to_end(&mut sink).is_err(),
+            "the entry no longer unpacks"
+        );
+        damaged
+    }
+
+    #[test]
+    fn a_damaged_media_entry_does_not_stop_loading_and_is_carried_through_a_save_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("take.wav");
+        let bytes: Vec<u8> = (0..4000u32).map(|i| (i * 13 % 241) as u8).collect();
+        std::fs::write(&audio, &bytes).unwrap();
+        let file = dir.path().join("song.prowave");
+        let doc = audio_doc("media/0_take.wav");
+        save(&file, &doc, &[MediaFile::new("media/0_take.wav", &audio)]).unwrap();
+        let damaged = damage_entry(&file, "media/0_take.wav", &bytes);
+
+        let out = dir.path().join("out");
+        let back = load(&file, &out).unwrap();
+        assert_eq!(back, doc, "the project loads, the region with it");
+        assert!(!out.join("media/0_take.wav").exists(), "no half file");
+
+        // The next save has nothing to read the audio from but the archive itself.
+        let media = [MediaFile {
+            carry: Some((file.clone(), "media/0_take.wav".into())),
+            ..MediaFile::new("media/0_take.wav", out.join("media/0_take.wav"))
+        }];
+        assert!(save(&file, &back, &media).unwrap().is_empty());
+        let raw = std::fs::read(&file).unwrap();
+        assert!(
+            raw.windows(damaged.len()).any(|w| w == damaged.as_slice()),
+            "the entry's bytes are in the new archive as they were"
+        );
+        assert_eq!(load(&file, &dir.path().join("out2")).unwrap(), doc);
     }
 }

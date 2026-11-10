@@ -953,6 +953,7 @@ fn midi_track_from(
         })
         .collect();
     let region = Region {
+        missing: None,
         name: format!("{} (Flex Pitch)", src.name),
         start_bar: src.start_bar,
         len_bars: src.len_bars,
@@ -1222,6 +1223,7 @@ pub(crate) mod tests {
         p.tracks.clear();
         let mut t = Track::new("Audio 1", TrackKind::Audio);
         t.regions.push(Region {
+            missing: None,
             name: "r".into(),
             start_bar: 1.0,
             len_bars: 1.0,
@@ -1855,6 +1857,7 @@ pub(crate) mod tests {
         p.tracks.clear();
         let mut t = Track::new("Audio 1", TrackKind::Audio);
         t.regions.push(Region {
+            missing: None,
             name: "r".into(),
             start_bar: 1.0,
             len_bars: 1.0,

@@ -125,6 +125,26 @@ impl History {
         done
     }
 
+    /// The settings running plug-ins had when their instances went away (by slot uid) are put
+    /// into every step that holds their slot. A knob turned in a plug-in's window is not an
+    /// edit of the project, so no step has it; without this, undoing a deleted track would
+    /// bring its plug-in back with the settings of the last save.
+    pub fn keep_plugin_settings(&mut self, settings: &[(u64, Vec<u8>)]) {
+        let states = self
+            .undo
+            .iter_mut()
+            .chain(self.redo.iter_mut())
+            .chain(std::iter::once(&mut self.base));
+        for p in states {
+            for slot in crate::plugins::slots_mut(p) {
+                if let Some((_, s)) = settings.iter().rev().find(|(uid, _)| *uid == slot.uid) {
+                    slot.state = Some(s.clone());
+                }
+            }
+        }
+        self.base_doc = content(&self.base);
+    }
+
     /// Takes `p` as the state last recorded, without a step (it differs from it only by what
     /// follows from it).
     fn rebase(&mut self, p: &Project) {

@@ -5,6 +5,68 @@ being released into the GitHub Release notes, so keep one `## <version>` heading
 
 ## Unreleased
 
+### 2026-11-05 to 2026-11-09, by area
+
+A summary of `git log --no-merges --since="2026-11-05 00:00"` (320 commits; the 22 that came
+from upstream are described under 0.2.2). Built and tested on macOS only: no CI run covers this
+work on Windows or Linux. The longer entries after this list describe some of it in detail.
+
+**Audio devices and timing**
+- macOS: input and output in one Core Audio callback. Output device, I/O buffer size, Low
+  Latency Mode and Software Monitoring can be changed while running.
+- Process Buffer Range and the RECORD / MIX switch; several playback threads, and a thread that
+  falls behind leaves a gap of silence and keeps its time.
+- MIDI out is scheduled on the audio clock (CoreMIDI time stamps); Send MIDI Clock; MIDI panic.
+- Timing fixes (2026-11-09): the click is delay-compensated, cycle passes start on the beat,
+  recorded MIDI notes are placed where the song was heard, plug-ins are told the transport
+  position of the sound they are making, and audio regions are not re-cut while following an
+  external MIDI clock.
+
+**Plug-ins (macOS)**
+- Audio Units and VST3 plug-ins as instruments and effects, on tracks and on Stereo Out, with
+  windows, saved settings, factory presets (Audio Units), automation of their parameters, and
+  the host's tempo and transport. They run inside the program: there is no sandbox.
+- VST3 bundles are scanned in a helper process and the result cached. A plug-in that crashed
+  the program while opening is not opened automatically again.
+- Plug-in windows float over the main window, follow their view's size and can fill the screen.
+  Every plug-in gets a host frame (bypass, presets, A/B) and a host-drawn editor.
+
+**Effects and instruments**
+- Native effects ported from Lemon Studio: Lemon Limiter, Lemon Soft Clipper, Lemon Transient Processor,
+  Lemon Fast Distortion and Press.
+- Space Designer, a convolution reverb, in place of Space D; effects on the Stereo Out strip.
+- Pro Wave Tune: live pitch correction, with a Pitch Correction lane in the Piano Roll.
+- Channel Rack: rows of steps that play samples.
+- The built-in synthesizer and SoundFont instruments play a region's controllers.
+
+**Editing**
+- Pitch Editor: a note editor for audio regions (pitch tracking, note resynthesis).
+- Piano Roll: tools and Tool menu, step input from a MIDI keyboard, controller, pitch bend and
+  pressure lanes, muted notes.
+- Automation as envelopes: lanes, Draw Mode, Arm, override and re-enable; targets for mute,
+  sends, Stereo Out and plug-in parameters.
+- Stretch to fit (Option-drag a region's end); Fit to Grid: a dropped audio file lands at the
+  project tempo and on the grid.
+- Tracks area: Eraser, Text, Scissors, Join, Mute and Zoom tools; Option-drag copies regions;
+  New Audio Track; an audio region can play a part of its file.
+- Paint Image to Audio and Show Spectrogram; Musical Typing; Window > MIDI Monitor; the tempo
+  can be typed into the LCD.
+
+**Interface**
+- The Hardware look (PW-1) on every window: tokens, bundled fonts, painted controls.
+- Controls that did nothing were taken out of the control bar, Mixer, Inspector, Tracks area,
+  Piano Roll and Event List.
+
+**Checks and documents**
+- `AGENTS.md` rewritten to describe the code as it is.
+- Tests that need files or plug-ins a clean machine lacks are `#[ignore]`d with the reason,
+  instead of returning early and passing: four SoundFont tests (`PROWAVE_TEST_SF2`).
+- `cargo xtask check` no longer mentions crates that do not exist.
+
+
+**Not built** (so nobody assumes it): bounce or audio export of a project, autosave, a "save
+changes?" question at quit, a plug-in sandbox, CLAP.
+
 ### All systems (Windows, macOS, Linux)
 
 ✅ **Process Buffer Range and RECORD / MIX:** as in Logic, live tracks (record-enabled, monitoring, the selected instrument and the Aux strips they reach) run their plug-ins in the I/O callback at the I/O buffer size, and every other track's plug-ins run on real-time playback threads in larger blocks (**Record > Process Buffer**: Small 256, Medium 512, Large 1024). Delay compensation keeps both in time; a track moving between the two fades out and in. The **RECORD / MIX** switch next to the CPU meter sets the I/O buffer, the process buffer and Low Latency Mode at once (RECORD: 64 frames, Small, Low Latency on; MIX: 1024 frames, Large, Low Latency off), each mode remembering its own values; Shift-Command-L toggles it, and arming a track in MIX switches to RECORD. The round trip in ms shows under the switch. The CPU meter shows Live and Playback loads, "System overload: N", and the heaviest plug-in on hover. Measured on a MacBook Air M2 at 64 frames with 1, 2 and 4 instances of Schwabe Gold Clip on playback tracks: Core Audio overloads per 10 s went from 4321 / 2890 / 1636 to 0 / 0 / 0 (MIX: 0 / 0 / 0).

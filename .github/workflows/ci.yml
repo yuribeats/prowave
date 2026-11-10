@@ -1,6 +1,9 @@
-# Roadmap Phase 0: CI for macOS, Windows, Linux + wasm. Every job runs `cargo xtask check`
-# (fmt, clippy -D warnings, tests, rt-check, cargo-deny, wasm-check); `bench` checks the
-# lightweight targets on macOS and Windows (`cargo xtask bench`).
+# Roadmap Phase 0: CI for macOS, Windows, Linux + wasm. The `check` job runs `cargo xtask check`
+# (fmt, clippy -D warnings, tests, rt-check, miri on the triple buffer, cargo-deny, wasm-check;
+# xtask/src/main.rs has the exact list, and every cargo feature set it covers); `bench` checks
+# the lightweight targets on macOS and Windows (`cargo xtask bench`).
+# Tests that need files or plug-ins a build server does not have are `#[ignore]`d in the code,
+# so no job sets a variable to skip them.
 name: CI
 
 on:

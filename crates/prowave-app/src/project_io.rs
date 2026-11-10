@@ -415,6 +415,45 @@ fn points_from_doc(
     v
 }
 
+fn flex_to_doc(f: &crate::flex_edit::FlexEdit) -> prowave_project::FlexDoc {
+    prowave_project::FlexDoc {
+        mode: f.mode.name().into(),
+        markers: f.markers.iter().map(|m| [m.src, m.dst]).collect(),
+        pitch: f
+            .pitch
+            .iter()
+            .map(|p| prowave_project::FlexPitchDoc {
+                start: p.start,
+                end: p.end,
+                semitones: p.semitones,
+            })
+            .collect(),
+        melody: f.melody.as_ref().map(crate::pitch_editor::to_doc),
+        follow: f.follow.as_ref().map(|x| prowave_project::FollowDoc {
+            one_secs: x.one_secs,
+            beats: x.beats.clone(),
+            first: x.first,
+            bpm: x.bpm,
+        }),
+    }
+}
+
+/// The archive path of media file `source`, which is added to `media` the first time.
+fn media_entry(
+    media: &mut Vec<MediaFile>,
+    by_source: &mut HashMap<PathBuf, String>,
+    source: &Path,
+) -> String {
+    by_source
+        .entry(source.to_path_buf())
+        .or_insert_with(|| {
+            let zip_path = media_path(media.len(), source);
+            media.push(MediaFile::new(zip_path.clone(), source));
+            zip_path
+        })
+        .clone()
+}
+
 /// The document for `p` plus the media files to embed (each distinct audio file once).
 pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
     let mut media: Vec<MediaFile> = Vec::new();
@@ -588,42 +627,22 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
                     }),
                     // A Flex edit is saved as the recording plus the edit, never the sound
                     // made from it.
-                    audio: r.audio.as_ref().map(|a| {
-                        let file = a.flex.as_ref().map_or(&a.file, |f| &f.original);
-                        by_source
-                            .entry(file.path.clone())
-                            .or_insert_with(|| {
-                                let zip_path = media_path(media.len(), &file.path);
-                                media.push(MediaFile {
-                                    zip_path: zip_path.clone(),
-                                    source: file.path.clone(),
-                                });
-                                zip_path
-                            })
-                            .clone()
-                    }),
-                    flex: r.audio.as_ref().and_then(|a| a.flex.as_ref()).map(|f| {
-                        prowave_project::FlexDoc {
-                            mode: f.mode.name().into(),
-                            markers: f.markers.iter().map(|m| [m.src, m.dst]).collect(),
-                            pitch: f
-                                .pitch
-                                .iter()
-                                .map(|p| prowave_project::FlexPitchDoc {
-                                    start: p.start,
-                                    end: p.end,
-                                    semitones: p.semitones,
-                                })
-                                .collect(),
-                            melody: f.melody.as_ref().map(crate::pitch_editor::to_doc),
-                            follow: f.follow.as_ref().map(|x| prowave_project::FollowDoc {
-                                one_secs: x.one_secs,
-                                beats: x.beats.clone(),
-                                first: x.first,
-                                bpm: x.bpm,
-                            }),
+                    // A region whose file is missing is saved as it was opened: its file
+                    // stays among the media (see `prowave_project::save`), its edit unread.
+                    audio: match (&r.audio, &r.missing) {
+                        (Some(a), _) => {
+                            let file = a.flex.as_ref().map_or(&a.file, |f| &f.original);
+                            Some(media_entry(&mut media, &mut by_source, &file.path))
                         }
-                    }),
+                        (None, Some(m)) => Some(media_entry(&mut media, &mut by_source, &m.source)),
+                        (None, None) => None,
+                    },
+                    // Filled in by the save, for the files it could not read.
+                    audio_source: String::new(),
+                    flex: match (&r.audio, &r.missing) {
+                        (None, Some(m)) => m.flex.clone(),
+                        (a, _) => a.as_ref().and_then(|a| a.flex.as_ref()).map(flex_to_doc),
+                    },
                     mute: r.params.mute,
                     quantize: r.params.quantize,
                     transpose: r.params.transpose,
@@ -811,15 +830,18 @@ fn folder_from_doc(r: &RegionDoc) -> Option<TakeFolder> {
     })
 }
 
-/// Builds a project from `doc`; audio regions open their files from `media_dir`. Regions whose
-/// file is missing or unreadable are dropped and reported in the returned warnings.
+/// Builds a project from `doc`; audio regions open their files from `media_dir`. A region whose
+/// file is missing or cannot be read is kept as a missing-audio region (it plays nothing and
+/// is saved back as it was), and its file is named in the returned warnings. A file the project
+/// was saved without (`audio_source`) is read from where it was, when it is there again.
 pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Project, Vec<String>) {
     let mut warnings = Vec::new();
-    let mut opened: HashMap<String, Option<AudioFile>> = HashMap::new();
+    let mut opened: HashMap<(&str, &str), Result<AudioFile, PathBuf>> = HashMap::new();
     let mut tracks = Vec::new();
     for t in &doc.tracks {
         let mut regions = Vec::new();
         for r in &t.regions {
+            let mut missing = None;
             let audio = match &r.audio {
                 None => None,
                 Some(zip_path) if !prowave_project::is_media_path(zip_path) => {
@@ -828,27 +850,48 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                     continue;
                 }
                 Some(zip_path) => {
-                    let file = opened.entry(zip_path.clone()).or_insert_with(|| {
-                        match AudioFile::open(media_dir.join(zip_path)) {
-                            Ok(f) => Some(f),
-                            Err(e) => {
-                                warnings.push(format!("{}: {e}", zip_path));
-                                None
+                    let key = (zip_path.as_str(), r.audio_source.as_str());
+                    let file = opened.entry(key).or_insert_with(|| {
+                        let own = media_dir.join(zip_path);
+                        let outside = Path::new(&r.audio_source);
+                        let found = AudioFile::open(&own).or_else(|e| {
+                            if !r.audio_source.is_empty() && crate::import::is_audio_path(outside) {
+                                AudioFile::open(outside)
+                            } else {
+                                Err(e)
                             }
-                        }
+                        });
+                        found.map_err(|_| {
+                            // The project's own copy when it has one (it may be damaged),
+                            // else where the file was.
+                            let source = if r.audio_source.is_empty() || own.exists() {
+                                own
+                            } else {
+                                outside.to_path_buf()
+                            };
+                            warnings.push(shown_media(&source));
+                            source
+                        })
                     });
                     match file {
-                        Some(f) => {
+                        Ok(f) => {
                             let mut a = audio_region(f.clone(), ctx);
                             a.flex = r.flex.as_ref().map(|d| flex_from_doc(d, f.clone()));
                             Some(a)
                         }
-                        None => continue,
+                        Err(source) => {
+                            missing = Some(crate::model::MissingAudio {
+                                source: source.clone(),
+                                flex: r.flex.clone(),
+                            });
+                            None
+                        }
                     }
                 }
             };
             let folder = folder_from_doc(r);
             let mut region = Region {
+                missing,
                 name: r.name.clone(),
                 start_bar: finite_in(r.start_bar, 1.0, MAX_BARS, 1.0),
                 len_bars: finite_in(r.len_bars, 1.0 / 64.0, MAX_BARS, 1.0),
@@ -1320,24 +1363,123 @@ pub fn remove_stale_media(max_age: std::time::Duration) {
     }
 }
 
-/// Saves `p` to `path` (adds the `.prowave` extension if missing). Returns the final path.
-pub fn save_project(p: &Project, path: &Path) -> Result<PathBuf, prowave_project::ProjectError> {
+/// How a media file is told to the user: its name when it is one of a project's own copies
+/// (they are unpacked to a temporary folder nobody knows), else its whole path.
+pub fn shown_media(source: &Path) -> String {
+    if source.starts_with(media_root()) {
+        source
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    } else {
+        source.display().to_string()
+    }
+}
+
+/// A project archive as it was when media was last seen in it: its path, size and time.
+#[derive(Clone, PartialEq, Debug)]
+struct ArchiveStamp {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl ArchiveStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
+/// By the path of a file on disk: the project archive that also holds its audio, and the entry.
+type Archived = HashMap<PathBuf, (ArchiveStamp, String)>;
+
+/// Where audio that was saved or opened once is kept in a project archive. A save takes the
+/// audio from there when the file itself cannot be read any more (an imported file was moved,
+/// a temporary copy was cleaned away or is damaged), so a later save never drops it.
+static ARCHIVED: std::sync::Mutex<Option<Archived>> = std::sync::Mutex::new(None);
+
+/// Notes that the archive at `path` holds `files` (file on disk, entry), and forgets what it
+/// held before.
+fn note_archived(path: &Path, files: impl Iterator<Item = (PathBuf, String)>) {
+    let (Some(stamp), Ok(mut map)) = (ArchiveStamp::of(path), ARCHIVED.lock()) else {
+        return;
+    };
+    let map = map.get_or_insert_with(HashMap::new);
+    map.retain(|_, (s, _)| s.path != path);
+    for (source, entry) in files {
+        map.insert(source, (stamp.clone(), entry));
+    }
+}
+
+/// The archive and entry that hold the audio of `source`, if that archive is still the file
+/// it was.
+fn archived(source: &Path) -> Option<(PathBuf, String)> {
+    let map = ARCHIVED.lock().ok()?;
+    let (stamp, entry) = map.as_ref()?.get(source)?;
+    (ArchiveStamp::of(&stamp.path).as_ref() == Some(stamp))
+        .then(|| (stamp.path.clone(), entry.clone()))
+}
+
+/// A project that was written: its file, and the media files that could not be read and are
+/// not in it (their regions are saved as missing audio).
+pub struct Saved {
+    pub path: PathBuf,
+    pub missing: Vec<PathBuf>,
+}
+
+/// Saves `p` to `path` (adds the `.prowave` extension if missing). A media file that cannot be
+/// read does not stop the save (see [`prowave_project::save`]). `current`: the file becomes
+/// the project's own (Save, Save As), as opposed to a copy on the side.
+pub fn write_project(
+    p: &Project,
+    path: &Path,
+    current: bool,
+) -> Result<Saved, prowave_project::ProjectError> {
     let mut path = path.to_path_buf();
     if path.extension().and_then(|e| e.to_str()) != Some(prowave_project::EXTENSION) {
         path.set_extension(prowave_project::EXTENSION);
     }
-    let (doc, media) = to_doc(p);
-    prowave_project::save(&path, &doc, &media)?;
-    Ok(path)
+    let (doc, mut media) = to_doc(p);
+    for m in &mut media {
+        m.carry = archived(&m.source);
+    }
+    let missing = prowave_project::save(&path, &doc, &media)?;
+    if current {
+        let held = media
+            .iter()
+            .filter(|m| !missing.contains(m))
+            .map(|m| (m.source.clone(), m.zip_path.clone()));
+        note_archived(&path, held);
+    }
+    Ok(Saved {
+        path,
+        missing: missing.into_iter().map(|m| m.source).collect(),
+    })
 }
 
-/// Opens a project file; returns the project and warnings about media that could not be read.
+/// Saves `p` to `path` as its own file (adds the `.prowave` extension if missing). Returns the
+/// final path.
+#[cfg(test)]
+pub fn save_project(p: &Project, path: &Path) -> Result<PathBuf, prowave_project::ProjectError> {
+    write_project(p, path, true).map(|s| s.path)
+}
+
+/// Opens a project file; returns the project and the media files that could not be read
+/// (their regions are there, as missing audio).
 pub fn open_project(
     path: &Path,
     ctx: &egui::Context,
 ) -> Result<(Project, Vec<String>), prowave_project::ProjectError> {
     let media_dir = media_dir_for(path);
     let doc = prowave_project::load(path, &media_dir)?;
+    // Where each unpacked file came from, so a save can take it from the archive again.
+    if let Ok(names) = prowave_project::media_names(path) {
+        note_archived(path, names.into_iter().map(|n| (media_dir.join(&n), n)));
+    }
     let (mut p, warnings) = from_doc(&doc, &media_dir, ctx);
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
         p.name = stem.to_string();
@@ -2441,7 +2583,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn missing_media_drops_the_region_and_warns() {
+    fn missing_media_keeps_the_region_and_warns() {
         let dir = tempfile::tempdir().unwrap();
         let doc = ProjectDoc {
             tracks: vec![TrackDoc {
@@ -2458,8 +2600,276 @@ pub(crate) mod tests {
         };
         let (p, warnings) = from_doc(&doc, dir.path(), &egui::Context::default());
         assert_eq!(p.tracks.len(), 1);
-        assert!(p.tracks[0].regions.is_empty());
+        let r = &p.tracks[0].regions[0];
+        assert_eq!(r.name, "gone");
+        assert!(r.audio.is_none() && r.is_audio());
+        assert_eq!(
+            r.missing.as_ref().unwrap().source,
+            dir.path().join("media/0_gone.wav")
+        );
         assert_eq!(warnings.len(), 1);
+    }
+
+    /// The audio regions of the project's last track.
+    fn last_regions(p: &Project) -> &[Region] {
+        &p.tracks.last().unwrap().regions
+    }
+
+    #[test]
+    fn saving_with_a_deleted_audio_file_succeeds_and_the_region_plays_again_when_the_file_is_back()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let usb = dir.path().join("usb");
+        std::fs::create_dir(&usb).unwrap();
+        let wav = usb.join("loop.wav");
+        write_wav(&wav);
+        let mut p = Project::empty();
+        p.position_beats = 8.0;
+        crate::import::import_audio(&mut p, &wav, &ctx).unwrap();
+        let t = p.tracks.len() - 1;
+        p.tracks[t].regions[0].params.gain_db = -4.5;
+        p.tracks[t].regions[0].params.fade_in = 0.5;
+        p.tracks[t].regions[0].params.offset_secs = 0.125;
+        p.tracks[t].regions[0].name = "Loop".into();
+        let (start, len) = (
+            p.tracks[t].regions[0].start_bar,
+            p.tracks[t].regions[0].len_bars,
+        );
+        // The drive is ejected.
+        std::fs::remove_file(&wav).unwrap();
+
+        let saved = write_project(&p, &dir.path().join("song"), true).unwrap();
+        assert_eq!(saved.missing, vec![wav.clone()], "the user is told which");
+        assert!(saved.path.is_file());
+
+        let same = |r: &Region| {
+            assert_eq!(
+                (r.name.as_str(), r.start_bar, r.len_bars),
+                ("Loop", start, len)
+            );
+            assert_eq!(
+                (r.params.gain_db, r.params.fade_in, r.params.offset_secs),
+                (-4.5, 0.5, 0.125)
+            );
+        };
+        let (q, warnings) = open_project(&saved.path, &ctx).unwrap();
+        assert_eq!(q.tracks.len(), p.tracks.len());
+        assert_eq!(warnings, vec![wav.display().to_string()]);
+        let r = &last_regions(&q)[0];
+        same(r);
+        assert!(r.audio.is_none());
+        assert_eq!(r.missing.as_ref().unwrap().source, wav);
+
+        // Saved and opened once more with the file still away: nothing is lost on the way.
+        let again = write_project(&q, &dir.path().join("again"), true).unwrap();
+        assert_eq!(again.missing, vec![wav.clone()]);
+        let (q, _) = open_project(&again.path, &ctx).unwrap();
+        same(&last_regions(&q)[0]);
+        assert!(last_regions(&q)[0].missing.is_some());
+
+        // The drive is back: the region plays its file again, from where it was.
+        write_wav(&wav);
+        let (q, warnings) = open_project(&again.path, &ctx).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let r = &last_regions(&q)[0];
+        same(r);
+        assert!(r.missing.is_none());
+        assert_eq!(r.audio.as_ref().unwrap().file.path, wav);
+        // And the next save puts the audio in the project, for good.
+        let whole = write_project(&q, &dir.path().join("whole"), true).unwrap();
+        assert!(whole.missing.is_empty());
+        std::fs::remove_file(&wav).unwrap();
+        let (q, warnings) = open_project(&whole.path, &ctx).unwrap();
+        assert!(warnings.is_empty());
+        assert!(last_regions(&q)[0].audio.is_some());
+    }
+
+    #[test]
+    fn audio_that_was_saved_once_is_kept_when_its_file_goes_away_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let wav = dir.path().join("downloads.wav");
+        write_wav(&wav);
+        let bytes = std::fs::read(&wav).unwrap();
+        let mut p = Project::empty();
+        crate::import::import_audio(&mut p, &wav, &ctx).unwrap();
+        let file = save_project(&p, &dir.path().join("song")).unwrap();
+        // The imported file is moved away while the project is open; Save, twice.
+        std::fs::remove_file(&wav).unwrap();
+        for _ in 0..2 {
+            let saved = write_project(&p, &file, true).unwrap();
+            assert!(saved.missing.is_empty(), "the audio is in the project file");
+        }
+        // Save A Copy and Save As take it from there too.
+        let copy = write_project(&p, &dir.path().join("copy"), false).unwrap();
+        assert!(copy.missing.is_empty());
+        let other = write_project(&p, &dir.path().join("other"), true).unwrap();
+        assert!(other.missing.is_empty());
+        for f in [&file, &copy.path, &other.path] {
+            let out = tempfile::tempdir().unwrap();
+            let doc = prowave_project::load(f, out.path()).unwrap();
+            let entry = doc.tracks.last().unwrap().regions[0].audio.clone().unwrap();
+            assert_eq!(std::fs::read(out.path().join(entry)).unwrap(), bytes);
+            let (q, warnings) = open_project(f, &ctx).unwrap();
+            assert!(warnings.is_empty());
+            assert!(last_regions(&q)[0].audio.is_some());
+        }
+    }
+
+    #[test]
+    fn opening_with_unreadable_audio_keeps_the_region_and_saving_keeps_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        // A project whose embedded audio is not audio any more (damaged on disk).
+        let damaged: Vec<u8> = (0..3000u32).map(|i| (i * 31 % 253) as u8).collect();
+        let take = dir.path().join("take.wav");
+        std::fs::write(&take, &damaged).unwrap();
+        let flex = prowave_project::FlexDoc {
+            mode: "Slicing".into(),
+            markers: vec![[0.0, 0.0], [1.0, 1.5]],
+            ..Default::default()
+        };
+        let doc = ProjectDoc {
+            tracks: vec![
+                TrackDoc {
+                    name: "Keys".into(),
+                    ..TrackDoc::default()
+                },
+                TrackDoc {
+                    name: "Vox".into(),
+                    kind: TrackKindDoc::Audio,
+                    regions: vec![RegionDoc {
+                        name: "Take 3".into(),
+                        start_bar: 5.0,
+                        len_bars: 4.0,
+                        audio: Some("media/0_take.wav".into()),
+                        gain_db: -6.0,
+                        fade_out: 1.0,
+                        offset_secs: 0.75,
+                        loop_beats: 8.0,
+                        flex: Some(flex.clone()),
+                        ..RegionDoc::default()
+                    }],
+                    ..TrackDoc::default()
+                },
+            ],
+            ..ProjectDoc::default()
+        };
+        let file = dir.path().join("song.prowave");
+        let media = [MediaFile::new("media/0_take.wav", &take)];
+        assert!(prowave_project::save(&file, &doc, &media)
+            .unwrap()
+            .is_empty());
+
+        let (mut p, warnings) = open_project(&file, &ctx).unwrap();
+        assert_eq!(
+            warnings,
+            vec!["0_take.wav".to_string()],
+            "named to the user"
+        );
+        assert_eq!(p.tracks[1].regions.len(), 1, "the region is not dropped");
+        let first = p.tracks[1].regions[0].clone();
+        let r = &first;
+        assert!(r.audio.is_none() && r.is_audio());
+        assert_eq!(r.missing.as_ref().unwrap().flex, Some(flex.clone()));
+        assert_eq!(
+            (r.name.as_str(), r.start_bar, r.len_bars),
+            ("Take 3", 5.0, 4.0)
+        );
+
+        // What is saved for it is what was opened.
+        let embedded = |f: &Path| {
+            let out = tempfile::tempdir().unwrap();
+            let doc = prowave_project::load(f, out.path()).unwrap();
+            let r = doc.tracks[1].regions[0].clone();
+            let bytes = std::fs::read(out.path().join(r.audio.as_ref().unwrap())).unwrap();
+            (r, bytes)
+        };
+        let as_opened = |r: &RegionDoc| {
+            assert_eq!(
+                (r.name.as_str(), r.start_bar, r.len_bars, r.gain_db),
+                ("Take 3", 5.0, 4.0, -6.0)
+            );
+            assert_eq!((r.fade_out, r.offset_secs, r.loop_beats), (1.0, 0.75, 8.0));
+            assert_eq!(r.flex, Some(flex.clone()));
+            assert_eq!(r.audio_source, "", "its audio is in the file");
+        };
+        let saved = write_project(&p, &dir.path().join("as"), true).unwrap();
+        assert!(saved.missing.is_empty());
+        let (r, bytes) = embedded(&saved.path);
+        as_opened(&r);
+        assert_eq!(bytes, damaged, "the bytes are carried through untouched");
+
+        // Opened again it is still there, still missing; and saved again, still whole.
+        let (q, warnings) = open_project(&saved.path, &ctx).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(q.tracks[1].regions[0].missing.is_some());
+        let twice = write_project(&q, &saved.path, true).unwrap();
+        assert!(twice.missing.is_empty());
+        let (r, bytes) = embedded(&twice.path);
+        as_opened(&r);
+        assert_eq!(bytes, damaged);
+
+        // The unpacked copy is cleaned away by the system: the bytes come from the old file.
+        std::fs::remove_file(&q.tracks[1].regions[0].missing.as_ref().unwrap().source).unwrap();
+        let over = write_project(&q, &twice.path, true).unwrap();
+        assert!(over.missing.is_empty());
+        let (r_over, bytes) = embedded(&twice.path);
+        as_opened(&r_over);
+        assert_eq!(bytes, damaged);
+
+        // Copy, paste, cut, split, move, delete and Undo on it: no panic, and it stays what
+        // it is.
+        let mut v = crate::tracks_area::TracksView::default();
+        let mut clip = Vec::new();
+        let mut history = crate::undo::History::new(&p);
+        p.selected_track = 1;
+        v.select_only(1, 0);
+        assert!(crate::region_edit::copy_selected(&p, &v, &mut clip));
+        assert!(
+            crate::region_edit::can_paste(&p, &clip),
+            "it goes on audio tracks"
+        );
+        p.position_beats = 64.0;
+        crate::region_edit::paste_at_playhead(&mut p, &mut v, &clip);
+        assert_eq!(p.tracks[1].regions.len(), 2);
+        assert!(p.tracks[1].regions[1].missing.is_some());
+        p.selected_track = 0;
+        assert!(
+            !crate::region_edit::can_paste(&p, &clip),
+            "not on a MIDI track"
+        );
+        p.selected_track = 1;
+        let at = p.region_start_beats(&p.tracks[1].regions[0]) + 4.0;
+        assert!(p.split_region(1, 0, at));
+        assert_eq!(p.tracks[1].regions.len(), 3);
+        let (left, right) = (&p.tracks[1].regions[0], &p.tracks[1].regions[1]);
+        assert!(left.missing.is_some() && right.missing.is_some());
+        assert!(
+            right.params.offset_secs > left.params.offset_secs,
+            "the right half starts later in the file"
+        );
+        assert!(!p.join_regions(1, 0), "not joined: its edit cannot be read");
+        p.tracks[1].regions[1].start_bar += 2.0;
+        history.record(&p);
+        v.select_only(1, 0);
+        crate::region_edit::cut_selected(&mut p, &mut v, &mut clip);
+        assert_eq!(p.tracks[1].regions.len(), 2);
+        v.select_only(1, 0);
+        crate::tracks_area::delete_selected(&mut p, &mut v);
+        assert!(history.undo(&mut p));
+        assert_eq!(p.tracks[1].regions.len(), 3);
+        assert!(history.undo(&mut p));
+        assert_eq!(p.tracks[1].regions.len(), 1);
+        assert_eq!(p.tracks[1].regions[0].missing, first.missing);
+        assert!(history.redo(&mut p));
+        // The edited arrangement saves and opens with every piece.
+        let saved = write_project(&p, &dir.path().join("edited"), true).unwrap();
+        assert!(saved.missing.is_empty());
+        let (q, _) = open_project(&saved.path, &ctx).unwrap();
+        assert_eq!(q.tracks[1].regions.len(), 3);
+        assert!(q.tracks[1].regions.iter().all(|r| r.missing.is_some()));
     }
 
     #[test]

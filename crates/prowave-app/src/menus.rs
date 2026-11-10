@@ -333,6 +333,7 @@ const WINDOW: &[&str] = &[
     "Open Piano Roll",
     "Mixer",
     "Plugin Manager",
+    "Get Free Plug-ins",
     "Video",
     "-",
     "Bring All to Front",
@@ -404,6 +405,7 @@ pub(crate) const CHECKABLE: &[&str] = &[
     "Channel Rack",
     "Pitch Editor",
     "MIDI Monitor",
+    "Get Free Plug-ins",
     "32 Samples",
     "64 Samples",
     "128 Samples",
@@ -644,6 +646,7 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
 /// Entries that always work.
 const ALWAYS: &[&str] = &[
     "MIDI Monitor",
+    "Get Free Plug-ins",
     "Send All Notes Off",
     "Channel Rack",
     "Pitch Editor",
@@ -798,6 +801,7 @@ pub(crate) fn checked(label: &str, p: &Project, s: &crate::UiState) -> bool {
         "Channel Rack" => s.bottom == Bottom::ChannelRack,
         "Pitch Editor" => s.bottom == Bottom::PitchEditor,
         "MIDI Monitor" => s.show_midi_monitor,
+        "Get Free Plug-ins" => s.free_plugins.open,
         _ if buffer_frames(label).is_some() => buffer_frames(label) == Some(s.io_buffer),
         _ if crate::engine_mode::process_frames(label).is_some() => {
             crate::engine_mode::process_frames(label) == Some(s.process_buffer)
@@ -893,6 +897,7 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
             }
         }
         "MIDI Monitor" => s.show_midi_monitor = !s.show_midi_monitor,
+        "Get Free Plug-ins" => s.free_plugins.toggle(),
         "Send All Notes Off" => s.midi_panic = true,
         "Low Latency Mode" => {
             s.low_latency = !s.low_latency;
@@ -1587,7 +1592,7 @@ mod tests {
                     (s.io_buffer, s.process_buffer, s.modes.clone()),
                     s.bottom == Bottom::ChannelRack,
                     s.midi_panic,
-                    s.show_midi_monitor,
+                    (s.show_midi_monitor, s.free_plugins.open),
                     s.settings_tab
                 ),
                 (

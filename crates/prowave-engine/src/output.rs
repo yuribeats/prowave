@@ -19,18 +19,52 @@ use std::time::Instant;
 const MAX_BLOCK_FRAMES: usize = 8192;
 const GARBAGE_CAPACITY: usize = 32;
 
-/// UI-side queue accounting: each accepted state replacement reserves one return slot.
+/// UI-side queue accounting. A credit is one free place in the garbage queue: an accepted
+/// state replacement takes one, and gets it back when its old state has come back and been
+/// freed here, or when the engine says it replaced nothing (`Shared::retired_empty`).
 struct CommandQueue {
     tx: Producer<Command>,
     garbage: rtrb::Consumer<Garbage>,
     credits: usize,
+    shared: Arc<Shared>,
+    /// `Shared::retired_empty` as last read.
+    empty_seen: u32,
 }
 
 impl CommandQueue {
-    fn send(&mut self, cmd: Command) -> bool {
+    /// The UI end for an [`EngineCore`] made with the other ends of `tx` and `garbage` and
+    /// with `shared`; `garbage` holds [`GARBAGE_CAPACITY`].
+    fn new(tx: Producer<Command>, garbage: rtrb::Consumer<Garbage>, shared: Arc<Shared>) -> Self {
+        let empty_seen = shared.retired_empty.load(Ordering::Relaxed);
+        Self {
+            tx,
+            garbage,
+            credits: GARBAGE_CAPACITY,
+            shared,
+            empty_seen,
+        }
+    }
+
+    /// Frees what the engine sent back and takes the credits that are free again.
+    fn collect(&mut self) {
         while self.garbage.pop().is_ok() {
             self.credits += 1;
         }
+        // Read late is read low: a credit then comes back one call later, never too early.
+        let empty = self.shared.retired_empty.load(Ordering::Relaxed);
+        self.credits += empty.wrapping_sub(self.empty_seen) as usize;
+        self.empty_seen = empty;
+    }
+
+    /// Whether a state-replacing command sent now is accepted. Nothing but this thread's
+    /// own sends takes credits or room, so the answer holds until the next send.
+    fn can_replace_state(&mut self) -> bool {
+        self.collect();
+        self.credits > 0 && !self.tx.is_full()
+    }
+
+    fn send(&mut self, cmd: Command) -> bool {
+        self.collect();
         let retires = cmd.retires_state();
         if retires && self.credits == 0 {
             return false;
@@ -53,11 +87,8 @@ mod queue_tests {
     fn reserves_reclamation_capacity_and_recovers_after_collection() {
         let (tx, mut rx) = RingBuffer::new(8);
         let (mut gtx, garbage) = RingBuffer::new(1);
-        let mut queue = CommandQueue {
-            tx,
-            garbage,
-            credits: 1,
-        };
+        let mut queue = CommandQueue::new(tx, garbage, Arc::new(Shared::new()));
+        queue.credits = 1;
         assert!(queue.send(Command::SetSong(Box::default())));
         assert!(!queue.send(Command::SetTempoMap(Box::default())));
         // Transport is still deliverable even when all reclamation credits are reserved.
@@ -74,17 +105,408 @@ mod queue_tests {
     fn rejected_command_does_not_consume_a_reclamation_credit() {
         let (tx, mut rx) = RingBuffer::new(1);
         let (_gtx, garbage) = RingBuffer::new(1);
-        let mut queue = CommandQueue {
-            tx,
-            garbage,
-            credits: 1,
-        };
+        let mut queue = CommandQueue::new(tx, garbage, Arc::new(Shared::new()));
+        queue.credits = 1;
         assert!(queue.send(Command::Play));
         assert!(!queue.send(Command::SetNotes(vec![])));
         assert_eq!(queue.credits, 1);
         assert!(rx.pop().is_ok());
         assert!(queue.send(Command::SetNotes(vec![])));
         assert_eq!(queue.credits, 0);
+    }
+
+    use crate::core::Song;
+    use crate::fx::Pdc;
+    use crate::plugin_track::{BlockProcessor, PluginTrack};
+    use std::sync::atomic::AtomicBool;
+
+    /// The queue and the engine as [`Engine::start_device`] makes them, without a device.
+    fn rig() -> (CommandQueue, EngineCore) {
+        let (tx, rx) = RingBuffer::<Command>::new(1024);
+        let (gtx, garbage) = RingBuffer::<Garbage>::new(GARBAGE_CAPACITY);
+        let shared = Arc::new(Shared::new());
+        let core = EngineCore::new(48_000, rx, gtx, shared.clone());
+        (CommandQueue::new(tx, garbage, shared), core)
+    }
+
+    /// One audio callback, then a command that replaces nothing: the engine takes what was
+    /// sent, and the queue collects what came back.
+    fn settle(queue: &mut CommandQueue, core: &mut EngineCore) {
+        let mut block = [0.0f32; 512];
+        core.process(&mut block);
+        assert!(queue.send(Command::SetMetronome { on: false }));
+        core.process(&mut block);
+    }
+
+    /// A plug-in that does nothing and says when it is freed.
+    struct Probe(Arc<AtomicBool>);
+
+    impl BlockProcessor for Probe {
+        fn midi(&mut self, _status: u8, _d1: u8, _d2: u8, _offset: u32) {}
+        fn process(&mut self, _input: (&[f32], &[f32]), _out: (&mut [f32], &mut [f32])) {}
+        fn latency_seconds(&self) -> f64 {
+            0.0
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn plugin_track() -> Option<Box<PluginTrack>> {
+        let probe: Box<dyn BlockProcessor> = Box::new(Probe(Arc::new(AtomicBool::new(false))));
+        Some(Box::new(PluginTrack::new(None, vec![probe], 1024)))
+    }
+
+    fn sine_player() -> Option<Box<crate::soundfont::SfPlayer>> {
+        let Ok(bank) =
+            crate::soundfont::SoundFontBank::load(&crate::soundfont::test_font::sine_font())
+        else {
+            panic!("the test SoundFont loads");
+        };
+        let Some(preset) = bank.presets().first().cloned() else {
+            panic!("a preset");
+        };
+        let Ok(player) = crate::soundfont::SfPlayer::new(&bank, &preset, 48_000.0) else {
+            panic!("a player");
+        };
+        Some(Box::new(player))
+    }
+
+    /// Every command that takes a reclamation credit, by name.
+    fn retiring(name: &str) -> Command {
+        match name {
+            "SetSong" => Command::SetSong(Box::new(Song::new(vec![], vec![]))),
+            "SetNotes" => Command::SetNotes(vec![]),
+            "SetControls" => Command::SetControls(vec![]),
+            "SetTempoMap" => Command::SetTempoMap(Box::default()),
+            "SetAutomation" => Command::SetAutomation(vec![]),
+            "SetConvolver" => Command::SetConvolver {
+                track: 0,
+                slot: 0,
+                conv: Box::new(crate::convolver::Convolver::new(&[[1.0, 0.0]])),
+            },
+            "SetInserts" => Command::SetInserts {
+                track: 0,
+                chain: Box::default(),
+            },
+            "SetMasterInserts" => Command::SetMasterInserts(Box::default()),
+            "SetPdc" => Command::SetPdc {
+                track: 0,
+                pdc: Box::new(Pdc::new(64, 0)),
+            },
+            "SetPlugins" => Command::SetPlugins {
+                track: 0,
+                plugins: plugin_track(),
+            },
+            "SetMasterPlugins" => Command::SetMasterPlugins(plugin_track()),
+            "SetInput" => {
+                let (_tx, rx) = RingBuffer::<f32>::new(64);
+                Command::SetInput(Some(Box::new(crate::monitor::InputFeed::new(
+                    rx, 2, 48_000,
+                ))))
+            }
+            "SetTrackSoundFont" => Command::SetTrackSoundFont {
+                track: 0,
+                player: sine_player(),
+            },
+            other => panic!("no such command: {other}"),
+        }
+    }
+
+    const RETIRING: [&str; 13] = [
+        "SetSong",
+        "SetNotes",
+        "SetControls",
+        "SetTempoMap",
+        "SetAutomation",
+        "SetConvolver",
+        "SetInserts",
+        "SetMasterInserts",
+        "SetPdc",
+        "SetPlugins",
+        "SetMasterPlugins",
+        "SetInput",
+        "SetTrackSoundFont",
+    ];
+
+    /// Each command that takes a credit, sent once to a new engine and once more: after the
+    /// engine has run, the credit is back.
+    #[test]
+    fn every_reclamation_credit_comes_back_once_the_engine_has_run() {
+        let mut first_time = Vec::new();
+        let mut second_time = Vec::new();
+        for name in RETIRING {
+            let (mut queue, mut core) = rig();
+            assert!(retiring(name).retires_state(), "{name} takes a credit");
+            assert!(queue.send(retiring(name)));
+            settle(&mut queue, &mut core);
+            if queue.credits != GARBAGE_CAPACITY {
+                first_time.push((name, queue.credits));
+            }
+            let before = queue.credits;
+            assert!(queue.send(retiring(name)));
+            settle(&mut queue, &mut core);
+            if queue.credits != before {
+                second_time.push((name, queue.credits));
+            }
+        }
+        assert!(
+            first_time.is_empty() && second_time.is_empty(),
+            "credits of {GARBAGE_CAPACITY} not given back: sent to a new engine \
+             {first_time:?}; sent again {second_time:?}"
+        );
+    }
+
+    /// A project of 16 tracks where each gets its first effect and its first delay
+    /// compensation, one audio callback after every command: notes can still be edited.
+    #[test]
+    fn edits_are_still_accepted_after_first_time_strip_commands() {
+        let (mut queue, mut core) = rig();
+        let mut accepted = 0;
+        for track in 0..16u16 {
+            for cmd in [
+                Command::SetInserts {
+                    track,
+                    chain: Box::default(),
+                },
+                Command::SetPdc {
+                    track,
+                    pdc: Box::new(Pdc::new(64, 0)),
+                },
+            ] {
+                accepted += usize::from(queue.send(cmd));
+                settle(&mut queue, &mut core);
+            }
+        }
+        // However long the engine runs afterwards.
+        for _ in 0..100 {
+            settle(&mut queue, &mut core);
+        }
+        let credits = queue.credits;
+        let notes = queue.send(Command::set_notes(vec![]));
+        let song = queue.send(Command::SetSong(Box::new(Song::new(vec![], vec![]))));
+        assert!(
+            notes && song,
+            "after {accepted} accepted first-time strip commands the queue has {credits} \
+             credits: SetNotes accepted {notes}, SetSong accepted {song}"
+        );
+    }
+
+    /// Changing a track's SoundFont takes a credit and gives that one back, no more.
+    #[test]
+    fn replacing_a_soundfont_does_not_add_a_credit() {
+        let (mut queue, mut core) = rig();
+        for _ in 0..3 {
+            let cmd = Command::SetTrackSoundFont {
+                track: 0,
+                player: sine_player(),
+            };
+            assert!(cmd.retires_state());
+            assert!(queue.send(cmd));
+            assert!(queue.credits < GARBAGE_CAPACITY);
+            settle(&mut queue, &mut core);
+            assert_eq!(queue.credits, GARBAGE_CAPACITY);
+        }
+        assert_eq!(
+            queue.credits, GARBAGE_CAPACITY,
+            "three SoundFonts on one track, two of them replacing one"
+        );
+    }
+
+    /// The SoundFont player a new one replaces goes back to the UI thread to be freed there,
+    /// also when the way back is full at that moment.
+    #[test]
+    fn a_replaced_soundfont_player_comes_back_when_the_way_back_is_full() {
+        let (mut tx, rx) = RingBuffer::<Command>::new(64);
+        let (gtx, mut garbage) = RingBuffer::<Garbage>::new(1);
+        let mut core = EngineCore::new(48_000, rx, gtx, Arc::new(Shared::new()));
+        let mut block = [0.0f32; 512];
+        assert!(tx
+            .push(Command::SetTrackSoundFont {
+                track: 0,
+                player: sine_player(),
+            })
+            .is_ok());
+        core.process(&mut block);
+        // The old song fills the way back; the old player comes right after it.
+        assert!(tx.push(Command::SetSong(Box::default())).is_ok());
+        assert!(tx
+            .push(Command::SetTrackSoundFont {
+                track: 0,
+                player: None,
+            })
+            .is_ok());
+        let mut players = 0;
+        for _ in 0..8 {
+            core.process(&mut block);
+            while let Ok(item) = garbage.pop() {
+                players += usize::from(matches!(item, Garbage::SoundFont(_)));
+            }
+        }
+        assert_eq!(players, 1, "SoundFont players that came back");
+    }
+
+    /// What the engine holds that a command can replace, as the test expects it.
+    #[derive(Default)]
+    struct Held {
+        chains: [bool; 6],
+        pdc: [bool; 6],
+        plugins: [bool; 6],
+        fonts: [bool; 6],
+        master_chain: bool,
+        master_plugins: bool,
+        input: bool,
+    }
+
+    /// A long random run of every state-replacing command, first-time and replacing, to
+    /// tracks that exist and to one that does not, in bursts and with the engine running in
+    /// between: there are never more credits than places, the only refusals are for want of
+    /// a credit, every old state comes back to be freed here, and once the engine has run
+    /// all 32 credits are back.
+    #[test]
+    fn credits_all_come_back_after_a_long_random_run_of_state_replacements() {
+        let (mut queue, mut core) = rig();
+        let mut held = Held::default();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rand = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n) as usize
+        };
+        let mut block = [0.0f32; 256];
+        // Accepted commands, the old states expected back, refusals.
+        let (mut accepted, mut expected, mut refused) = (0u32, 0u32, 0u32);
+        for _ in 0..4000 {
+            // One time in eight a track the engine does not have: what was sent comes back.
+            let real = rand(8) > 0;
+            let t = rand(6);
+            let track = if real { t as u16 } else { u16::MAX };
+            let some = rand(3) > 0;
+            // (the command, whether something comes back for it, what to note when accepted)
+            let kind = rand(13);
+            let (cmd, back) = match kind {
+                0 => (retiring("SetSong"), true),
+                1 => (retiring("SetNotes"), true),
+                2 => (retiring("SetControls"), true),
+                3 => (retiring("SetTempoMap"), true),
+                4 => (retiring("SetAutomation"), true),
+                5 => (retiring("SetConvolver"), true),
+                6 => (
+                    Command::SetInserts {
+                        track,
+                        chain: Box::default(),
+                    },
+                    !real || held.chains[t],
+                ),
+                7 => (retiring("SetMasterInserts"), held.master_chain),
+                8 => (
+                    Command::SetPdc {
+                        track,
+                        pdc: Box::new(Pdc::new(rand(64), rand(64))),
+                    },
+                    !real || held.pdc[t],
+                ),
+                9 => (
+                    Command::SetPlugins {
+                        track,
+                        plugins: some.then(plugin_track).flatten(),
+                    },
+                    if real { held.plugins[t] } else { some },
+                ),
+                10 => (
+                    Command::SetMasterPlugins(some.then(plugin_track).flatten()),
+                    held.master_plugins,
+                ),
+                11 => {
+                    let feed = some.then(|| {
+                        let (_tx, rx) = RingBuffer::<f32>::new(64);
+                        Box::new(crate::monitor::InputFeed::new(rx, 2, 48_000))
+                    });
+                    (Command::SetInput(feed), held.input)
+                }
+                _ => (
+                    Command::SetTrackSoundFont {
+                        track,
+                        player: some.then(sine_player).flatten(),
+                    },
+                    if real { held.fonts[t] } else { some },
+                ),
+            };
+            assert!(cmd.retires_state());
+            let before = queue.credits;
+            if queue.send(cmd) {
+                accepted += 1;
+                expected += u32::from(back);
+                match kind {
+                    6 if real => held.chains[t] = true,
+                    7 => held.master_chain = true,
+                    8 if real => held.pdc[t] = true,
+                    9 if real => held.plugins[t] = some,
+                    10 => held.master_plugins = some,
+                    11 => held.input = some,
+                    12 if real => held.fonts[t] = some,
+                    _ => {}
+                }
+            } else {
+                refused += 1;
+                assert_eq!(queue.credits, 0, "refused only for want of a credit");
+                assert!(before <= GARBAGE_CAPACITY);
+            }
+            assert!(
+                queue.credits <= GARBAGE_CAPACITY,
+                "more credits than places"
+            );
+            assert_eq!(
+                queue.can_replace_state(),
+                queue.credits > 0,
+                "the question and the send agree"
+            );
+            // Bursts: often several commands before the engine runs again.
+            for _ in 0..[0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2][rand(12)] {
+                // Nothing is made or freed in the audio callback (debug builds stop here).
+                assert_no_alloc::assert_no_alloc(|| core.process(&mut block));
+            }
+        }
+        for _ in 0..4 {
+            settle(&mut queue, &mut core);
+        }
+        assert_eq!(queue.credits, GARBAGE_CAPACITY, "all credits are back");
+        let empty = queue.shared.retired_empty.load(Ordering::Relaxed);
+        assert_eq!(
+            accepted - empty,
+            expected,
+            "old states that came back, of {accepted} commands ({refused} more refused)"
+        );
+        assert!(
+            refused > 0 && expected > 1000 && empty > 100,
+            "the run covers the cases: {refused} refused, {expected} back, {empty} empty"
+        );
+    }
+
+    /// A refused command is freed inside `send`, with the plug-ins in it: whatever the caller
+    /// kept to reach them (the app keeps a raw Audio Unit handle per plug-in) points at
+    /// nothing from then on.
+    #[test]
+    fn a_refused_plugins_command_frees_its_plugins_before_send_returns() {
+        let (tx, _rx) = RingBuffer::<Command>::new(8);
+        let (_gtx, garbage) = RingBuffer::<Garbage>::new(1);
+        // The one credit is out: an edit the engine has not run yet.
+        let mut queue = CommandQueue::new(tx, garbage, Arc::new(Shared::new()));
+        queue.credits = 1;
+        assert!(queue.send(Command::SetNotes(vec![])));
+        let freed = Arc::new(AtomicBool::new(false));
+        let probe: Box<dyn BlockProcessor> = Box::new(Probe(freed.clone()));
+        let plugins = Some(Box::new(PluginTrack::new(Some(probe), vec![], 1024)));
+        assert!(!freed.load(Ordering::SeqCst));
+        assert!(!queue.send(Command::SetPlugins { track: 0, plugins }));
+        assert!(
+            freed.load(Ordering::SeqCst),
+            "the plug-in of the refused command is gone when send returns"
+        );
     }
 }
 
@@ -277,7 +699,7 @@ impl Renderer {
             let frames = chunk.len() / channels;
             let buf = &mut self.scratch[..frames * 2];
             let core = &mut self.core;
-            assert_no_alloc::assert_no_alloc(|| core.process(buf));
+            crate::rt_alloc::guarded(|| core.process(buf));
             for (i, frame) in chunk.chunks_exact_mut(channels).enumerate() {
                 let (l, r) = (buf[i * 2], buf[i * 2 + 1]);
                 for (c, s) in frame.iter_mut().enumerate() {
@@ -421,11 +843,7 @@ impl Engine {
             info.sample_rate
         );
         Ok(Self {
-            commands: CommandQueue {
-                tx,
-                garbage: grx,
-                credits: GARBAGE_CAPACITY,
-            },
+            commands: CommandQueue::new(tx, grx, shared.clone()),
             shared,
             state,
             midi_out: readers.midi,
@@ -475,9 +893,7 @@ impl Engine {
                     }
                     if let Some(t) = tap.as_mut() {
                         if b.in_channels > 0 {
-                            assert_no_alloc::assert_no_alloc(|| {
-                                t.feed(b.input, b.input_latency_us)
-                            });
+                            crate::rt_alloc::guarded(|| t.feed(b.input, b.input_latency_us));
                         }
                     }
                     // Another device can have another number of outputs.
@@ -512,11 +928,7 @@ impl Engine {
             name: info.input_name.clone().unwrap_or_default(),
         });
         Ok(Self {
-            commands: CommandQueue {
-                tx,
-                garbage: grx,
-                credits: GARBAGE_CAPACITY,
-            },
+            commands: CommandQueue::new(tx, grx, shared.clone()),
             shared,
             state,
             midi_out: readers.midi,
@@ -738,11 +1150,7 @@ impl Engine {
             .play()
             .map_err(|e| EngineError::Backend(e.to_string()))?;
         Ok(Self {
-            commands: CommandQueue {
-                tx,
-                garbage: grx,
-                credits: GARBAGE_CAPACITY,
-            },
+            commands: CommandQueue::new(tx, grx, shared.clone()),
             shared,
             state,
             midi_out: readers.midi,
@@ -766,6 +1174,17 @@ impl Engine {
     /// Queue a command (Logic: transport or project edit). Returns `false` if command or
     /// state-reclamation capacity is exhausted. The rejected command is freed here on the
     /// UI thread; callers must retry their desired change before marking it synchronized.
+    /// Whether a state-replacing command (a song, notes, effects, plug-ins, a SoundFont, ...)
+    /// sent now is accepted. Ask before making something costly to send, such as opening a
+    /// plug-in: a refused command is freed with all it holds. What the engine sent back is
+    /// freed here, as in [`Engine::send`].
+    pub fn can_replace_state(&mut self) -> bool {
+        for trash in self.worker_trash.iter_mut() {
+            while trash.pop().is_ok() {}
+        }
+        self.commands.can_replace_state()
+    }
+
     pub fn send(&mut self, cmd: Command) -> bool {
         // Plug-ins the playback thread let go of are freed here, off the real-time threads.
         for trash in self.worker_trash.iter_mut() {

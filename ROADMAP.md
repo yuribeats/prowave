@@ -182,7 +182,9 @@ This is exhaustive. Based on Logic Pro 10.7 / 11.
                                     cpal (native) / AudioWorklet (web)
 ```
 
-**Workspace Structure:**
+**Workspace Structure** (the plan; on 2026-11-09 only `prowave-engine`, `prowave-project`,
+`prowave-app` and `xtask` exist, and effects, instruments, mixing, MIDI and plug-in hosting are
+inside `prowave-engine` and `prowave-app`):
 ```
 /crates
   /prowave-engine    # lock-free audio graph, transport, PDC
@@ -197,7 +199,7 @@ This is exhaustive. Based on Logic Pro 10.7 / 11.
 /xtask
 ```
 
-**Critical Rust Rules (for Claude):**
+**Critical Rust Rules (for Claude)** (the plan; `AGENTS.md` has the rules the code follows today):
 - Audio thread: `#![forbid(alloc)]` in process() path, use `assert_no_alloc`. No mutex, no `println!`, no `Vec::new()`
 - All params: `AtomicF32` + 1-pole smoother (`ParamSmoother { target, current, coeff }`)
 - Graph: Petgraph-like `AudioGraph { nodes: Vec<Node>, edges: Vec<Edge> }` sorted topologically each time graph changes (on engine thread, not audio thread)
@@ -371,7 +373,10 @@ positions (fixed, tested), prefetch size now follows the number of clips.
 The items below marked done are in 0.2.2 (see CHANGELOG.md for the full list, and its known
 limitations at the end of the section). Still open, in the order the work would take them:
 
-- Plug-in hosting (CLAP first, then VST3 and AU), with a sandboxed process per plug-in. Not started.
+- Plug-in hosting (CLAP first, then VST3 and AU), with a sandboxed process per plug-in. Not started
+  at 0.2.2. Since then (2026-11-05 and 2026-11-06) Audio Units and VST3 plug-ins are hosted on
+  macOS, inside the program's own process. CLAP, a sandboxed process and hosting on Windows and
+  Linux are still not started.
 - Audio output device and I/O buffer size in Project Settings > Audio (needs an engine stream restart).
 - Bounce in Place and Bounce and Join (offline rendering in the engine).
 - Convert to New Sampler Track (needs a sampler instrument).
@@ -385,6 +390,7 @@ limitations at the end of the section). Still open, in the order the work would 
   - Done: `cargo xtask check|wasm-check|rt-check` (fmt, clippy -D warnings, tests, no-alloc, cargo-deny, wasm32) passes on Windows.
   - CI: `.github/workflows/ci.yml` runs `cargo xtask check` on Ubuntu, Windows and macOS (plus the
     cross-target builds) on every push to `main`. Checked 2026-10-31: green on all three systems.
+    No later check is recorded here.
   - Linux: x86_64 release binary cross-builds from Windows (Zig + `cargo-zigbuild`, glibc 2.31+) and is packaged in `dist/prowave-linux-x86_64.tar.gz` with a full user README; audio thread asks for real-time priority (cpal `realtime`); window class set for desktop integration. Audio start falls back across devices/sample formats; the unsaved-changes prompt is in-app (no zenity); clippy `-D warnings` + test compilation pass for the Linux target; real DT_NEEDED is only libasound + libc. The release workflow ran on GitHub (v0.1.1) and the packaged binary stays up for 15 s under a virtual X display with software OpenGL (tarball and AppImage), but it has not been run on real Linux hardware: no audio device or GPU has been tried.
   - macOS: cannot be built on Windows (needs Apple's SDK). `.github/workflows/release.yml` builds a universal ad-hoc-signed `.app` on GitHub's macOS runner (built successfully for v0.1.1; never launched on a Mac).
   - Release packages (v0.1.1, all built and install-checked on GitHub): Linux tarball, `.deb` (installed and removed on Ubuntu), `.rpm` (installed and removed in a Fedora 41 container), AppImage, Flatpak bundle, macOS `.app`. They are workflow artifacts, not yet published as a GitHub Release.
@@ -423,7 +429,7 @@ limitations at the end of the section). Still open, in the order the work would 
     curve evaluation. Tests verify fade output after tempo and song changes without allocation.
   - Done (app, 2026-10-20): Region Inspector Gain, Fade In/Out (1/16-note steps, shown in ms), Curve, Reverse; right-click Normalize Region Gain (non-destructive, peak to 0 dBFS) and Reverse Region; waveform drawn with gain, reversed, fades shaded; saved in `.prowave`. Pending: none from this group (see below).
   - Done (2026-10-21): Fade tool (Tracks area tool menu): drag the left half of an audio region for a fade in, the right half for a fade out, in 1/16 notes. Crossfades: Drag: X-Fade (or the Inspector's X-Fade box): a region dropped on an earlier audio region fades in over the overlap while the earlier one fades out, with the region's curve (`Project::effective_fades`; the engine just plays the longer fades); drawn as fades on both regions; saved in `.prowave` (`crossfade`).
-- [x] Disk streaming: memory-mapped + prefetch thread, 1000 tracks streaming test
+- [x] Disk streaming: memory-mapped + prefetch thread, 1000 tracks streaming test (the test is `#[ignore]`d: it is run by hand, not by `cargo test`, `cargo xtask check` or CI)
   - Done (engine): one background decoder/prefetch thread and per-clip lock-free rings; ring
     capacity reduced to about 64 KiB (170 ms at 48 kHz) per clip, down from about 512 KiB.
   - Reverse streaming reuses decoded windows with 8,192 extra source frames of look-behind,
@@ -501,9 +507,11 @@ limitations at the end of the section). Still open, in the order the work would 
 - **DoD:** A/B test Channel EQ curve vs Logic (within 0.5dB), Space Designer IR load
 
 ### Phase 7: Plugin Hosting & Sandboxing (Weeks 51-56)
-- [ ] CLAP host full (note, params, latency, state), VST3 host via `vst3-sys`, AU host on macOS via `coreaudio-sys`
+- [~] CLAP host full (note, params, latency, state), VST3 host via `vst3-sys`, AU host on macOS via `coreaudio-sys`
+  - Started (2026-11-05, 2026-11-06): Audio Unit and VST3 instruments and effects are hosted on macOS, inside the program's process (`au.rs`, `vst3.rs`; the `vst3` and `objc2` crates, not `vst3-sys` or `coreaudio-sys`), with windows, saved settings, presets, automation and delay compensation. Not done: CLAP, and any hosting on Windows or Linux.
 - [ ] Out-of-process sandbox: separate process, SHM ring buffer (1ms latency overhead max), seccomp (Linux), seatbelt (macOS), AppContainer (Win). Heartbeat, crash isolation, auto-restart
-- [ ] Plugin scanner with quarantine, timeout 5s per plugin, blacklist
+- [~] Plugin scanner with quarantine, timeout 5s per plugin, blacklist
+  - Started (2026-11-06): each `.vst3` bundle is scanned in a helper process with a 30 s limit; one that crashes or hangs is put on the quarantine list, and so is any plug-in that crashed the program while opening (`vst3_scan.rs`, `plugins.rs`). Audio Units are listed by the system, not scanned in a helper.
 - [ ] Plug-in Manager UI showing latency, type, manufacturer
 - **DoD:** Load Vital, Serum, Kontakt without crashing main DAW if plugin crashes
 

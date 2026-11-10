@@ -472,43 +472,84 @@ pub fn start_background_scan() {
     if cfg!(test) || STARTED.swap(true, Ordering::Relaxed) {
         return;
     }
-    let _ = std::thread::Builder::new()
+    spawn_scan();
+}
+
+/// Scans the VST 3 folders again now, in the background (plug-ins were installed while the
+/// program runs). Bundles that did not change come from the cache. [`take_update`] reports
+/// its end as it does the first scan's. While a scan runs, another one is queued after it.
+pub fn rescan_now() {
+    if cfg!(test) {
+        return;
+    }
+    STARTED.store(true, Ordering::Relaxed);
+    spawn_scan();
+}
+
+/// A scan is running.
+static SCANNING: AtomicBool = AtomicBool::new(false);
+/// Another scan was asked for while one ran.
+static AGAIN: AtomicBool = AtomicBool::new(false);
+
+fn spawn_scan() {
+    if SCANNING.swap(true, Ordering::AcqRel) {
+        AGAIN.store(true, Ordering::Release);
+        return;
+    }
+    let started = std::thread::Builder::new()
         .name("vst3-scan".into())
-        .spawn(|| {
-            let bundles = all_bundles();
-            let cache = load_cache();
-            let (scans, report) = rescan(
-                &cache,
-                &bundles,
-                &crate::plugins::quarantined(),
-                &scan_in_helper,
-            );
-            for id in &report.quarantine_ids {
-                crate::plugins::quarantine(id);
-            }
-            save_cache(&scans);
-            if let Ok(mut c) = CLASSES.lock() {
-                *c = Some(classes_of(&scans));
-            }
-            if !report.quarantined.is_empty() {
-                let names: Vec<String> = report
-                    .quarantined
-                    .iter()
-                    .map(|(p, _)| {
-                        Path::new(p)
-                            .file_stem()
-                            .map_or(p.clone(), |s| s.to_string_lossy().to_string())
-                    })
-                    .collect();
-                if let Ok(mut s) = STATUS.lock() {
-                    *s = Some(format!(
-                        "VST3 scan: {} crashed or hung and are turned off",
-                        names.join(", ")
-                    ));
-                }
-            }
+        .spawn(|| loop {
+            scan_once();
             UPDATED.store(true, Ordering::Release);
+            if AGAIN.swap(false, Ordering::AcqRel) {
+                continue;
+            }
+            SCANNING.store(false, Ordering::Release);
+            // Asked for between the two lines above: this thread takes it, unless a new one
+            // already has.
+            if !AGAIN.swap(false, Ordering::AcqRel) || SCANNING.swap(true, Ordering::AcqRel) {
+                break;
+            }
         });
+    if started.is_err() {
+        SCANNING.store(false, Ordering::Release);
+    }
+}
+
+/// One pass over the VST 3 folders: the cache and the list of classes are brought up to date.
+fn scan_once() {
+    let bundles = all_bundles();
+    let cache = load_cache();
+    let (scans, report) = rescan(
+        &cache,
+        &bundles,
+        &crate::plugins::quarantined(),
+        &scan_in_helper,
+    );
+    for id in &report.quarantine_ids {
+        crate::plugins::quarantine(id);
+    }
+    save_cache(&scans);
+    if let Ok(mut c) = CLASSES.lock() {
+        *c = Some(classes_of(&scans));
+    }
+    if !report.quarantined.is_empty() {
+        let names: Vec<String> = report
+            .quarantined
+            .iter()
+            .map(|(p, _)| {
+                Path::new(p)
+                    .file_stem()
+                    .map_or(p.clone(), |s| s.to_string_lossy().to_string())
+            })
+            .collect();
+        if let Ok(mut s) = STATUS.lock() {
+            *s = Some(format!(
+                "VST3 scan: {} crashed or hung and are turned off",
+                names.join(", ")
+            ));
+        }
+    }
 }
 
 /// Whether `PROWAVE_QUIT_AFTER` seconds have passed since the first call (`None` when it is

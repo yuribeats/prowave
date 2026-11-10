@@ -105,6 +105,7 @@ mod tests {
     fn rig(bars: f32) -> (Project, crate::UiState) {
         let mut p = Project::empty();
         p.tracks[0].regions.push(Region {
+            missing: None,
             name: "Beat".into(),
             start_bar: 1.0,
             len_bars: bars,

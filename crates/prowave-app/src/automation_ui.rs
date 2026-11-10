@@ -1741,6 +1741,7 @@ mod tests {
         let mut p = Project::empty();
         p.tracks[0].kind = TrackKind::Instrument;
         p.tracks[0].regions = vec![Region {
+            missing: None,
             name: "A".into(),
             start_bar: 1.0,
             len_bars: 1.0,

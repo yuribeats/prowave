@@ -76,6 +76,7 @@ pub fn import_audio(p: &mut Project, path: &Path, ctx: &egui::Context) -> Result
         pan: 0.0,
         inserts: vec![],
         regions: vec![Region {
+            missing: None,
             name,
             start_bar: start_bar as f32,
             len_bars: len_bars as f32,

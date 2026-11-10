@@ -73,11 +73,13 @@ mod tests {
         assert!(loaded(path).is_none());
     }
 
-    /// The General MIDI SoundFont named by `PROWAVE_TEST_SF2`, if set (it is not in the repo).
+    /// The General MIDI SoundFont named by `PROWAVE_TEST_SF2` (no SoundFont is in the repo, so the test is
+    /// ignored by default; run it with `-- --ignored` and the variable set).
     #[test]
+    #[ignore = "needs a General MIDI SoundFont file: set PROWAVE_TEST_SF2"]
     fn a_soundfont_is_loaded_once_and_then_shared() {
         let Ok(path) = std::env::var("PROWAVE_TEST_SF2") else {
-            return;
+            panic!("set PROWAVE_TEST_SF2 to a General MIDI SoundFont (.sf2) file");
         };
         let Ok(first) = load(&path) else {
             panic!("load {path}");

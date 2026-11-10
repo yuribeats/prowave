@@ -233,6 +233,7 @@ pub fn capture(rec: &mut Recorder, p: &mut Project) -> Option<(usize, usize)> {
         .max(1.0);
     let track = &mut p.tracks[t];
     track.regions.push(Region {
+        missing: None,
         name: track.name.clone(),
         start_bar: bar as f32 + 1.0,
         len_bars: bars as f32,
@@ -278,6 +279,7 @@ fn start(rec: &mut Recorder, p: &mut Project, pedal: u8) -> Outcome {
         cycle.map_or(0.01, |len| bars_between(p, start, len)),
     );
     p.tracks[t].regions.push(Region {
+        missing: None,
         name,
         start_bar,
         len_bars,
@@ -801,6 +803,7 @@ mod tests {
         p.tracks[0].regions.clear();
         let mut other = Track::new("Other", TrackKind::Instrument);
         other.regions.push(Region {
+            missing: None,
             name: "Mine".into(),
             start_bar: 1.0,
             len_bars: 1.0,

@@ -580,6 +580,8 @@ pub(crate) struct Meters<'a> {
     pub playback: f32,
     /// System overloads so far.
     pub overloads: u32,
+    /// Allocator calls from our own audio-thread code so far (release builds count them).
+    pub rt_allocs: u64,
     /// The heaviest plug-in lately and its load.
     pub heaviest: Option<&'a (String, f32)>,
 }
@@ -1226,6 +1228,10 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, bezel: Rect, meters: &Meters) {
         text.push('\n');
         text.push_str(&trf("System overload: {}", &[&meters.overloads]));
     }
+    if meters.rt_allocs > 0 {
+        text.push('\n');
+        text.push_str(&trf("Audio thread allocations: {}", &[&meters.rt_allocs]));
+    }
     ui.interact(
         plan.status,
         Id::unique(("lcd", "cpu_meter")),
@@ -1768,6 +1774,7 @@ pub fn control_bar(
         live: s.cpu_load,
         playback: s.playback_load,
         overloads: s.overloads,
+        rt_allocs: s.rt_allocs.ours,
         heaviest: s.heaviest.as_ref(),
     };
     lcd(ui, &g, p, bezel, &meters);

@@ -24,7 +24,7 @@ pub(crate) type RegionClip = Vec<Region>;
 
 /// A MIDI region with its own notes: the only kind that can be split or joined.
 fn plain_midi(r: &Region) -> bool {
-    r.audio.is_none() && r.folder.is_none() && r.generated.is_none()
+    !r.is_audio() && r.folder.is_none() && r.generated.is_none()
 }
 
 /// Copies every selected region to the clipboard. Returns whether there was one.
@@ -59,7 +59,7 @@ pub(crate) fn can_paste(p: &Project, clip: &RegionClip) -> bool {
         && track.kind.has_regions()
         && clip
             .iter()
-            .all(|r| r.audio.is_some() == (track.kind == TrackKind::Audio))
+            .all(|r| r.is_audio() == (track.kind == TrackKind::Audio))
 }
 
 /// Puts copies of the clipboard regions on the selected track, the earliest at the playhead,
@@ -97,7 +97,7 @@ pub(crate) fn fits_rows(p: &Project, group: &[(usize, usize, f64)], rows: isize)
         let Some(to) = t.checked_add_signed(rows).and_then(|to| p.tracks.get(to)) else {
             return false;
         };
-        to.kind.has_regions() && region.audio.is_some() == (to.kind == TrackKind::Audio)
+        to.kind.has_regions() && region.is_audio() == (to.kind == TrackKind::Audio)
     })
 }
 
@@ -538,6 +538,7 @@ mod tests {
         let mut p = Project::empty();
         p.add_track(TrackKind::Instrument);
         let mut r = Region {
+            missing: None,
             name: "Riff".into(),
             start_bar: 2.0,
             len_bars: 2.0,
@@ -799,6 +800,7 @@ mod tests {
         p.tracks[0].kind = TrackKind::Audio;
         p.add_track(TrackKind::Audio);
         p.tracks[0].regions.push(Region {
+            missing: None,
             name: "Take".into(),
             start_bar: 1.0,
             len_bars: 1.0,

@@ -343,7 +343,7 @@ pub(crate) fn spawn(
                 #[cfg(not(target_os = "macos"))]
                 let _ = &workgroup_device;
                 let started = std::time::Instant::now();
-                let frames = assert_no_alloc::assert_no_alloc(|| prerender.step());
+                let frames = crate::rt_alloc::guarded(|| prerender.step());
                 if frames > 0 {
                     let audio = frames as f64 / f64::from(prerender.sr);
                     let load = started.elapsed().as_secs_f64() / audio;

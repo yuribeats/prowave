@@ -1502,7 +1502,7 @@ fn other_regions(p: &Project, ti: usize, ri: usize, origin: f64) -> Vec<(usize, 
         .regions
         .iter()
         .enumerate()
-        .filter(|(r, reg)| *r != ri && reg.audio.is_none() && reg.folder.is_none())
+        .filter(|(r, reg)| *r != ri && !reg.is_audio() && reg.folder.is_none())
         .map(|(r, reg)| (r, (p.region_start_beats(reg) - origin) as f32))
         .collect()
 }
@@ -1662,7 +1662,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     if s.piano.catch && s.piano.link && p.playing {
         let pos = p.position_beats;
         let here = p.tracks[ti].regions.iter().position(|r| {
-            r.audio.is_none()
+            !r.is_audio()
                 && r.folder.is_none()
                 && pos >= p.region_start_beats(r)
                 && pos < p.region_end_beats(r)
@@ -3456,6 +3456,7 @@ mod tests {
 
     fn region(start_bar: f32, notes: Vec<Note>) -> Region {
         Region {
+            missing: None,
             name: "R".into(),
             start_bar,
             len_bars: 2.0,

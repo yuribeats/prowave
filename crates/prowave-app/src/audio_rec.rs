@@ -418,6 +418,7 @@ impl AudioRecorder {
             match capture.start(&path, track.input, latency_us) {
                 Ok(id) => {
                     track.regions.push(Region {
+                        missing: None,
                         name: format!("*{}", track.name),
                         start_bar,
                         len_bars: 0.01,
@@ -690,6 +691,7 @@ mod tests {
         p.tracks[0].name = "Vox".into();
         p.tempo = 120.0;
         p.tracks[0].regions.push(Region {
+            missing: None,
             name: "*Vox".into(),
             start_bar: 2.0,
             len_bars: 0.01,

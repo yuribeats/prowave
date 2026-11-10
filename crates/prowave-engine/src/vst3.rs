@@ -936,7 +936,7 @@ impl Vst3Instance {
         };
         // SAFETY: every pointer in `data` points at memory this instance owns for the call;
         // the buffers hold at least `n` frames (n <= max_frames).
-        let status = unsafe { self.processor.process(&mut data) };
+        let status = crate::rt_alloc::plugin_call(|| unsafe { self.processor.process(&mut data) });
         self.continuous += n as i64;
         self.events.clear();
         self.params.clear();

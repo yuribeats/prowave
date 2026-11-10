@@ -473,7 +473,7 @@ impl AuInstance {
             return;
         }
         // SAFETY: the unit is open; MusicDeviceMIDIEvent is meant for the render thread.
-        unsafe {
+        crate::rt_alloc::plugin_call(|| unsafe {
             MusicDeviceMIDIEvent(
                 self.unit,
                 u32::from(status),
@@ -481,7 +481,7 @@ impl AuInstance {
                 u32::from(data2),
                 offset,
             );
-        }
+        });
     }
 
     /// Clears the unit's state (reverb tails, held notes). Not on the audio thread.
@@ -564,7 +564,7 @@ impl AuInstance {
         ts.mFlags = AudioTimeStampFlags::SampleTimeValid;
         let mut flags = AudioUnitRenderActionFlags(0);
         // SAFETY: the list points at buffers of `n` frames that live across the call.
-        let status = unsafe {
+        let status = crate::rt_alloc::plugin_call(|| unsafe {
             AudioUnitRender(
                 self.unit,
                 &mut flags,
@@ -573,7 +573,7 @@ impl AuInstance {
                 n as u32,
                 NonNull::from(&mut self.list).cast(),
             )
-        };
+        });
         self.sample_time += n as f64;
         if status != 0 {
             self.errors += 1;
@@ -1116,7 +1116,7 @@ impl AuInstance {
             return;
         }
         // SAFETY: the unit is open; a parameter it does not have is refused with an error.
-        unsafe {
+        crate::rt_alloc::plugin_call(|| unsafe {
             objc2_audio_toolbox::AudioUnitSetParameter(
                 self.unit,
                 id,
@@ -1125,7 +1125,7 @@ impl AuInstance {
                 value,
                 offset,
             );
-        }
+        });
     }
 }
 

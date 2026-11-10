@@ -179,7 +179,7 @@ pub fn has_notes(t: &Track) -> bool {
             | TrackKind::Aux
             | TrackKind::Folder
             | TrackKind::Vca
-    ) && t.regions.iter().any(|r| r.audio.is_none())
+    ) && t.regions.iter().any(|r| !r.is_audio())
 }
 
 /// The track whose notes the effect on track `ti` with `values` follows in MIDI mode: the
@@ -207,11 +207,7 @@ pub fn notes_of(p: &Project, src: usize) -> Vec<TargetNote> {
     let Some(t) = p.tracks.get(src) else {
         return out;
     };
-    for r in t
-        .regions
-        .iter()
-        .filter(|r| r.audio.is_none() && !r.params.mute)
-    {
+    for r in t.regions.iter().filter(|r| !r.is_audio() && !r.params.mute) {
         let origin = p.region_start_beats(r);
         let end = p.region_end_beats(r);
         for n in r.notes.iter().filter(|n| !n.mute) {
@@ -1508,6 +1504,7 @@ mod tests {
             use crate::model::{Region, RegionParams};
             let score = p.add_track(TrackKind::Instrument);
             p.tracks[score].regions.push(Region {
+                missing: None,
                 name: "Top Line 1".into(),
                 start_bar: 1.0,
                 len_bars: 4.0,
@@ -1562,6 +1559,7 @@ mod tests {
         // A plain audio track under a MIDI track follows it.
         let midi = p.add_track(TrackKind::Instrument);
         p.tracks[midi].regions.push(Region {
+            missing: None,
             name: "guide".into(),
             start_bar: 1.0,
             len_bars: 1.0,
@@ -1641,6 +1639,7 @@ mod tests {
         let bar = p.tracks[score].regions[0].start_bar;
         let path = PathBuf::from("/prowave-tune-picture/take.wav");
         p.tracks[out].regions.push(Region {
+            missing: None,
             name: "take".into(),
             start_bar: bar,
             len_bars: 4.0,

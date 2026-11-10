@@ -334,7 +334,8 @@ impl IComponentHandlerTrait for ComponentHandler {
         kResultOk
     }
     unsafe fn performEdit(&self, id: ParamID, value: ParamValue) -> tresult {
-        self.edit(id, value);
+        // Some plug-ins call this from their process call: the host's code, not theirs.
+        crate::rt_alloc::host_callback(|| self.edit(id, value));
         kResultOk
     }
     unsafe fn endEdit(&self, _id: ParamID) -> tresult {
@@ -531,7 +532,7 @@ impl IEventListTrait for EventList {
     }
     unsafe fn addEvent(&self, e: *mut Event) -> tresult {
         match e.as_ref() {
-            Some(ev) if self.push(*ev) => kResultOk,
+            Some(ev) if crate::rt_alloc::host_callback(|| self.push(*ev)) => kResultOk,
             _ => kResultFalse,
         }
     }
@@ -624,7 +625,7 @@ impl IParamValueQueueTrait for ParamQueue {
         kResultOk
     }
     unsafe fn addPoint(&self, offset: int32, value: ParamValue, index: *mut int32) -> tresult {
-        let i = self.add(offset, value);
+        let i = crate::rt_alloc::host_callback(|| self.add(offset, value));
         if let Some(p) = index.as_mut() {
             *p = i as i32;
         }
@@ -726,7 +727,7 @@ impl IParameterChangesTrait for ParamChanges {
         let Some(id) = id.as_ref() else {
             return std::ptr::null_mut();
         };
-        let Some(i) = self.queue_of(*id) else {
+        let Some(i) = crate::rt_alloc::host_callback(|| self.queue_of(*id)) else {
             return std::ptr::null_mut();
         };
         if let Some(p) = index.as_mut() {

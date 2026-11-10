@@ -109,10 +109,20 @@ pub struct Region {
     pub folder: Option<TakeFolder>,
     /// Set for audio regions backed by a file on disk.
     pub audio: Option<AudioRegion>,
+    /// Set for an audio region whose file could not be read when the project was opened.
+    /// `audio` is then `None`: the region plays nothing, and is saved as it was.
+    pub missing: Option<MissingAudio>,
     /// Region inspector parameters (non-destructive, applied when the song is built).
     pub params: RegionParams,
     /// A Pattern or Drummer region: the settings its `notes` are made from.
     pub generated: Option<Generated>,
+}
+
+impl Region {
+    /// An audio region: one that plays a file, or one whose file is missing.
+    pub fn is_audio(&self) -> bool {
+        self.audio.is_some() || self.missing.is_some()
+    }
 }
 
 /// What makes the notes of a Pattern or Drummer region (see `pattern.rs`).
@@ -322,6 +332,23 @@ impl Default for TrackParams {
             groove: false,
             follow_groove: false,
         }
+    }
+}
+
+/// What is kept of an audio region whose file cannot be read, so that saving the project
+/// writes the region back whole and the region plays again once the file is there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MissingAudio {
+    /// Where the audio is read from: the file that was imported, or the project's own copy.
+    pub source: std::path::PathBuf,
+    /// The region's Flex edit, as the project file has it.
+    pub flex: Option<prowave_project::FlexDoc>,
+}
+
+impl MissingAudio {
+    /// The file's name, or its whole path when it is not one of a project's own copies.
+    pub fn shown(&self) -> String {
+        crate::project_io::shown_media(&self.source)
     }
 }
 
@@ -751,6 +778,7 @@ impl Project {
             pan: 0.0,
             inserts: inserts_from_names(&ins),
             regions: vec![Region {
+                missing: None,
                 name: name.into(),
                 start_bar: 1.0,
                 len_bars: 12.0,
@@ -1285,7 +1313,7 @@ impl Project {
             .collect();
         // The loop now follows the right half.
         left.params.loop_beats = 0.0;
-        if r.audio.is_some() {
+        if r.audio.is_some() || r.missing.is_some() {
             right.params.offset_secs = r.params.offset_secs + secs;
             left.params.fade_out = 0.0;
             right.params.fade_in = 0.0;
@@ -1361,7 +1389,9 @@ impl Project {
             self.region_start_beats(&t.regions[x])
                 .total_cmp(&self.region_start_beats(&t.regions[y]))
         });
-        let plain = |r: &Region| r.folder.is_none() && r.generated.is_none() && !r.params.reverse;
+        let plain = |r: &Region| {
+            r.folder.is_none() && r.generated.is_none() && !r.params.reverse && r.missing.is_none()
+        };
         if !order.iter().all(|&r| plain(&t.regions[r])) {
             return None;
         }
@@ -1669,6 +1699,7 @@ impl Project {
             ("Pattern", Generator::Pattern(PatternParams::melodic()))
         };
         track.regions.push(Region {
+            missing: None,
             name: name.into(),
             start_bar: at_bar.max(1.0),
             len_bars: 4.0,
@@ -2464,6 +2495,7 @@ mod tests {
         let mut t = Track::new("Audio 1", TrackKind::Audio);
         for &(start_bar, len_bars) in spans {
             t.regions.push(Region {
+                missing: None,
                 name: "r".into(),
                 start_bar,
                 len_bars,
@@ -2534,6 +2566,7 @@ mod tests {
         p.tracks.clear();
         let mut t = Track::new("Inst 1", TrackKind::Instrument);
         t.regions.push(Region {
+            missing: None,
             name: "r".into(),
             start_bar: 1.0,
             len_bars: 2.0,

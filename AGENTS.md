@@ -1,132 +1,130 @@
-# AGENTS.md — Multi-Agent Development Protocol for Pro Wave
-This file tells AI coding agents (Claude Code, Codex, Cursor, Jolly) how to work in this repo. If you are an AI agent, read this first.
+# AGENTS.md: how to work in this repository
 
-## 1. Project Intent
-We are building Pro Wave — a complete functional clone of Apple Logic Pro 11 in pure Rust + WASM. Every Logic Pro feature must be cloned: Drummer, Flex Time/Pitch, Sampler, Quick Sampler, Drum Machine Designer, Alchemy-lite, ES2, Vintage B3/Clav/E-Piano, Sculpture, Retro Synth, Ultrabeat, Studio Strings/Horns, Channel EQ, Compressor (6 models), Space Designer, ChromaVerb, Delay Designer, Pedalboard, Amp Designer, Mastering Assistant, Stem Splitter, Live Loops, Smart Tempo, Score Editor, etc. See roadmap.md Section 1 for exhaustive inventory.
+For AI coding agents and people. Every statement here was checked against the code on
+2026-11-09. If you find one that is no longer true, fix this file in the same change.
 
-This is NOT a wrapper around JUCE or Electron. Every agent must respect audio-thread constraints.
+## What this is
 
-## 2. Agent Roles — Each owns a crate, no overlap
+Pro Wave is a digital audio workstation written in Rust. The interface is drawn with egui
+(eframe); audio goes out through cpal, and on macOS through the project's own Core Audio
+stream. The workflow follows Apple's Logic Pro. `ROADMAP.md` is the long-term plan; much of it
+is not built. `README.md` has a status count made from the code (`cargo xtask status`).
 
-| Agent Name | Crate Ownership | Responsibilities | Forbidden | Logic Pro Parity Task |
-| :--- | :--- | :--- | :--- | :--- |
-| **engine-agent** | `prowave-engine` | Lock-free queues, transport, tempo map, audio graph, PDC, disk streaming | No `std::fs`, no alloc in `process()` | Transport, Cycle, Count-in, Varispeed, Low Latency Mode |
-| **dsp-agent** | `prowave-dsp` | All FX: Channel EQ, Linear EQ, Vintage EQs, Compressor models, Space Designer, ChromaVerb, Delay Designer, Pedalboard, Amp Designer, Modulation, Distortion, Imaging, Metering | No UI code, no file I/O | Must match Logic param ranges exactly, A/B null test -60dB |
-| **instruments-agent** | `prowave-instruments` | Sampler, Quick Sampler, DMD, DKD, ES2, Vintage B3/Clav/E-Piano/Mellotron, Sculpture, Retro Synth, Ultrabeat, Alchemy-lite, Studio Strings/Horns | No UI code | Must import SFZ/EXS, must have Mod Matrix |
-| **midi-agent** | `prowave-midi` | Piano Roll logic, Score data, Step Seq, Event List, MIDI Transform, MIDI FX chain (Arp, Chord Trigger, Scripter via Rhai), MPE, MIDI 2.0, Articulation ID | No direct audio buffer access | Quantize, Humanize, Flam, Brush, Time Handles, MIDI Draw |
-| **mixer-agent** | `prowave-mixer` | Summing, busses, Aux, VCA, Groups, Sends on Fader, Automation (Read/Touch/Latch/Write/Trim, Bezier curves) | No UI code | Must implement PDC, 64-bit summing, automation sample-accurate |
-| **plugin-agent** | `prowave-plugin-host` | CLAP primary, VST3, AU, out-of-process sandbox (seccomp/seatbelt/AppContainer), scanner, quarantine | No unsafe without SAFETY comment + miri test | Must survive plugin crash without DAW crash |
-| **ui-agent** | `prowave-ui` | egui widgets: Tracks area, Mixer, Piano Roll, Score Editor, Step Seq Grid, Audio Track Editor, Smart Controls, Library/Patches, Loop Browser, Live Loops Grid, Video Track, Key Commands window, Channel Strip | No audio processing, only Commands via ringbuf | Must follow the Hardware design system (see below), Logic's controls 1:1 in function |
-| **wasm-agent** | `prowave-wasm` | wasm-bindgen, AudioWorkletGlobalScope (128 samples), SharedArrayBuffer + Atomics, OPFS, Web Remote (Logic Remote clone via browser) | No cpal, no native-only deps | Must play 32 tracks in Chrome |
-| **qa-agent** | all | RTL benchmarks, clippy -D warnings, miri, fuzzing (wav, project), drop-out detection, preset compatibility tests vs Logic presets corpus | No feature work | Must verify no alloc on audio thread |
+## The crates
 
-### NEW CRATE: prowave-logicx-import — Logic Pro Official File Support (see LOGICX_FORMAT_SPEC.md)
-- **logicx-agent** (new) owns `prowave-logicx-import`: parse .logicx bundle, ProjectData linear scan (AU triple, GAME, JSON, channel-strip, region), seed synthesis for export, Linux (no AU) vs macOS (AU) handling, lightweight (<50MB binary, <150MB RAM)
-
-### How to Spawn (Claude Code / Jolly)
-```
-@engine-agent Implement Transport { sample_rate, tempo_map: TempoMap { events: Vec<TempoEvent> }, position } with sample-accurate clock
-@dsp-agent Implement Channel EQ with 8 bands, Q 0.1-10, Freq 20-20000, Gain -30/+30, with FFT analyzer using rustfft
-@instruments-agent Implement Sampler with Zones { key range, vel range, root note }, Groups, Round Robin, Mod Matrix
-```
-
-## 3. Repo Conventions
-
-### Mandatory Checks Before PR (Claude must run)
-```bash
-cargo xtask check # runs:
-# - cargo fmt --check
-# - cargo clippy -- -D warnings
-# - cargo test --workspace -- --nocapture
-# - cargo miri test -p prowave-engine -p prowave-dsp -p prowave-instruments (for unsafe blocks)
-# - cargo deny check advisories bans licenses sources
-# - cargo test -p prowave-dsp --test preset_compat -- --nocapture (compare vs Logic presets)
-# - wasm-agent: wasm-pack test --node
-```
-
-### Coding Standards for Agents
-
-1.  **Audio Thread Rules (engine, dsp, instruments):**
-    ```rust
-    // GOOD - no alloc
-    fn process(&mut self, inputs: &[&[f32]], outputs: &mut [&mut [f32]]) {
-        for (i, o) in inputs[0].iter().zip(outputs[0].iter_mut()) { *o = *i * self.gain; }
-    }
-    // BAD - will be rejected by CI
-    fn process(&mut self) {
-        let v = Vec::new(); // ALLOC!
-        println!("debug"); // SYSCALL!
-        self.mutex.lock();
-    }
-    ```
-    Use `#[cfg(debug_assertions)]` + `assert_no_alloc` crate.
-
-2.  **Command Pattern (All agents):** UI never mutates engine directly.
-    ```rust
-    enum Command {
-        SetVolume { track_id: TrackId, db: f32 },
-        SetChannelEqBand { track_id: TrackId, band: u8, freq: f32, gain: f32, q: f32 },
-        AddRegion { track_id: TrackId, region: Region },
-        SetFlexMode { region_id: RegionId, mode: FlexMode },
-    }
-    // Send via rtrb::Producer<Command>
-    ```
-
-3.  **No Panics in Engine:** `#![forbid(clippy::unwrap_used, clippy::expect_used)]`. Use `Option`/`Result` + `tracing::error!`
-
-4.  **Logic Pro Parity:** Any param must match Logic's range exactly. Example: Compressor Threshold -50.0 to 0.0 dB, Ratio 1.0 to 20.0, Attack 0.1ms to 200ms. Check Logic Pro manual.
-
-5.  **WASM Parity:** Any new DSP feature in `prowave-dsp` must have a `wasm32` CI test. `cargo xtask wasm-check`.
-
-### File Naming
-- DSP nodes: `channel_eq.rs` -> struct `ChannelEq` implements `DspNode { fn process(), fn latency(), fn reset() }`
-- Instruments: `sampler.rs` -> struct `Sampler` implements `Instrument`
-- UI widgets: `mixer_fader.rs` -> fn `mixer_fader(ui: &mut Ui, state: &mut FaderState)`
-- No `utils.rs` - name it what it does: `latency_compensation.rs`, `tempo_map.rs`, `flex_pitch_detector.rs`
-
-## 4. Task Coordination
-
-**Single Source of Truth:** `roadmap.md` Phase. Agents pick tasks only from current phase. Do not skip phases.
-
-**Communication:**
-- Use `// AGENT: @dsp-agent needs smoothing param from @engine-agent` in code comments
-- No direct cross-crate mutable state. Use events: `EventBus<MeteringEvent>`
-
-**PR Template for Agents:**
-```markdown
-Agent: dsp-agent
-Crate: prowave-dsp
-Phase: 4
-Logic Parity: Channel EQ with 8 bands, matches Logic param ranges
-Changes: Implements Channel EQ with FFT analyzer
-Audio Thread Safe: yes (checked with cargo xtask rt-check)
-WASM Build: yes (cargo check --target wasm32-unknown-unknown)
-Test: cargo test -p prowave-dsp channel_eq -- --nocapture, preset_compat
-```
-
-## 5. Secrets & API Keys
-No secrets. If you need signing cert for macOS, ask human. Never commit `.p12`, `.env`.
+| Path | What it is | Main files |
+| :--- | :--- | :--- |
+| `crates/prowave-engine` | The real-time engine and everything that makes or changes sound. | `core.rs` (`EngineCore::process`, the `Command` enum), `output.rs` (cpal stream, the command sender), `duplex.rs` (macOS input and output in one callback), `wasapi.rs` (Windows output), `disk.rs` and `mapped.rs` (audio files streamed from disk), `capture.rs` (recording), `fx.rs`, `convolver.rs` and `native_fx/` (effects), `routing.rs` (sends, buses, automation), `synth.rs`, `soundfont.rs`, `sample_rack.rs` (instruments), `plugin_track.rs`, `au.rs`, `vst3.rs`, `plugin_handle.rs` (plug-in hosting, macOS), `prerender.rs` (playback threads), `tempo_map.rs`, `triple.rs` (lock-free state for the interface), `flex.rs`, `analysis.rs`, `note_render.rs` (offline audio work) |
+| `crates/prowave-app` | The desktop program (binary `prowave`): every window, menu and editor. | `main.rs`, `model.rs` (the project in memory), `engine_sync.rs` (turns the project into engine commands), `project_io.rs` (open and save), `menus.rs`, `file_commands.rs`, `tracks_area.rs`, `mixer.rs`, `piano_roll.rs`, `transport.rs`, `plugins.rs` and `vst3_scan.rs` (plug-in lists, scan, crash list), `theme.rs` and `hw.rs` (the look), `i18n.rs` and `locales/` (translations) |
+| `crates/prowave-project` | The `.prowave` file format: a zip with `project.json` and `media/`. | `lib.rs` |
+| `xtask` | The checks, run as `cargo xtask <task>`. | `main.rs`, `bench.rs`, `status.rs` |
 
 
-## 6. LLM-Specific Instructions for Claude
+There are no other crates. Earlier versions of this file named `prowave-dsp`,
+`prowave-instruments`, `prowave-midi`, `prowave-mixer`, `prowave-plugin-host`, `prowave-ui`,
+`prowave-wasm` and `prowave-logicx-import`, and the traits `DspNode`, `Instrument` and
+`EventBus`. None of them exist. `LOGICX-FORMAT-SPEC.md` is a document only: no code reads or
+writes Logic projects.
 
-- **Claude Code:** You have plan mode. Always read `roadmap.md` Section 1 before implementing. Always run `cargo xtask check` after editing 2 files. Keep diffs <300 lines. One crate per PR.
-- **For Cursor / Copilot:** Use `@codebase` to find `AudioGraph`. Do not invent JUCE classes. Use `fundsp`, `symphonia`, `nih-plug` crates.
-- **For Codex:** Keep diffs <300 lines. One crate per PR. Use `prowave-` prefix always.
-- **For Jolly:** This is a Rust workspace, not Node. Use `container.python_execution` only for scripts, not engine.
+## What does not exist
 
-## 7. Definition of Done for an Agent Task
-1. Code compiles for `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `wasm32-unknown-unknown`
-2. No new clippy warnings
-3. Unit test + 1 integration test (e.g., process 1 second of silence, check no NaN/Inf) + preset compat test if applicable
-4. Documentation comment on public API explaining Logic Pro equivalent
-5. Update `roadmap.md` checkbox if phase task completed
+Do not assume any of these:
 
-## 8. Emergency Stop
-If plugin sandbox crashes >3 times on scan, @plugin-agent must quarantine plugin and log to `quarantine.json` - never infinite loop scan. If audio thread xrun >10 times per minute, @qa-agent must open issue.
+- **No plug-in sandbox.** Audio Units and VST3 plug-ins run inside the program (macOS only;
+  there is no plug-in hosting on Windows or Linux). A plug-in that crashes takes Pro Wave with
+  it. Two things limit the damage: each `.vst3` bundle is scanned in a helper process with a
+  30-second limit (`vst3_scan.rs`), and a plug-in that crashed the program while opening is not
+  opened automatically again (`plugins.rs`, "crash quarantine").
+- **No CLAP hosting.**
+- **No bounce, mixdown or audio export of a project.** The Bounce and Export menu entries are
+  listed in `menus.rs` but are not enabled.
+- **No autosave, and no "save changes?" question when the program quits.** New, Open and Close
+  Project do ask.
+- **No fuzzing.**
+- **No browser version.** The only wasm work is a build check of the engine (see below).
+- **No preset-compatibility tests** against Logic presets.
 
----
-> TL;DR for agents: You are building Pro Wave, a complete Logic Pro clone in Rust + WASM. Audio thread is real-time, no alloc. UI is egui + wgpu. Everything is Rust. If you allocate on audio thread, you break music. Check roadmap.md Section 1 for exact Logic features to clone.
+## Audio-thread rules
+
+The audio callback (`EngineCore::process` in `core.rs` and what it calls) must not allocate or
+free memory, take a lock, make a system call that can block (files, printing, logging) or
+panic.
+
+How this is enforced:
+
+- **Allocation:** the callback runs inside `assert_no_alloc` (see `output.rs`). Debug builds
+  and tests abort if it allocates or frees; see `output.rs` for what a release build does.
+  Tests named `*does_not_allocate` cover single paths; `cargo xtask rt-check` runs them.
+- **Panics:** `prowave-engine` has `#![deny(clippy::unwrap_used, clippy::expect_used)]`
+  (`lib.rs`), so `unwrap` and `expect` fail clippy there. The other crates do not have it.
+  Release builds use `panic = "abort"`.
+- **Locks and system calls:** convention, not enforced. Review your own change.
+
+File access in the engine is allowed, but only off the audio thread: `disk.rs`, `mapped.rs`
+and `capture.rs` run their own threads and pass audio through lock-free rings. Plug-ins on
+tracks that are not being played live run on separate real-time playback threads
+(`prerender.rs`).
+
+## How the interface talks to the engine
+
+- **Commands:** the interface sends `Command` values (`core.rs`) through an `rtrb` queue; the
+  audio thread takes them off the queue (`drain_commands`). Memory the audio thread no longer needs
+  goes back through a second queue (`Garbage`) and is freed on the interface's side.
+- **State back:** the audio thread publishes one `EngineState` per block through the triple
+  buffer (`triple.rs`); a few values are atomics.
+- **The exception:** a running plug-in's settings, presets, parameters and window are reached
+  directly from the interface thread through `plugin_handle.rs` (`PluginHandle::state`,
+  `set_state` and the rest), not through `Command`.
+
+## Checks
+
+`cargo xtask check` runs, in this order, and fails if any step fails:
+
+1. `cargo fmt --all --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo test --workspace -- --nocapture`
+4. rt-check: `cargo test --workspace -- does_not_allocate --nocapture`
+5. miri: `cargo +nightly miri test -p prowave-engine --lib triple` (the triple buffer's tests
+   only; no other code runs under miri)
+6. `cargo deny check advisories bans licenses sources` (the check fails if cargo-deny is not
+   installed)
+7. wasm-check: `cargo check -p prowave-engine --target wasm32-unknown-unknown` (a build check;
+   no test runs on wasm)
+
+
+Other tasks:
+
+- `cargo xtask rt-check`, `cargo xtask wasm-check`: steps 4 and 7 alone.
+- `cargo xtask status`: counts the enabled menu entries and the `ROADMAP.md` checkboxes, and
+  rewrites the status block in `README.md` and `docs/status.svg`. Commit both.
+- `cargo xtask bench`: builds the release program, starts it (it opens a window) and compares
+  start-up time, memory, binary size and DSP load with `LINUX-MACOS-LIGHTWEIGHT.md`.
+
+Tests that need something a clean machine does not have are marked `#[ignore = "reason"]` and
+run with `-- --ignored`: picture tests, the 1000-stream disk test, tests that need a SoundFont
+file (`PROWAVE_TEST_SF2`). A test must not return early and pass when its input is missing.
+
+`.github/workflows/ci.yml` runs `cargo xtask check` on Linux, Windows and macOS, the bench, the
+wasm check and release builds on every push to `main` and on pull requests.
+
+
+## Rules for a change
+
+- **New interface text:** every text passed to `tr("…")` or `trf("…")`, and every menu label,
+  needs a line `English text = translation` in all 16 files of
+  `crates/prowave-app/locales/`. The test `i18n::tests::every_language_translates_every_text`
+  fails on a missing line, on a line no text uses, and on a different number of `{}`.
+- **wasm:** `capture.rs` is not built for `wasm32`. Engine code that uses `crate::capture`
+  must be under `#[cfg(not(target_arch = "wasm32"))]`, or wasm-check fails. The same goes for
+  anything that needs threads, files or a native library.
+- **`unsafe`:** write a `// SAFETY:` comment saying why it is sound. Convention, not enforced.
+- **Naming:** a file is named for what it does (`tempo_map.rs`, `gain_smoothing.rs`), not
+  `utils.rs`. Convention, not enforced.
+- **Commits:** small, one subject each, with a message that says what changed and why. There is
+  no enforced limit on the size of a change or on how many crates it touches.
+- **Dependencies:** `cargo deny` checks licences and advisories (`deny.toml`). The project is
+  GPL-3.0-or-later.
+- **Secrets:** none in the repository. Never commit certificates, keys or `.env` files.
 
 ## UI design system: Hardware (PW-1)
 

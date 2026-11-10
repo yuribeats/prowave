@@ -80,6 +80,25 @@ pub fn content(p: &Project) -> ProjectDoc {
     doc
 }
 
+/// Whether the project has changes that are not in its file: what every "save changes?"
+/// question asks (New, Open, Open Recent, Close, Revert, the updater; a prompt on Quit would
+/// ask it too). The project's own data is compared with what was last saved or opened, and the
+/// running plug-ins are asked whether their settings changed, because a knob turned in a
+/// plug-in's window changes nothing in the project until its settings are read.
+pub fn unsaved(p: &Project, saved: &ProjectDoc, plugins: &crate::plugins::PluginHost) -> bool {
+    content(p) != *saved || plugins.settings_changed()
+}
+
+/// [`unsaved`] for a caller that asks every frame (the updater's window): reading a big
+/// plug-in's settings takes milliseconds, so the plug-ins are asked at most twice a second.
+pub fn unsaved_polled(
+    p: &Project,
+    saved: &ProjectDoc,
+    plugins: &crate::plugins::PluginHost,
+) -> bool {
+    content(p) != *saved || plugins.settings_changed_polled()
+}
+
 fn dialog() -> FileDialog {
     FileDialog::new().add_filter(tr("Pro Wave Project"), &[prowave_project::EXTENSION])
 }
@@ -106,12 +125,17 @@ impl App {
         );
         if cmd == FileCmd::Revert {
             self.request_revert();
-        } else if discards && content(&self.project) != self.saved {
+        } else if discards && self.has_unsaved_changes() {
             self.ui.ask_save = Some(cmd);
         } else {
             self.do_file_cmd(cmd, ctx);
         }
         ctx.request_repaint();
+    }
+
+    /// [`unsaved`] for this window's project.
+    pub fn has_unsaved_changes(&self) -> bool {
+        unsaved(&self.project, &self.saved, &self.plugins)
     }
 
     fn do_file_cmd(&mut self, cmd: FileCmd, ctx: &egui::Context) {
@@ -235,7 +259,7 @@ impl App {
         if self.path.is_none() {
             self.ui.status =
                 Some(tr("nothing to revert to: the project has not been saved yet").into());
-        } else if content(&self.project) == self.saved {
+        } else if !self.has_unsaved_changes() {
             self.ui.status = Some(tr("no unsaved changes to revert").into());
         } else {
             self.ui.ask_revert = true;
@@ -258,6 +282,7 @@ impl App {
                 if !warnings.is_empty() {
                     self.ui.status = Some(trf("missing media: {}", &[&warnings.join(", ")]));
                 }
+                self.ui.missing_audio = warnings;
             }
             Err(e) => {
                 self.ui.recent.remove(path);
@@ -303,9 +328,10 @@ impl App {
     /// state and Open Recent stay as they were.
     pub fn save_copy_to(&mut self, path: &Path) -> bool {
         self.plugins.save_states(&mut self.project);
-        match project_io::save_project(&self.project, path) {
-            Ok(path) => {
+        match project_io::write_project(&self.project, path, false) {
+            Ok(project_io::Saved { path, missing }) => {
                 self.ui.status = Some(trf("saved a copy: {}", &[&path.display()]));
+                self.report_missing(&missing);
                 true
             }
             Err(e) => {
@@ -317,8 +343,8 @@ impl App {
 
     pub fn save_to(&mut self, path: &Path) -> bool {
         self.plugins.save_states(&mut self.project);
-        match project_io::save_project(&self.project, path) {
-            Ok(path) => {
+        match project_io::write_project(&self.project, path, true) {
+            Ok(project_io::Saved { path, missing }) => {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     self.project.name = stem.to_string();
                 }
@@ -326,12 +352,57 @@ impl App {
                 self.path = Some(path);
                 self.saved = content(&self.project);
                 self.ui.status = None;
+                self.report_missing(&missing);
                 true
             }
             Err(e) => {
                 self.ui.status = Some(trf("cannot save {}: {}", &[&path.display(), &e]));
                 false
             }
+        }
+    }
+
+    /// After a save: the media files that could not be read and are not in the saved file are
+    /// listed in a window (and the status line), by name or path.
+    fn report_missing(&mut self, missing: &[PathBuf]) {
+        if missing.is_empty() {
+            return;
+        }
+        let names: Vec<String> = missing.iter().map(|m| project_io::shown_media(m)).collect();
+        self.ui.status = Some(trf("missing media: {}", &[&names.join(", ")]));
+        self.ui.missing_audio = names;
+    }
+
+    /// The window that lists audio files that could not be read (after opening or saving a
+    /// project), until it is closed. Drawn like the save prompt.
+    pub fn show_missing_audio(&mut self, ctx: &egui::Context) {
+        if self.ui.missing_audio.is_empty() {
+            return;
+        }
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::unique(("file", "missing_audio"))).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.heading(crate::APP_NAME);
+            ui.add_space(6.0);
+            ui.label(tr("These audio files are missing:"));
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for name in &self.ui.missing_audio {
+                        ui.label(name);
+                    }
+                });
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(tr("OK")).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || modal.should_close() {
+            self.ui.missing_audio.clear();
+            ctx.request_repaint();
         }
     }
 
@@ -377,6 +448,115 @@ mod tests {
             chase: crate::mtc_in::Chase::default(),
             updater: crate::updater::Updater::new(),
         }
+    }
+
+    #[test]
+    fn a_knob_turned_in_a_plugin_is_an_unsaved_change_for_every_command_that_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut a = app();
+        let (p, host, history, _sink, uid) = crate::plugins::tests::project_with_fake(b"saved");
+        (a.project, a.plugins, a.history) = (p, host, history);
+        assert!(a.save_to(&dir.path().join("Song")));
+        let file = dir.path().join("Song.prowave");
+        assert!(!a.has_unsaved_changes());
+        a.run_file_cmd(FileCmd::Revert, &ctx);
+        assert!(!a.ui.ask_revert, "nothing to revert");
+
+        // Only a knob in the plug-in's own window: the project's data is as saved.
+        a.plugins.fake(uid).unwrap().turn_knob(b"turned");
+        assert_eq!(content(&a.project), a.saved);
+        assert!(a.has_unsaved_changes());
+        assert!(unsaved(&a.project, &a.saved, &a.plugins));
+        let tracks = a.project.tracks.len();
+        for cmd in [
+            FileCmd::New,
+            FileCmd::Close,
+            FileCmd::Open,
+            FileCmd::OpenRecent,
+            FileCmd::NewFrom(Template::ALL[0]),
+        ] {
+            a.ui.ask_save = None;
+            a.ui.recent_pick = Some(file.clone());
+            a.run_file_cmd(cmd, &ctx);
+            assert_eq!(a.ui.ask_save, Some(cmd), "{cmd:?} asks first");
+            assert_eq!(
+                a.project.tracks.len(),
+                tracks,
+                "not replaced until answered"
+            );
+        }
+        a.ui.ask_save = None;
+        a.run_file_cmd(FileCmd::Revert, &ctx);
+        assert!(a.ui.ask_revert, "Revert has something to throw away");
+
+        // Save reads the settings: they are in the file, and nothing is unsaved.
+        assert!(a.save_to(&file));
+        assert!(!a.has_unsaved_changes());
+        let (opened, _) = project_io::open_project(&file, &ctx).unwrap();
+        let slot = opened
+            .tracks
+            .last()
+            .unwrap()
+            .au_instrument
+            .as_ref()
+            .unwrap();
+        assert_eq!(slot.state.as_deref(), Some(&b"turned"[..]));
+    }
+
+    #[test]
+    fn a_save_with_a_missing_audio_file_succeeds_and_lists_the_file_in_a_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let wav = dir.path().join("from-usb.wav");
+        project_io::tests::write_wav(&wav);
+        let mut a = app();
+        crate::import::import_audio(&mut a.project, &wav, &ctx).unwrap();
+        let regions = |a: &App| a.project.tracks.last().unwrap().regions.len();
+        std::fs::remove_file(&wav).unwrap();
+
+        // Save, Save As and Save A Copy all go through, and each names the file.
+        for copy in [false, true, false] {
+            a.ui.missing_audio.clear();
+            let to = dir.path().join(if copy { "Copy" } else { "Song" });
+            let done = if copy {
+                a.save_copy_to(&to)
+            } else {
+                a.save_to(&to)
+            };
+            assert!(done, "the save is not stopped");
+            assert_eq!(a.ui.missing_audio, vec![wav.display().to_string()]);
+            assert_eq!(regions(&a), 1);
+        }
+        assert_eq!(content(&a.project), a.saved, "saved: nothing left unsaved");
+
+        // The window stays until it is closed (nobody clicks here).
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            a.show_missing_audio(ui.ctx())
+        });
+        out.textures_delta.clear();
+        assert_eq!(a.ui.missing_audio.len(), 1);
+
+        // Opened again: the region is there, the window names the file again, and the
+        // project is not "changed" by it; saving keeps the region.
+        a.ui.missing_audio.clear();
+        let file = dir.path().join("Song.prowave");
+        a.open(&file, &ctx);
+        assert_eq!(a.ui.missing_audio, vec![wav.display().to_string()]);
+        assert_eq!(regions(&a), 1);
+        assert!(a.project.tracks.last().unwrap().regions[0]
+            .missing
+            .is_some());
+        assert!(!a.has_unsaved_changes());
+        assert!(a.save_to(&file));
+        a.open(&file, &ctx);
+        assert_eq!(regions(&a), 1);
+
+        // The file is back: no window, and the region plays.
+        project_io::tests::write_wav(&wav);
+        a.open(&file, &ctx);
+        assert!(a.ui.missing_audio.is_empty());
+        assert!(a.project.tracks.last().unwrap().regions[0].audio.is_some());
     }
 
     #[test]

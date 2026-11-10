@@ -406,10 +406,74 @@ pub fn slot_name(p: &Project, track: usize, slot: u8) -> String {
     }
 }
 
+/// Where the host sends a track's plug-ins: the engine (a stand-in in tests, which have no
+/// audio device).
+pub trait PluginSink {
+    fn sample_rate(&self) -> u32;
+    /// False when the command could not be queued (it is tried again next frame).
+    fn send(&mut self, cmd: prowave_engine::Command) -> bool;
+    /// Whether a plug-in command sent now would be taken. A refused command is freed with
+    /// its plug-ins, so none is opened for one.
+    fn can_replace_state(&mut self) -> bool;
+}
+
+impl PluginSink for prowave_engine::Engine {
+    fn sample_rate(&self) -> u32 {
+        prowave_engine::Engine::sample_rate(self)
+    }
+    fn send(&mut self, cmd: prowave_engine::Command) -> bool {
+        prowave_engine::Engine::send(self, cmd)
+    }
+    fn can_replace_state(&mut self) -> bool {
+        prowave_engine::Engine::can_replace_state(self)
+    }
+}
+
+/// Every plug-in slot of the project: the tracks' instruments and Audio FX, and the Stereo
+/// Out's.
+pub fn slots_mut(p: &mut Project) -> impl Iterator<Item = &mut PluginSlot> {
+    p.tracks
+        .iter_mut()
+        .flat_map(|t| t.au_instrument.iter_mut().chain(t.au_effects.iter_mut()))
+        .chain(p.master_au_effects.iter_mut())
+}
+
+/// How often a caller that asks every frame has the plug-ins' settings read.
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// [`PluginHost::sync`], and the settings of the instances it took away are put into the Undo
+/// steps that hold their slots: undoing a deleted track or a removed plug-in brings the plug-in
+/// back as the user last had it, not as it was last saved.
+pub fn sync_with_history(
+    host: &mut PluginHost,
+    p: &mut Project,
+    history: &mut crate::undo::History,
+    engine: &mut impl PluginSink,
+    max_frames: usize,
+) -> Vec<String> {
+    let failed = host.sync(p, engine, max_frames);
+    let retired = std::mem::take(&mut host.retired);
+    if !retired.is_empty() {
+        history.keep_plugin_settings(&retired);
+    }
+    failed
+}
+
 #[derive(Default)]
 pub struct PluginHost {
     /// Per engine track: the key last sent.
     sent: Vec<Vec<u64>>,
+    /// By slot uid: the settings each running plug-in had when they were last the same as its
+    /// slot's in the project (it was opened with them, or they were read into the project).
+    /// Settings that differ from these were changed in the plug-in since.
+    read: std::collections::HashMap<u64, Vec<u8>>,
+    /// The last settings of the instances taken away since [`sync_with_history`] last looked.
+    retired: Vec<(u64, Vec<u8>)>,
+    /// When [`PluginHost::settings_changed_polled`] last read the settings, and its answer.
+    polled: std::cell::Cell<Option<(std::time::Instant, bool)>>,
+    /// Stand-ins for running plug-ins, by slot uid.
+    #[cfg(test)]
+    fakes: std::collections::HashMap<u64, tests::FakePlugin>,
     #[cfg(target_os = "macos")]
     handles: std::collections::HashMap<u64, prowave_engine::plugin_handle::PluginHandle>,
     #[cfg(target_os = "macos")]
@@ -432,9 +496,59 @@ pub struct PluginHost {
     master_sent: Vec<u64>,
     master_latency: Vec<f64>,
     master_off_sent: Option<u64>,
+    /// The plug-ins opened for the command being made. They are reachable (`handles`,
+    /// `watches`, `params`) only once the engine has taken the command: a refused command is
+    /// freed with its plug-ins, and nothing here may point at them then.
+    #[cfg(target_os = "macos")]
+    opened: Vec<Opened>,
+    /// A change is waiting for the engine to have room for it: try again next frame.
+    waiting: bool,
+    /// Tracks (and the Stereo Out) whose old instances are retired here while the engine has
+    /// not taken the command that replaces them yet. They are not retired a second time: a
+    /// slot they held may run a new instance on another track by then.
+    retired_tracks: std::collections::HashSet<usize>,
+    master_retired: bool,
+}
+
+/// A plug-in just opened, not yet the engine's.
+#[cfg(target_os = "macos")]
+struct Opened {
+    uid: u64,
+    handle: prowave_engine::plugin_handle::PluginHandle,
+    params: Vec<crate::automation::AuParamInfo>,
 }
 
 impl PluginHost {
+    /// The engine took the command: the plug-ins opened for it can be reached from now on.
+    /// An Audio Unit's window is watched from here on too (the watch must go before its unit,
+    /// so there is none while the unit could still be freed with a refused command).
+    fn register_opened(&mut self) {
+        #[cfg(target_os = "macos")]
+        for o in std::mem::take(&mut self.opened) {
+            if let prowave_engine::plugin_handle::PluginHandle::Au(h) = &o.handle {
+                let ids: Vec<u32> = o.params.iter().map(|a| a.id).collect();
+                if let Some(w) = prowave_engine::au::AuParamWatch::new(*h, &ids) {
+                    self.watches.insert(o.uid, w);
+                }
+            }
+            self.params.insert(o.uid, o.params);
+            self.handles.insert(o.uid, o.handle);
+        }
+    }
+
+    /// The plug-ins opened for a command are not the engine's (it refused the command and
+    /// they are gone, or they were opened for something else): nothing here points at them.
+    fn forget_opened(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.opened.clear();
+    }
+
+    /// Whether a change could not be sent yet (the engine had no room): [`PluginHost::sync`]
+    /// sends it when called again.
+    pub fn needs_retry(&self) -> bool {
+        self.waiting
+    }
+
     /// Puts the parameters of the running Audio Units where the automation choosers find them.
     pub fn list_parameters(&self, au: &mut crate::automation::AuParams) {
         if au.0.len() != self.params.len() || self.params.keys().any(|k| !au.0.contains_key(k)) {
@@ -554,23 +668,101 @@ impl PluginHost {
         }
     }
 
-    /// Reads every running plug-in's settings into the project, before it is saved.
-    pub fn save_states(&self, p: &mut Project) {
+    /// The settings of the running plug-in in slot `uid`, as it has them now. UI thread (a big
+    /// plug-in can take milliseconds).
+    fn live_state(&self, uid: u64) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        if let Some(f) = self.fakes.get(&uid) {
+            return Some(f.state());
+        }
         #[cfg(target_os = "macos")]
-        for slot in p
-            .tracks
-            .iter_mut()
-            .flat_map(|t| t.au_instrument.iter_mut().chain(t.au_effects.iter_mut()))
-            .chain(p.master_au_effects.iter_mut())
         {
-            if let Some(h) = self.handles.get(&slot.uid) {
-                if let Some(state) = h.state() {
-                    slot.state = Some(state);
-                }
-            }
+            self.handles.get(&uid).and_then(|h| h.state())
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = p;
+        {
+            let _ = uid;
+            None
+        }
+    }
+
+    /// Reads every running plug-in's settings into the project, before it is saved.
+    pub fn save_states(&mut self, p: &mut Project) {
+        self.pull_states(p);
+    }
+
+    /// [`PluginHost::save_states`]; returns the slots whose settings were read.
+    fn pull_states(&mut self, p: &mut Project) -> Vec<u64> {
+        let mut pulled = Vec::new();
+        for slot in slots_mut(p) {
+            if let Some(state) = self.live_state(slot.uid) {
+                self.read.insert(slot.uid, state.clone());
+                slot.state = Some(state);
+                pulled.push(slot.uid);
+            }
+        }
+        self.polled.set(None);
+        pulled
+    }
+
+    /// Whether a running plug-in's settings were changed in the plug-in (its window, a preset,
+    /// anything it keeps) since they were last the same as the project's. The settings are
+    /// read from every running plug-in now: this is for the moment the question is asked, not
+    /// for every frame.
+    pub fn settings_changed(&self) -> bool {
+        self.read
+            .iter()
+            .any(|(uid, was)| self.live_state(*uid).is_some_and(|now| now != *was))
+    }
+
+    /// [`PluginHost::settings_changed`] for a caller that asks every frame: the settings are
+    /// read at most twice a second.
+    pub fn settings_changed_polled(&self) -> bool {
+        if let Some((at, answer)) = self.polled.get() {
+            if at.elapsed() < POLL_EVERY {
+                return answer;
+            }
+        }
+        let answer = self.settings_changed();
+        self.polled.set(Some((std::time::Instant::now(), answer)));
+        answer
+    }
+
+    /// The instances in slots `gone` go away: their settings as they are now are kept for
+    /// [`sync_with_history`] (`pulled`: the slots [`PluginHost::pull_states`] has just read),
+    /// and their handles, windows and parameter lists are dropped.
+    fn retire(&mut self, gone: &[u64], pulled: &[u64]) {
+        for uid in gone {
+            let state = if pulled.contains(uid) {
+                self.read.get(uid).cloned()
+            } else {
+                self.live_state(*uid)
+            };
+            if let Some(state) = state {
+                self.retired.push((*uid, state));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                self.windows.remove(uid);
+                // The watch goes before its unit (the engine frees that later).
+                self.watches.remove(uid);
+                self.handles.remove(uid);
+            }
+            #[cfg(test)]
+            self.fakes.remove(uid);
+            self.params.remove(uid);
+            self.read.remove(uid);
+        }
+    }
+
+    /// The settings the plug-ins in `opened` start with are the project's.
+    fn note_opened(&mut self, opened: &[u64]) {
+        for uid in opened {
+            if let Some(state) = self.live_state(*uid) {
+                self.read.insert(*uid, state);
+            }
+        }
+        self.polled.set(None);
     }
 
     /// Once a frame: closed windows are forgotten (with their unit, when it shows the
@@ -741,7 +933,7 @@ impl PluginHost {
     pub fn sync(
         &mut self,
         p: &mut Project,
-        engine: &mut prowave_engine::Engine,
+        engine: &mut impl PluginSink,
         max_frames: usize,
     ) -> Vec<String> {
         let mut failed = Vec::new();
@@ -750,33 +942,64 @@ impl PluginHost {
         self.sent.resize(len, Vec::new());
         self.latency.resize(len, 0.0);
         self.shape.resize(len, (false, false));
-        for i in 0..len {
-            let key = if i < n { key_of(p, i) } else { Vec::new() };
-            if key == self.sent[i] {
+        let keys: Vec<Vec<u64>> = (0..len)
+            .map(|i| if i < n { key_of(p, i) } else { Vec::new() })
+            .collect();
+        // A track whose old instances are retired already is sent whatever its key is now
+        // (an Undo may have put the old key back: its plug-ins are opened again).
+        let changed: Vec<usize> = (0..len)
+            .filter(|&i| keys[i] != self.sent[i] || self.retired_tracks.contains(&i))
+            .collect();
+        let master = master_key(p);
+        let master_changed = master != self.master_sent || self.master_retired;
+        self.waiting = false;
+        if changed.is_empty() && !master_changed {
+            return failed;
+        }
+        // No room in the engine now: nothing is closed or opened for a command it would
+        // refuse (and free, plug-ins and all). The same change is found next frame.
+        if !engine.can_replace_state() {
+            self.waiting = true;
+            return failed;
+        }
+        // The settings of the instances that go away are kept: in the project for the slots
+        // still in it, and for Undo for all of them. Every changed track's old instances go
+        // before any new one is opened, so a plug-in that moved to another track (one above
+        // it was deleted) keeps the handle of its new instance. Each goes once: a track still
+        // waiting for room next frame is not retired again.
+        let pulled = self.pull_states(p);
+        let mut gone: Vec<u64> = Vec::new();
+        for &i in &changed {
+            if self.retired_tracks.insert(i) {
+                gone.extend(self.sent[i].iter().copied());
+            }
+        }
+        if master_changed && !self.master_retired {
+            self.master_retired = true;
+            gone.extend(self.master_sent.iter().copied());
+        }
+        self.retire(&gone, &pulled);
+        for (i, key) in keys.into_iter().enumerate() {
+            if !changed.contains(&i) {
                 continue;
             }
-            // The settings of the instances that go away are kept in the project.
-            self.save_states(p);
-            #[cfg(target_os = "macos")]
-            for uid in &self.sent[i] {
-                self.windows.remove(uid);
-                // The watch goes before its unit (the engine frees that later).
-                self.watches.remove(uid);
-                self.handles.remove(uid);
-            }
-            for uid in &self.sent[i] {
-                self.params.remove(uid);
+            // Nothing is opened for a command the engine would refuse: the rest waits.
+            if !engine.can_replace_state() {
+                self.waiting = true;
+                break;
             }
             let plugins = if key.is_empty() {
                 None
             } else {
-                Some(Box::new(self.open_track(
-                    p,
-                    i,
-                    engine.sample_rate(),
-                    max_frames,
-                    &mut failed,
-                )))
+                #[cfg(test)]
+                let fake = self.open_fake_track(p, i, max_frames);
+                #[cfg(not(test))]
+                let fake = None;
+                let track = match fake {
+                    Some(track) => track,
+                    None => self.open_track(p, i, engine.sample_rate(), max_frames, &mut failed),
+                };
+                Some(Box::new(track))
             };
             self.latency[i] = plugins.as_ref().map_or(0.0, |t| t.latency_seconds());
             self.shape[i] = plugins
@@ -786,54 +1009,57 @@ impl PluginHost {
                 track: i as u16,
                 plugins,
             }) {
+                self.retired_tracks.remove(&i);
+                self.register_opened();
+                // Read once the plug-ins can be reached: they start with the project's settings.
+                self.note_opened(&key);
                 self.sent[i] = key;
+            } else {
+                self.forget_opened();
+                self.waiting = true;
             }
         }
-        self.sync_master(p, engine, max_frames, &mut failed);
+        if master_changed {
+            self.sync_master(p, master, engine, max_frames, &mut failed);
+        }
         failed
     }
 
     /// The Stereo Out's plug-ins, as a track's: new instances, with their settings, whenever
-    /// the ones that are not bypassed change.
+    /// the ones that are not bypassed change (`key`; the old instances are retired already).
     fn sync_master(
         &mut self,
         p: &mut Project,
-        engine: &mut prowave_engine::Engine,
+        key: Vec<u64>,
+        engine: &mut impl PluginSink,
         max_frames: usize,
         failed: &mut Vec<String>,
     ) {
-        let key = master_key(p);
-        if key == self.master_sent {
+        // As for a track: nothing is opened for a command the engine would refuse.
+        if !engine.can_replace_state() {
+            self.waiting = true;
             return;
-        }
-        self.save_states(p);
-        #[cfg(target_os = "macos")]
-        for uid in &self.master_sent {
-            self.windows.remove(uid);
-            self.watches.remove(uid);
-            self.handles.remove(uid);
-        }
-        for uid in &self.master_sent {
-            self.params.remove(uid);
         }
         let plugins = if key.is_empty() {
             None
         } else {
-            Some(Box::new(self.open_master(
-                p,
-                engine.sample_rate(),
-                max_frames,
-                failed,
-            )))
+            let chain = self.open_master(p, engine.sample_rate(), max_frames, failed);
+            Some(Box::new(chain))
         };
         let latency = plugins
             .as_ref()
             .map_or_else(Vec::new, |t| t.effect_latencies().to_vec());
         if engine.send(prowave_engine::Command::SetMasterPlugins(plugins)) {
-            self.master_sent = key;
             self.master_latency = latency;
             // A new chain starts with every plug-in on.
             self.master_off_sent = None;
+            self.master_retired = false;
+            self.register_opened();
+            self.note_opened(&key);
+            self.master_sent = key;
+        } else {
+            self.forget_opened();
+            self.waiting = true;
         }
     }
 
@@ -941,25 +1167,24 @@ impl PluginHost {
                     if let Some(state) = &slot.state {
                         h.set_state(state);
                     }
-                    self.handles.insert(slot.uid, h.into());
-                    // Its parameters, for the automation choosers, and a watch on its window.
-                    let list = h.parameters();
-                    let ids: Vec<u32> = list.iter().map(|a| a.id).collect();
-                    if let Some(w) = prowave_engine::au::AuParamWatch::new(h, &ids) {
-                        self.watches.insert(slot.uid, w);
-                    }
-                    self.params.insert(
-                        slot.uid,
-                        list.into_iter()
-                            .map(|a| crate::automation::AuParamInfo {
-                                id: a.id,
-                                name: a.name,
-                                min: a.min,
-                                max: a.max,
-                                stepped: a.stepped,
-                            })
-                            .collect(),
-                    );
+                    // Its parameters, for the automation choosers. It is reachable, and its
+                    // window watched, once the engine has it (`register_opened`).
+                    let params = h
+                        .parameters()
+                        .into_iter()
+                        .map(|a| crate::automation::AuParamInfo {
+                            id: a.id,
+                            name: a.name,
+                            min: a.min,
+                            max: a.max,
+                            stepped: a.stepped,
+                        })
+                        .collect();
+                    self.opened.push(Opened {
+                        uid: slot.uid,
+                        handle: h.into(),
+                        params,
+                    });
                     Some(Box::new(au) as Box<dyn BlockProcessor>)
                 }
                 Err(e) => {
@@ -1020,8 +1245,11 @@ impl PluginHost {
                             })
                         })
                         .collect();
-                    self.params.insert(slot.uid, list);
-                    self.handles.insert(slot.uid, h.into());
+                    self.opened.push(Opened {
+                        uid: slot.uid,
+                        handle: h.into(),
+                        params: list,
+                    });
                     Some(Box::new(inst) as Box<dyn prowave_engine::BlockProcessor>)
                 }
                 Err(e) => {
@@ -1048,8 +1276,284 @@ impl PluginHost {
 }
 
 #[cfg(test)]
-mod tests {
+impl PluginHost {
+    /// The stand-in running in slot `uid`.
+    pub(crate) fn fake(&self, uid: u64) -> Option<tests::FakePlugin> {
+        self.fakes.get(&uid).cloned()
+    }
+
+    /// Track `i`'s plug-ins as stand-ins, when every one of them is one (their id starts with
+    /// [`tests::FAKE_ID`]): each is opened with its slot's settings, as a real one is.
+    fn open_fake_track(
+        &mut self,
+        p: &mut Project,
+        i: usize,
+        max_frames: usize,
+    ) -> Option<prowave_engine::PluginTrack> {
+        let t = p.tracks.get_mut(i)?;
+        let is_fake = |s: &PluginSlot| s.id.starts_with(tests::FAKE_ID);
+        if !t.au_instrument.iter().chain(&t.au_effects).all(is_fake) {
+            return None;
+        }
+        let mut open = |s: &mut PluginSlot| -> Box<dyn prowave_engine::BlockProcessor> {
+            if s.uid == 0 {
+                s.uid = new_uid();
+            }
+            let fake = tests::FakePlugin::with_settings(s.state.as_deref().unwrap_or_default());
+            self.fakes.insert(s.uid, fake.clone());
+            Box::new(fake)
+        };
+        let instrument = t.au_instrument.as_mut().map(&mut open);
+        let effects = t
+            .au_effects
+            .iter_mut()
+            .filter(|s| !s.bypass)
+            .map(&mut open)
+            .collect();
+        Some(prowave_engine::PluginTrack::new(
+            instrument, effects, max_frames,
+        ))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
+
+    /// The id (prefix) of a stand-in plug-in.
+    pub(crate) const FAKE_ID: &str = "fake:";
+
+    /// A stand-in for a third-party plug-in at the host's boundary (the engine's stub effects
+    /// have no settings): it passes sound through and has settings that a hand on its window
+    /// changes without the project hearing of it, as an Audio Unit or a VST3 does.
+    #[derive(Clone, Default)]
+    pub(crate) struct FakePlugin(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl FakePlugin {
+        pub(crate) fn with_settings(bytes: &[u8]) -> Self {
+            Self(std::sync::Arc::new(std::sync::Mutex::new(bytes.to_vec())))
+        }
+        pub(crate) fn state(&self) -> Vec<u8> {
+            self.0.lock().map(|s| s.clone()).unwrap_or_default()
+        }
+        /// The user turns a knob in the plug-in's own window.
+        pub(crate) fn turn_knob(&self, settings: &[u8]) {
+            if let Ok(mut s) = self.0.lock() {
+                *s = settings.to_vec();
+            }
+        }
+    }
+
+    impl prowave_engine::BlockProcessor for FakePlugin {
+        fn midi(&mut self, _status: u8, _d1: u8, _d2: u8, _offset: u32) {}
+        fn process(&mut self, input: (&[f32], &[f32]), out: (&mut [f32], &mut [f32])) {
+            out.0.copy_from_slice(input.0);
+            out.1.copy_from_slice(input.1);
+        }
+        fn latency_seconds(&self) -> f64 {
+            0.0
+        }
+    }
+
+    /// The engine's end of the plug-in commands, without an audio device.
+    #[derive(Default)]
+    pub(crate) struct FakeSink {
+        pub sent: Vec<prowave_engine::Command>,
+        /// How many more commands are taken (`None`: any number).
+        pub room: Option<usize>,
+    }
+
+    impl PluginSink for FakeSink {
+        fn sample_rate(&self) -> u32 {
+            48_000
+        }
+        fn send(&mut self, cmd: prowave_engine::Command) -> bool {
+            match &mut self.room {
+                Some(0) => return false,
+                Some(n) => *n -= 1,
+                None => {}
+            }
+            self.sent.push(cmd);
+            true
+        }
+        fn can_replace_state(&mut self) -> bool {
+            self.room != Some(0)
+        }
+    }
+
+    /// A project with one instrument track holding a stand-in plug-in with `settings`, the
+    /// host running it, and an Undo history: the app after the plug-in was put in its slot.
+    pub(crate) fn project_with_fake(
+        settings: &[u8],
+    ) -> (Project, PluginHost, crate::undo::History, FakeSink, u64) {
+        let mut p = Project::empty();
+        let ti = p.add_track(crate::model::TrackKind::Instrument);
+        let mut slot = PluginSlot::new("fake:synth", "Fake: Synth");
+        slot.state = Some(settings.to_vec());
+        let uid = slot.uid;
+        p.tracks[ti].au_instrument = Some(slot);
+        let mut host = PluginHost::default();
+        let mut history = crate::undo::History::new(&p);
+        let mut sink = FakeSink::default();
+        let failed = sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert!(failed.is_empty(), "{failed:?}");
+        (p, host, history, sink, uid)
+    }
+
+    fn settings_of(p: &Project, uid: u64) -> Option<Vec<u8>> {
+        p.tracks
+            .iter()
+            .flat_map(|t| t.au_instrument.iter().chain(&t.au_effects))
+            .find(|s| s.uid == uid)
+            .and_then(|s| s.state.clone())
+    }
+
+    #[test]
+    fn a_knob_turned_in_a_plugin_is_seen_as_changed_settings_until_they_are_read() {
+        let (mut p, mut host, _history, _sink, uid) = project_with_fake(b"as saved");
+        let plugin = host.fake(uid).expect("the plug-in runs");
+        assert_eq!(
+            plugin.state(),
+            b"as saved",
+            "opened with the slot's settings"
+        );
+        assert!(!host.settings_changed());
+
+        plugin.turn_knob(b"turned");
+        assert!(host.settings_changed());
+        assert_eq!(
+            settings_of(&p, uid).as_deref(),
+            Some(&b"as saved"[..]),
+            "the project has not heard of it"
+        );
+
+        // Reading them into the project (a save) makes the two the same again.
+        host.save_states(&mut p);
+        assert_eq!(settings_of(&p, uid).as_deref(), Some(&b"turned"[..]));
+        assert!(!host.settings_changed());
+    }
+
+    #[test]
+    fn a_frame_by_frame_caller_reads_the_settings_at_most_twice_a_second() {
+        let (_p, host, _history, _sink, uid) = project_with_fake(b"a");
+        assert!(!host.settings_changed_polled());
+        host.fake(uid).expect("runs").turn_knob(b"b");
+        assert!(
+            !host.settings_changed_polled(),
+            "the answer of a moment ago"
+        );
+        assert!(host.settings_changed(), "asked now: read now");
+        std::thread::sleep(POLL_EVERY + std::time::Duration::from_millis(50));
+        assert!(host.settings_changed_polled());
+    }
+
+    #[test]
+    fn deleting_a_track_and_undoing_it_brings_the_plugin_back_as_it_last_was() {
+        let (mut p, mut host, mut history, mut sink, uid) = project_with_fake(b"as inserted");
+        let ti = p.tracks.len() - 1;
+        host.fake(uid).expect("runs").turn_knob(b"as tweaked");
+
+        // The user deletes the track; the frame ends (the edit is recorded) and the next
+        // frame's sync takes the instance away.
+        p.tracks.remove(ti);
+        p.song_rev += 1;
+        assert!(history.record(&p));
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert!(host.fake(uid).is_none(), "the instance is gone");
+
+        assert!(history.undo(&mut p));
+        assert_eq!(
+            settings_of(&p, uid).as_deref(),
+            Some(&b"as tweaked"[..]),
+            "the track is back with the settings the plug-in had, not the saved ones"
+        );
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        let again = host.fake(uid).expect("opened again");
+        assert_eq!(again.state(), b"as tweaked");
+        assert!(!history.record(&p), "bringing it back was not an edit");
+        assert!(history.can_redo());
+
+        // The same when the sync comes before the edit is recorded.
+        again.turn_knob(b"tweaked again");
+        p.tracks.remove(ti);
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert!(history.record(&p));
+        assert!(history.undo(&mut p));
+        assert_eq!(settings_of(&p, uid).as_deref(), Some(&b"tweaked again"[..]));
+    }
+
+    #[test]
+    fn removing_a_plugin_from_its_slot_and_undoing_it_keeps_its_last_settings() {
+        let (mut p, mut host, mut history, mut sink, uid) = project_with_fake(b"one");
+        let ti = p.tracks.len() - 1;
+        host.fake(uid).expect("runs").turn_knob(b"two");
+        p.tracks[ti].au_instrument = None;
+        assert!(history.record(&p));
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert!(history.undo(&mut p));
+        assert_eq!(settings_of(&p, uid).as_deref(), Some(&b"two"[..]));
+    }
+
+    #[test]
+    fn a_plugin_under_a_deleted_track_stays_reachable() {
+        let (mut p, mut host, mut history, mut sink, uid) = project_with_fake(b"low");
+        // A second plug-in track above it, then deleted: the first one's track moves up.
+        let below = p.tracks.len() - 1;
+        let mut above = p.tracks[below].clone();
+        above.au_instrument = Some(PluginSlot::new("fake:other", "Fake: Other"));
+        p.tracks.insert(below, above);
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        host.fake(uid).expect("runs").turn_knob(b"low, tweaked");
+        p.tracks.remove(below);
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+
+        let plugin = host.fake(uid).expect("still running, on its new track");
+        assert_eq!(plugin.state(), b"low, tweaked");
+        assert_eq!(settings_of(&p, uid).as_deref(), Some(&b"low, tweaked"[..]));
+        plugin.turn_knob(b"later");
+        assert!(host.settings_changed(), "its later changes are still seen");
+    }
+
+    #[test]
+    fn a_moved_plugin_stays_reachable_when_the_engine_takes_the_change_over_two_frames() {
+        let (mut p, mut host, mut history, mut sink, uid) = project_with_fake(b"low");
+        let below = p.tracks.len() - 1;
+        let mut above = p.tracks[below].clone();
+        above.au_instrument = Some(PluginSlot::new("fake:other", "Fake: Other"));
+        p.tracks.insert(below, above);
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        host.fake(uid).expect("runs").turn_knob(b"low, tweaked");
+        p.tracks.remove(below);
+
+        // Two tracks changed, the engine has room for one command.
+        let before = sink.sent.len();
+        sink.room = Some(1);
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert_eq!(sink.sent.len(), before + 1, "one command went");
+        assert!(host.needs_retry(), "the other waits");
+        let plugin = host.fake(uid).expect("running on its new track");
+        assert_eq!(plugin.state(), b"low, tweaked");
+
+        // No room at all: nothing is opened, closed or sent.
+        sink.room = Some(0);
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert_eq!(sink.sent.len(), before + 1);
+        assert!(host.needs_retry());
+        assert!(host.fake(uid).is_some());
+
+        // Room again: the old track's command goes, and the new instance is still reachable.
+        sink.room = None;
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert_eq!(sink.sent.len(), before + 2);
+        assert!(!host.needs_retry());
+        let plugin = host.fake(uid).expect("not retired with its old track");
+        assert_eq!(plugin.state(), b"low, tweaked");
+        plugin.turn_knob(b"later");
+        assert!(host.settings_changed(), "its later changes are still seen");
+        // Nothing is left to do.
+        sync_with_history(&mut host, &mut p, &mut history, &mut sink, 512);
+        assert_eq!(sink.sent.len(), before + 2);
+    }
 
     fn c(id: &str, maker: &str, name: &str, instrument: bool) -> AuChoice {
         AuChoice {
@@ -1147,6 +1651,7 @@ mod tests {
         let mut host = PluginHost::default();
         let mut failed = Vec::new();
         let chain = host.open_master(&mut p, SR, 1024, &mut failed);
+        host.register_opened();
         assert!(failed.is_empty(), "{failed:?}");
         assert_eq!(chain.effect_latencies().len(), p.master_au_effects.len());
         eprintln!("master plug-in delays (s): {:?}", chain.effect_latencies());
@@ -1244,6 +1749,7 @@ mod tests {
         // plug-in is not opened.
         let mut again = PluginHost::default();
         let chain = again.open_master(&mut q, SR, 1024, &mut failed);
+        again.register_opened();
         assert!(failed.is_empty(), "{failed:?}");
         assert_eq!(chain.effect_latencies().len(), 1);
         let Some(prowave_engine::plugin_handle::PluginHandle::Au(h)) =
@@ -1253,6 +1759,59 @@ mod tests {
         };
         assert_eq!(h.parameter(mix.id), Some(mix.min));
         drop(chain);
+    }
+
+    /// A command the engine refuses is freed with its plug-ins. Until the engine has taken
+    /// it, the host has no way to them (no handle, no window watch, no parameters), so
+    /// nothing is left pointing at a freed Audio Unit; opening again for the next try works.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_plugin_is_reachable_only_once_the_engine_has_its_command() {
+        if prowave_engine::au::find("aufx:dely:appl").is_none() {
+            eprintln!("skipped: Apple's AUDelay is not on this machine");
+            return;
+        }
+        let mut p = Project::empty();
+        p.tracks[0]
+            .au_effects
+            .push(PluginSlot::new("aufx:dely:appl", "Apple: AUDelay"));
+        p.master_au_effects
+            .push(PluginSlot::new("aufx:dely:appl", "Apple: AUDelay"));
+        let mut host = PluginHost::default();
+        let mut failed = Vec::new();
+        let nothing = |host: &PluginHost| {
+            host.handles.is_empty() && host.watches.is_empty() && host.params.is_empty()
+        };
+
+        // Opened for a command: not reachable yet.
+        let track = host.open_track(&mut p, 0, 48_000, 1024, &mut failed);
+        let master = host.open_master(&mut p, 48_000, 1024, &mut failed);
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(host.opened.len(), 2);
+        assert!(nothing(&host));
+        // The engine refuses: the plug-ins are freed with the command, and forgotten here.
+        drop((track, master));
+        host.forget_opened();
+        assert!(host.opened.is_empty() && nothing(&host));
+        // Whatever the host does next finds nothing to ask.
+        let before = p.tracks[0].au_effects[0].state.clone();
+        host.save_states(&mut p);
+        assert_eq!(p.tracks[0].au_effects[0].state, before);
+        assert!(host.take_param_moves(&p).is_empty());
+
+        // The next try: opened again, taken by the engine, reachable, and still running.
+        let track = host.open_track(&mut p, 0, 48_000, 1024, &mut failed);
+        assert!(failed.is_empty(), "{failed:?}");
+        host.register_opened();
+        let uid = p.tracks[0].au_effects[0].uid;
+        assert!(host.opened.is_empty());
+        assert!(host.handles.contains_key(&uid) && host.params.contains_key(&uid));
+        host.save_states(&mut p);
+        assert!(p.tracks[0].au_effects[0].state.is_some(), "it answers");
+        // The watch goes before its unit.
+        host.watches.clear();
+        host.handles.clear();
+        drop(track);
     }
 
     #[test]
@@ -1315,6 +1874,7 @@ mod tests {
             let mut failed = Vec::new();
             // The chain keeps the units alive while they are drawn.
             let chain = host.open_master(&mut p, 48_000, 512, &mut failed);
+            host.register_opened();
             assert!(failed.is_empty(), "{failed:?}");
             let uid = p.master_au_effects[0].uid;
             let handle = host.handles.get(&uid).cloned();
