@@ -291,7 +291,7 @@ fn wave_graph(
             changed.push((wd::WAVE + i, v));
         }
     }
-    let faint = egui::Stroke::new(1.0, gear::alpha(gear::LCD_INK, 0.12));
+    let faint = egui::Stroke::new(1.0, gear::alpha(gear::LCD_INK(), 0.12));
     p.line_segment([glass.left_center(), glass.right_center()], faint);
     // Each point as the step it is: a level held until the next.
     let step = glass.width() / length as f32;
@@ -307,7 +307,7 @@ fn wave_graph(
     }
     p.with_clip_rect(glass).add(egui::Shape::line(
         line,
-        egui::Stroke::new(1.8, gear::LCD_INK),
+        egui::Stroke::new(1.8, gear::LCD_INK()),
     ));
     // The shape keys.
     let keys = wd::SHAPES.len() as f32;

@@ -256,8 +256,8 @@ pub fn tool_menu<T: MenuTool>(
             // The dropdown material: a dark field, the current tool in orange, each tool's key
             // on a small bone cap.
             egui::Frame::menu(ui.style())
-                .fill(theme::CAP)
-                .stroke(egui::Stroke::new(1.0, theme::CAP_EDGE))
+                .fill(theme::CAP())
+                .stroke(egui::Stroke::new(1.0, theme::CAP_EDGE()))
                 .show(ui, |ui| {
                     ui.set_min_width(200.0);
                     for &(tool, _, _, letter) in T::entries() {
@@ -266,9 +266,13 @@ pub fn tool_menu<T: MenuTool>(
                         let g = ui.painter();
                         let on = tool == current;
                         if resp.hovered() {
-                            g.rect_filled(r, 3.0, theme::CAP_TOP);
+                            g.rect_filled(r, 3.0, theme::CAP_TOP());
                         }
-                        let col = if on { theme::ORANGE } else { theme::ON_DARK };
+                        let col = if on {
+                            theme::ORANGE()
+                        } else {
+                            theme::ON_DARK()
+                        };
                         tool.paint(g, pos2(r.left() + 14.0, r.center().y), col);
                         hw::text(
                             g,
@@ -296,7 +300,7 @@ pub fn tool_menu<T: MenuTool>(
                             letter,
                             Face::Bold,
                             10.0,
-                            theme::INK,
+                            theme::INK(),
                         );
                         if resp.clicked() {
                             picked = Some(tool);

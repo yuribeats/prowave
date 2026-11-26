@@ -49,6 +49,8 @@ pub struct AuInfo {
     pub manufacturer: String,
     pub kind: AuKind,
     desc: [u32; 3],
+    /// An app extension (AUv3): it has no `.component` bundle.
+    v3: bool,
 }
 
 impl AuInfo {
@@ -85,8 +87,10 @@ fn parse_id(id: &str) -> Option<[u32; 3]> {
 }
 
 /// Every instrument and effect Audio Unit the system knows, by kind, then manufacturer and
-/// name.
+/// name. macOS's registry can keep units whose `.component` bundle was deleted (they fail to
+/// open with -3000, "invalid component"); those are left out (see [`keeps`]).
 pub fn list() -> Vec<AuInfo> {
+    let on_disk = installed_components();
     let mut out = Vec::new();
     for (ty, kind) in [
         (kAudioUnitType_MusicDevice, AuKind::Instrument),
@@ -109,7 +113,9 @@ pub fn list() -> Vec<AuInfo> {
                 break;
             }
             if let Some(info) = unsafe { describe(comp, kind) } {
-                out.push(info);
+                if keeps(&info, on_disk.as_ref()) {
+                    out.push(info);
+                }
             }
         }
     }
@@ -146,6 +152,7 @@ unsafe fn describe(comp: AudioComponent, kind: AuKind) -> Option<AuInfo> {
         None => (fourcc(d.componentManufacturer), full),
     };
     let desc = [d.componentType, d.componentSubType, d.componentManufacturer];
+    let v3 = d.componentFlags & objc2_audio_toolbox::AudioComponentFlags::IsV3AudioUnit.0 != 0;
     Some(AuInfo {
         id: format!(
             "{}:{}:{}",
@@ -157,7 +164,69 @@ unsafe fn describe(comp: AudioComponent, kind: AuKind) -> Option<AuInfo> {
         manufacturer,
         kind,
         desc,
+        v3,
     })
+}
+
+/// The folders macOS registers third-party `.component` bundles from.
+fn component_dirs() -> Vec<std::path::PathBuf> {
+    let mut v = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        v.push(std::path::Path::new(&home).join("Library/Audio/Plug-Ins/Components"));
+    }
+    v.push("/Library/Audio/Plug-Ins/Components".into());
+    v
+}
+
+/// The units (`[type, subtype, manufacturer]`) the `.component` bundles in
+/// [`component_dirs`] declare in their Info.plist. `None` when a bundle's list cannot be
+/// read (an old bundle without `AudioComponents`): then nothing is left out.
+fn installed_components() -> Option<std::collections::HashSet<[u32; 3]>> {
+    let mut out = std::collections::HashSet::new();
+    for dir in component_dirs() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "component") {
+                continue;
+            }
+            out.extend(bundle_components(&p.join("Contents/Info.plist"))?);
+        }
+    }
+    Some(out)
+}
+
+/// The `AudioComponents` of one bundle's Info.plist.
+#[allow(deprecated)] // dictionaryWithContentsOfFile: still the plain way to read a plist
+fn bundle_components(plist: &std::path::Path) -> Option<Vec<[u32; 3]>> {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSArray, NSDictionary, NSString};
+    let path = NSString::from_str(plist.to_str()?);
+    // SAFETY: reads a property-list file; nil when it is missing or not a dictionary.
+    let dict =
+        unsafe { NSDictionary::<AnyObject, AnyObject>::dictionaryWithContentsOfFile(&path) }?;
+    let list = dict.objectForKey(&NSString::from_str("AudioComponents"))?;
+    let list = list.downcast_ref::<NSArray>()?;
+    let mut out = Vec::new();
+    for item in list.iter() {
+        let c = item.downcast_ref::<NSDictionary>()?;
+        let field = |k: &str| -> Option<u32> {
+            let v = c.objectForKey(&NSString::from_str(k))?;
+            from_fourcc(&v.downcast_ref::<NSString>()?.to_string())
+        };
+        out.push([field("type")?, field("subtype")?, field("manufacturer")?]);
+    }
+    Some(out)
+}
+
+/// Whether a unit the registry lists is offered: Apple's own and app extensions always;
+/// another `.component` unit only while a bundle on disk declares it (`on_disk`; `None`:
+/// unknown, keep everything).
+fn keeps(info: &AuInfo, on_disk: Option<&std::collections::HashSet<[u32; 3]>>) -> bool {
+    const APPLE: u32 = u32::from_be_bytes(*b"appl");
+    info.v3 || info.desc[2] == APPLE || on_disk.is_none_or(|s| s.contains(&info.desc))
 }
 
 /// The Audio Unit with this [`AuInfo::id`], if it is installed.
@@ -631,6 +700,75 @@ mod tests {
         );
         assert_eq!(parse_id("aufx:DEC"), None);
         assert_eq!(parse_id("aufx:DEC :SToy:x"), None);
+    }
+
+    /// A unit macOS still lists after its bundle was deleted is left out; Apple's, app
+    /// extensions and units whose bundle is there stay; nothing is left out when the bundles
+    /// could not all be read.
+    #[test]
+    fn units_without_a_bundle_on_disk_are_left_out() {
+        let unit = |id: &str, v3: bool| AuInfo {
+            id: id.into(),
+            name: String::new(),
+            manufacturer: String::new(),
+            kind: AuKind::Effect,
+            desc: parse_id(id).expect("id"),
+            v3,
+        };
+        let disk: std::collections::HashSet<[u32; 3]> =
+            [parse_id("aumf:5455:Bcau").expect("id")].into();
+        assert!(keeps(&unit("aumf:5455:Bcau", false), Some(&disk)));
+        assert!(
+            !keeps(&unit("aumf:9w4w:Bcau", false), Some(&disk)),
+            "bundle gone"
+        );
+        assert!(
+            keeps(&unit("aufx:dely:appl", false), Some(&disk)),
+            "Apple's"
+        );
+        assert!(
+            keeps(&unit("aufx:Abcd:Wxyz", true), Some(&disk)),
+            "app extension"
+        );
+        assert!(keeps(&unit("aumf:9w4w:Bcau", false), None), "unknown: keep");
+    }
+
+    /// The Info.plist of a `.component` bundle gives its units (XML here; binary plists read
+    /// the same way).
+    #[test]
+    fn a_bundle_plist_gives_its_units() {
+        let dir = std::env::temp_dir().join(format!("pw-au-plist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let f = dir.join("Info.plist");
+        let unit = |t: &str, s: &str, m: &str| {
+            format!("<dict><key>type</key><string>{t}</string><key>subtype</key><string>{s}</string><key>manufacturer</key><string>{m}</string><key>version</key><integer>1</integer></dict>")
+        };
+        let doc = |body: &str| {
+            format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleName</key><string>X</string>{body}</dict></plist>")
+        };
+        std::fs::write(
+            &f,
+            doc(&format!(
+                "<key>AudioComponents</key><array>{}{}</array>",
+                unit("aufx", "DEC ", "SToy"),
+                unit("aumu", "frcv", "Bcau")
+            )),
+        )
+        .expect("write");
+        assert_eq!(
+            bundle_components(&f),
+            Some(vec![
+                parse_id("aufx:DEC :SToy").expect("id"),
+                parse_id("aumu:frcv:Bcau").expect("id")
+            ])
+        );
+        std::fs::write(&f, doc("")).expect("write");
+        assert_eq!(
+            bundle_components(&f),
+            None,
+            "an old bundle without the list"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Apple's own units are on every Mac: one of each kind opens and renders.

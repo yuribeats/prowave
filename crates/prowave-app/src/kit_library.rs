@@ -23,6 +23,11 @@
 //! samples listed together; and a kit the manifest says has the same files as another is left
 //! out, its name found by a search for the one shown. Nothing in a library folder is ever
 //! written.
+//!
+//! A kit list (`kit_list` in the settings, a TSV such as `BEST-PROWAVE.tsv`) narrows what is
+//! shown: with it on, only the kits it names (by their folder relative to the library folder)
+//! are listed, in its order and grouped by its `type` column; favourites and the kit of new
+//! racks are always shown. Without one, nothing changes.
 use crate::kit_classify::{classify_label, natural_cmp};
 use crate::kit_files::{self, Kit, Listing};
 use serde_json::{json, Value};
@@ -55,6 +60,8 @@ pub struct KitEntry {
     pub aliases: Vec<String>,
     /// A pool: the folders (inside `path`) of the one-sample kits it stands for.
     pub members: Vec<String>,
+    /// Its place in the kit list (from 1) and its type there (an index into `Index::types`).
+    pub list: Option<(u32, u16)>,
     /// Source, name and other names in small letters: what a search looks through.
     hay: String,
     name_low: String,
@@ -74,6 +81,7 @@ impl KitEntry {
             pads: None,
             aliases: Vec::new(),
             members: Vec::new(),
+            list: None,
             hay: String::new(),
             name_low: String::new(),
         };
@@ -82,11 +90,11 @@ impl KitEntry {
     }
 
     fn rehay(&mut self) {
-        self.name_low = self.name.to_lowercase();
-        self.hay = format!("{} {}", self.source.to_lowercase(), self.name_low);
+        self.name_low = fold(&self.name);
+        self.hay = format!("{} {}", fold(&self.source), self.name_low);
         for a in &self.aliases {
             self.hay.push(' ');
-            self.hay.push_str(&a.to_lowercase());
+            self.hay.push_str(&fold(a));
         }
     }
 
@@ -120,6 +128,9 @@ pub struct Index {
     pub roots: Vec<RootInfo>,
     /// The sources with their number of kits, sorted.
     pub sources: Vec<(String, usize)>,
+    /// The kit list's types, in the order of their best-placed kit, with the number of kits
+    /// of the index each holds (empty without a list).
+    pub types: Vec<(String, usize)>,
 }
 
 /// A source becomes one pool when it has at least this many kits…
@@ -229,7 +240,7 @@ impl Index {
         Index {
             kits: shown(raw),
             roots,
-            sources: Vec::new(),
+            ..Index::default()
         }
         .finish()
     }
@@ -259,6 +270,133 @@ impl Index {
     pub fn find(&self, path: &str) -> Option<&KitEntry> {
         self.kits.iter().find(|k| k.path == path)
     }
+
+    /// Marks the kits `list` names with their place and type (none without a list).
+    pub fn apply_list(&mut self, list: Option<&KitList>) {
+        self.types.clear();
+        for k in &mut self.kits {
+            k.list = None;
+        }
+        let Some(list) = list else { return };
+        self.types = list.types.iter().map(|t| (t.clone(), 0)).collect();
+        let roots: Vec<String> = self.roots.iter().map(|r| r.path.clone()).collect();
+        let by_path = list.by_path(&roots);
+        for k in &mut self.kits {
+            let rel = k
+                .path
+                .strip_prefix(k.root.as_str())
+                .unwrap_or(&k.path)
+                .trim_matches('/');
+            if let Some(&i) = by_path.get(&rel.to_lowercase()) {
+                let row = &list.rows[i];
+                k.list = Some((row.rank, row.kind));
+                self.types[row.kind as usize].1 += 1;
+            }
+        }
+    }
+
+    /// How many kits the list names were found.
+    pub fn list_matched(&self) -> usize {
+        self.types.iter().map(|t| t.1).sum()
+    }
+}
+
+/// `text` in small letters with the look-alike letters of other alphabets made plain: small
+/// capitals ("ᴏᴢ"), full-width, circled and mathematical letters and digits ("𝐎𝐙", "ＯＺ"), and
+/// the accented Latin letters ("é"). What the search compares, so "oz" finds "ᴏᴢ".
+pub fn fold(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match fold_char(c) {
+            Some(s) => out.push_str(s),
+            None => out.extend(c.to_lowercase()),
+        }
+    }
+    out
+}
+
+const LOWER: [&str; 26] = [
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s",
+    "t", "u", "v", "w", "x", "y", "z",
+];
+const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// The plain letters `c` stands for, when it is a look-alike.
+fn fold_char(c: char) -> Option<&'static str> {
+    let u = c as u32;
+    let letter = |i: u32| Some(LOWER[(i % 26) as usize]);
+    match u {
+        // Full-width A-Z, a-z, 0-9.
+        0xFF21..=0xFF3A => letter(u - 0xFF21),
+        0xFF41..=0xFF5A => letter(u - 0xFF41),
+        0xFF10..=0xFF19 => Some(DIGITS[(u - 0xFF10) as usize]),
+        // Circled letters.
+        0x24B6..=0x24CF => letter(u - 0x24B6),
+        0x24D0..=0x24E9 => letter(u - 0x24D0),
+        // Mathematical letters (bold, italic, script, fraktur, double-struck, sans, mono): 52 a
+        // style, capitals then small letters; and their digits, 10 a style.
+        0x1D400..=0x1D6A3 => letter((u - 0x1D400) % 52),
+        0x1D7CE..=0x1D7FF => Some(DIGITS[((u - 0x1D7CE) % 10) as usize]),
+        // Negative squared and squared capitals (🅰, 🄰).
+        0x1F130..=0x1F149 => letter(u - 0x1F130),
+        0x1F170..=0x1F189 => letter(u - 0x1F170),
+        _ => {
+            Some(match c {
+                // Small capitals.
+                'ᴀ' => "a",
+                'ʙ' => "b",
+                'ᴄ' => "c",
+                'ᴅ' => "d",
+                'ᴇ' => "e",
+                'ꜰ' => "f",
+                'ɢ' => "g",
+                'ʜ' => "h",
+                'ɪ' => "i",
+                'ᴊ' => "j",
+                'ᴋ' => "k",
+                'ʟ' => "l",
+                'ᴍ' => "m",
+                'ɴ' => "n",
+                'ᴏ' => "o",
+                'ᴘ' => "p",
+                'ǫ' => "q",
+                'ʀ' => "r",
+                'ꜱ' => "s",
+                'ᴛ' => "t",
+                'ᴜ' => "u",
+                'ᴠ' => "v",
+                'ᴡ' => "w",
+                'ʏ' => "y",
+                'ᴢ' => "z",
+                // Accented Latin letters.
+                'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'À' | 'Á' | 'Â' | 'Ã'
+                | 'Ä' | 'Å' | 'Ā' => "a",
+                'ç' | 'ć' | 'č' | 'Ç' | 'Ć' | 'Č' => "c",
+                'ď' | 'đ' | 'Ď' | 'Đ' => "d",
+                'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ę' | 'ě' | 'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ę'
+                | 'Ě' => "e",
+                'ğ' | 'Ğ' => "g",
+                'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ı' | 'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' | 'İ' => {
+                    "i"
+                }
+                'ł' | 'ľ' | 'Ł' | 'Ľ' => "l",
+                'ñ' | 'ń' | 'ň' | 'Ñ' | 'Ń' | 'Ň' => "n",
+                'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ő' | 'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö'
+                | 'Ø' | 'Ō' | 'Ő' => "o",
+                'ř' | 'Ř' => "r",
+                'ś' | 'š' | 'ş' | 'Ś' | 'Š' | 'Ş' => "s",
+                'ť' | 'ţ' | 'Ť' | 'Ţ' => "t",
+                'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' | 'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' | 'Ů'
+                | 'Ű' => "u",
+                'ý' | 'ÿ' | 'Ý' | 'Ÿ' => "y",
+                'ź' | 'ż' | 'ž' | 'Ź' | 'Ż' | 'Ž' => "z",
+                'ß' => "ss",
+                'æ' | 'Æ' => "ae",
+                'œ' | 'Œ' => "oe",
+                _ => return None,
+            })
+        }
+    }
 }
 
 /// What a search keeps.
@@ -268,14 +406,46 @@ pub struct Filter {
     pub source: Option<String>,
     pub best: bool,
     pub favorites: bool,
+    /// Only the kits of the kit list (and the favourites and the kit of new racks), in its
+    /// order and grouped by type; `source` is then not used.
+    pub list: bool,
+    /// With `list`: only the kits of this type of the list.
+    pub kind: Option<String>,
+}
+
+/// [`search_keeping`] with no kit of new racks.
+#[cfg(test)]
+pub fn search(index: &Index, filter: &Filter, favorites: &HashSet<String>) -> Vec<u32> {
+    search_keeping(index, filter, favorites, "")
+}
+
+/// Whether `kit` is the kit of new racks `default_kit` names (its folder, or a folder in it).
+fn holds_default(kit: &KitEntry, default_kit: &str) -> bool {
+    !default_kit.is_empty()
+        && (kit.path == default_kit
+            || default_kit
+                .strip_prefix(kit.path.as_str())
+                .is_some_and(|rest| rest.starts_with('/')))
 }
 
 /// The kits of `index` that pass `filter`, as indices into `index.kits`: every word of the
 /// query has to be in the kit's source or name (or another name of the same files). Kits
 /// whose name starts with the query come first; with Best on, the order is the ranking's. Kits
 /// known to hold no audio and no SoundFont are left out.
-pub fn search(index: &Index, filter: &Filter, favorites: &HashSet<String>) -> Vec<u32> {
-    let q = filter.query.to_lowercase();
+/// With the kit list on, the kit of new racks (`default_kit`) is kept too.
+pub fn search_keeping(
+    index: &Index,
+    filter: &Filter,
+    favorites: &HashSet<String>,
+    default_kit: &str,
+) -> Vec<u32> {
+    let kind = filter
+        .kind
+        .as_ref()
+        .filter(|_| filter.list)
+        .and_then(|t| index.types.iter().position(|(n, _)| n == t))
+        .map(|i| i as u16);
+    let q = fold(&filter.query);
     let words: Vec<&str> = q.split_whitespace().collect();
     let first = words.first().copied().unwrap_or("");
     let mut lead: Vec<u32> = Vec::new();
@@ -284,10 +454,19 @@ pub fn search(index: &Index, filter: &Filter, favorites: &HashSet<String>) -> Ve
         if k.files == Some(0)
             || (filter.best && k.best.is_none())
             || (filter.favorites && !favorites.contains(&k.path))
-            || filter.source.as_ref().is_some_and(|s| *s != k.source)
+            || (!filter.list && filter.source.as_ref().is_some_and(|s| *s != k.source))
             || !words.iter().all(|w| k.hay.contains(w))
         {
             continue;
+        }
+        if filter.list {
+            let kept = || favorites.contains(&k.path) || holds_default(k, default_kit);
+            match (k.list, kind) {
+                (Some((_, t)), Some(want)) if t != want => continue,
+                (None, Some(_)) => continue,
+                (None, None) if !kept() => continue,
+                _ => {}
+            }
         }
         if !first.is_empty() && k.name_low.starts_with(first) {
             lead.push(i as u32);
@@ -296,10 +475,184 @@ pub fn search(index: &Index, filter: &Filter, favorites: &HashSet<String>) -> Ve
         }
     }
     lead.extend(rest);
-    if filter.best {
+    if filter.list {
+        // The favourites and the kit of new racks not on the list first, then type by type
+        // in the list's order.
+        lead.sort_by_key(|i| {
+            index.kits[*i as usize]
+                .list
+                .map_or((0, 0), |(rank, t)| (u32::from(t) + 1, rank))
+        });
+    } else if filter.best {
         lead.sort_by_key(|i| index.kits[*i as usize].best.unwrap_or(u32::MAX));
     }
     lead
+}
+
+// ------------------------------------------------------------------------------- the kit list
+
+/// One kit of a kit list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListRow {
+    pub rank: u32,
+    /// The kit's folder relative to the library folder (or a full path), as written.
+    pub path: String,
+    /// Its type: an index into [`KitList::types`].
+    pub kind: u16,
+    pub reason: String,
+}
+
+/// A kit list: a TSV with a header naming at least `path` (the kit's folder relative to the
+/// library folder), and optionally `rank`, `type` (or `genre/type`, `genre`) and `reason`.
+/// Rows are taken in rank order (in the file's order without a rank column).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KitList {
+    /// The file it was read from.
+    pub file: String,
+    pub rows: Vec<ListRow>,
+    /// The types, in the order of their best-placed kit.
+    pub types: Vec<String>,
+}
+
+/// `path` as a key: no `./`, no slashes at the ends, small letters.
+fn list_key(path: &str) -> String {
+    path.trim()
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_lowercase()
+}
+
+impl KitList {
+    pub fn parse(text: &str, file: &str) -> Result<Self, String> {
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        let header = lines.next().ok_or("the kit list is empty")?;
+        let cols: Vec<String> = header
+            .split('\t')
+            .map(|c| c.trim().to_lowercase())
+            .collect();
+        let col = |names: &[&str]| cols.iter().position(|c| names.contains(&c.as_str()));
+        let c_path = col(&["path"]).ok_or("the kit list has no `path` column")?;
+        let c_rank = col(&["rank"]);
+        let c_type = col(&["type", "genre/type", "genre", "kind"]);
+        let c_reason = col(&["reason", "why"]);
+        let mut rows: Vec<(u32, String, String, String)> = Vec::new();
+        for (n, line) in lines.enumerate() {
+            let f: Vec<&str> = line.split('\t').collect();
+            let get = |c: Option<usize>| c.and_then(|c| f.get(c)).map_or("", |s| s.trim());
+            let path = get(Some(c_path));
+            if path.is_empty() {
+                continue;
+            }
+            let rank = get(c_rank).parse::<u32>().unwrap_or(n as u32 + 1);
+            rows.push((
+                rank,
+                path.to_string(),
+                get(c_type).to_string(),
+                get(c_reason).to_string(),
+            ));
+        }
+        rows.sort_by_key(|r| r.0);
+        let mut out = KitList {
+            file: file.to_string(),
+            ..Self::default()
+        };
+        let mut seen = HashSet::new();
+        for (rank, path, kind, reason) in rows {
+            if !seen.insert(list_key(&path)) {
+                continue;
+            }
+            let kind = if kind.is_empty() {
+                "Other".into()
+            } else {
+                kind
+            };
+            let t = match out.types.iter().position(|t| *t == kind) {
+                Some(t) => t,
+                None => {
+                    out.types.push(kind);
+                    out.types.len() - 1
+                }
+            };
+            out.rows.push(ListRow {
+                rank,
+                path,
+                kind: t.min(usize::from(u16::MAX)) as u16,
+                reason,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Row by key of the kit's folder relative to its library folder. A full path in the list
+    /// is made relative to whichever of `roots` it is in, or else cut after the name of one of
+    /// them (`/Volumes/SHARE/DRUM-KITS/x` is `x` in `~/SHARE/DRUM-KITS`).
+    fn by_path(&self, roots: &[String]) -> HashMap<String, usize> {
+        let mut out = HashMap::with_capacity(self.rows.len());
+        for (i, row) in self.rows.iter().enumerate() {
+            let p = row.path.trim();
+            let rel = if p.starts_with('/') || p.starts_with('~') {
+                roots
+                    .iter()
+                    .find_map(|r| p.strip_prefix(r.as_str()).filter(|t| t.starts_with('/')))
+                    .map(str::to_string)
+                    .or_else(|| {
+                        roots.iter().find_map(|r| {
+                            let name = Path::new(r).file_name()?.to_string_lossy().into_owned();
+                            let mark = format!("/{name}/");
+                            p.rfind(&mark).map(|at| p[at + mark.len()..].to_string())
+                        })
+                    })
+                    .unwrap_or_else(|| p.to_string())
+            } else {
+                p.to_string()
+            };
+            out.entry(list_key(&rel)).or_insert(i);
+        }
+        out
+    }
+}
+
+/// The file a `kit_list` setting names, as found here: the path itself, else (a list made on
+/// another Mac, a library folder mounted elsewhere) the same file inside one of `folders`: a
+/// relative path in it, the part of the path after the folder's name, or its file name.
+pub fn find_list_file(setting: &str, folders: &[String]) -> Option<PathBuf> {
+    let setting = setting.trim();
+    if setting.is_empty() {
+        return None;
+    }
+    let p = Path::new(setting);
+    if p.is_absolute() && p.is_file() {
+        return Some(p.to_path_buf());
+    }
+    for f in folders {
+        let dir = Path::new(f);
+        let mut tries: Vec<PathBuf> = Vec::new();
+        if p.is_relative() {
+            tries.push(dir.join(p));
+        } else {
+            if let Some(name) = dir.file_name() {
+                let mark = format!("/{}/", name.to_string_lossy());
+                if let Some(at) = setting.rfind(&mark) {
+                    tries.push(dir.join(&setting[at + mark.len()..]));
+                }
+            }
+            if let Some(name) = p.file_name() {
+                tries.push(dir.join(name));
+            }
+        }
+        if let Some(found) = tries.into_iter().find(|t| t.is_file()) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Reads the kit list a `kit_list` setting names (see [`find_list_file`]).
+pub fn load_list(setting: &str, folders: &[String]) -> Result<KitList, String> {
+    let file = find_list_file(setting, folders)
+        .ok_or_else(|| format!("the kit list {setting} is not there"))?;
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    KitList::parse(&text, &file.to_string_lossy())
 }
 
 // ------------------------------------------------------------------------------- settings
@@ -312,6 +665,15 @@ pub struct Settings {
     pub favorites: HashSet<String>,
     /// Audition is lit: a sample or kit picked is heard.
     pub audition: bool,
+    /// The kit a new Channel Rack starts with (a kit's folder; empty: none). A kit whose
+    /// folder is not there leaves the new rack empty.
+    pub default_kit: String,
+    /// When a kit loaded into a rack is copied to this computer (`kit-library/local/`).
+    pub copy_kits: crate::kit_copy::CopyMode,
+    /// The kit list (a TSV; empty: none): see [`KitList`].
+    pub kit_list: String,
+    /// The kit list is used (on unless turned off in the browser).
+    pub kit_list_on: bool,
 }
 
 /// The library folders of a new installation.
@@ -322,14 +684,29 @@ pub fn default_folders() -> Vec<String> {
     folders
 }
 
+/// The kit a new Channel Rack starts with on a new installation (empty: none).
+pub fn default_kit() -> String {
+    let kit = "";
+    kit.to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             folders: default_folders(),
             favorites: HashSet::new(),
             audition: false,
+            default_kit: default_kit(),
+            copy_kits: crate::kit_copy::CopyMode::default(),
+            kit_list: String::new(),
+            kit_list_on: true,
         }
     }
+}
+
+/// Where kits loaded from other computers are copied: `kit-library/local`.
+pub fn local_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("local"))
 }
 
 /// `kit-library` in the settings folder.
@@ -359,15 +736,30 @@ impl Settings {
             folders,
             favorites: list("favorites").unwrap_or_default().into_iter().collect(),
             audition: v["audition"].as_bool().unwrap_or(false),
+            default_kit: v["default_kit"]
+                .as_str()
+                .map_or_else(default_kit, |s| s.trim().to_string()),
+            copy_kits: v["copy_kits"]
+                .as_str()
+                .and_then(crate::kit_copy::CopyMode::parse)
+                .unwrap_or_default(),
+            kit_list: v["kit_list"].as_str().unwrap_or("").trim().to_string(),
+            kit_list_on: v["kit_list_on"].as_bool().unwrap_or(true),
         }
     }
 
     pub fn to_json(&self) -> String {
         let mut fav: Vec<&String> = self.favorites.iter().collect();
         fav.sort();
-        serde_json::to_string_pretty(
-            &json!({ "folders": self.folders, "favorites": fav, "audition": self.audition }),
-        )
+        serde_json::to_string_pretty(&json!({
+            "folders": self.folders,
+            "favorites": fav,
+            "audition": self.audition,
+            "default_kit": self.default_kit,
+            "copy_kits": self.copy_kits.id(),
+            "kit_list": self.kit_list,
+            "kit_list_on": self.kit_list_on,
+        }))
         .unwrap_or_default()
     }
 
@@ -993,6 +1385,9 @@ fn list_all(
     let mut todo: Vec<(String, String, Option<u64>)> = folders
         .iter()
         .filter(|f| Path::new(f.as_str()).is_dir())
+        // A library folder on a network share is not read kit by kit in the background (it
+        // fills the network and every other read waits); its kits are read when picked.
+        .filter(|f| !crate::kit_copy::is_remote(Path::new(f.as_str())))
         .filter_map(|f| cache.roots.get(f))
         .flatten()
         .map(|k| (k.root.clone(), k.path.clone(), k.listed))
@@ -1292,8 +1687,7 @@ mod tests {
         kits[0].best = Some(2);
         Index {
             kits,
-            roots: Vec::new(),
-            sources: Vec::new(),
+            ..Index::default()
         }
         .finish()
     }
@@ -1347,6 +1741,132 @@ mod tests {
     }
 
     #[test]
+    fn a_kit_list_narrows_the_kits_to_its_own_in_its_order_by_type() {
+        let mut index = sample_index();
+        index.roots = vec![RootInfo {
+            path: "/lib".into(),
+            present: true,
+            kits: 0,
+        }];
+        let text = "rank\tsource\tkit\tpath\ttype\tfile_count\tscore\treason\n\
+            3\tMusicRadar\t808-samples\tMusicRadar/808-samples\tHip-hop\t398\t70\tbig\n\
+            1\tkb6\tRoland TR-909\t/Volumes/SHARE/lib/kb6/Roland TR-909/\tDrum machines\t40\t90\tthe 909\n\
+            2\tBoxed-Ear\tCR-78\t./boxed-ear/cr-78\tDrum machines\t30\t80\tclean\n\
+            4\tNowhere\tGone\tNowhere/Gone\tHip-hop\t1\t1\tnot here\n\
+            5\tBoxed-Ear\tCR-78\t./Boxed-Ear/CR-78/\tOther\t1\t1\ttwice\n";
+        let list = KitList::parse(text, "/x/list.tsv").unwrap();
+        assert_eq!(list.rows.len(), 4, "a kit named twice counts once");
+        assert_eq!(list.types, ["Drum machines", "Hip-hop"]);
+        index.apply_list(Some(&list));
+        assert_eq!(
+            index.types,
+            [("Drum machines".to_string(), 2), ("Hip-hop".to_string(), 1)]
+        );
+        assert_eq!(index.list_matched(), 3);
+        let fav: HashSet<String> = ["/lib/kb6/Akai MPC2000".to_string()].into();
+        let names = |f: &Filter, default_kit: &str| -> Vec<String> {
+            search_keeping(&index, f, &fav, default_kit)
+                .iter()
+                .map(|i| index.kits[*i as usize].name.clone())
+                .collect()
+        };
+        let on = Filter {
+            list: true,
+            ..Filter::default()
+        };
+        // The favourite first, then the list type by type in rank order: the full path from
+        // another mount and the one in other letters and with ./ are found too.
+        assert_eq!(
+            names(&on, ""),
+            ["Akai MPC2000", "Roland TR-909", "CR-78", "808-samples"]
+        );
+        // The kit of new racks is kept too, also when it names a folder inside a kit.
+        assert_eq!(
+            names(&on, "/lib/kb6/Roland TR-808/Best Of/OZ"),
+            [
+                "Akai MPC2000",
+                "Roland TR-808",
+                "Roland TR-909",
+                "CR-78",
+                "808-samples"
+            ]
+        );
+        assert_eq!(
+            names(&on, "/lib/kb6/Roland TR-80"),
+            ["Akai MPC2000", "Roland TR-909", "CR-78", "808-samples"],
+            "not a kit whose name only starts the same"
+        );
+        let hip = Filter {
+            kind: Some("Hip-hop".into()),
+            ..on.clone()
+        };
+        assert_eq!(names(&hip, ""), ["808-samples"]);
+        let q = Filter {
+            query: "roland".into(),
+            source: Some("Boxed-Ear".into()),
+            ..on.clone()
+        };
+        assert_eq!(names(&q, ""), ["Roland TR-909"], "the source is not used");
+        // Off: as without a list.
+        assert_eq!(names(&Filter::default(), "").len(), 5);
+        let hip_off = Filter {
+            list: false,
+            ..hip.clone()
+        };
+        assert_eq!(names(&hip_off, "").len(), 5);
+        // Without one, no kit has a place.
+        index.apply_list(None);
+        assert!(index.types.is_empty() && index.kits.iter().all(|k| k.list.is_none()));
+        // Rows without a rank column are in the file's order; no path column is an error.
+        let plain = KitList::parse("path\na/b\nc/d\n", "f").unwrap();
+        assert_eq!(
+            plain.rows.iter().map(|r| r.rank).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(plain.types, ["Other"]);
+        assert!(KitList::parse("kit\tsource\nx\ty\n", "f").is_err());
+        assert!(KitList::parse("", "f").is_err());
+    }
+
+    #[test]
+    fn a_kit_list_set_on_one_mac_is_found_on_the_other_mount() {
+        let lib = temp("list-mount");
+        touch(&lib, "BEST-PROWAVE.tsv", "path\nkb6/x\n");
+        let folders = vec![
+            "/Volumes/NOT-MOUNTED-HERE/DRUM-KITS".to_string(),
+            lib.to_string_lossy().into_owned(),
+        ];
+        let name = lib.file_name().unwrap().to_string_lossy().into_owned();
+        let want = Some(lib.join("BEST-PROWAVE.tsv"));
+        for setting in [
+            lib.join("BEST-PROWAVE.tsv").to_string_lossy().into_owned(),
+            format!("/Volumes/SHARE/{name}/BEST-PROWAVE.tsv"),
+            "/somewhere/else/BEST-PROWAVE.tsv".to_string(),
+            "BEST-PROWAVE.tsv".to_string(),
+        ] {
+            assert_eq!(find_list_file(&setting, &folders), want, "{setting}");
+        }
+        assert_eq!(find_list_file("", &folders), None);
+        assert_eq!(find_list_file("/x/NOPE.tsv", &folders), None);
+        assert!(load_list("/x/NOPE.tsv", &folders).is_err());
+        assert_eq!(
+            load_list("BEST-PROWAVE.tsv", &folders).unwrap().rows[0].path,
+            "kb6/x"
+        );
+        // The setting is kept with the others; on unless turned off.
+        let s = Settings::from_json(r#"{"kit_list":" /k/BEST-PROWAVE.tsv "}"#);
+        assert_eq!(s.kit_list, "/k/BEST-PROWAVE.tsv");
+        assert!(s.kit_list_on);
+        assert!(Settings::default().kit_list.is_empty());
+        let off = Settings {
+            kit_list_on: false,
+            ..s
+        };
+        assert_eq!(Settings::from_json(&off.to_json()), off);
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
     fn a_search_over_a_hundred_thousand_kits_is_quick() {
         let mut kits = Vec::new();
         for i in 0..100_000 {
@@ -1356,8 +1876,7 @@ mod tests {
         }
         let index = Index {
             kits,
-            roots: Vec::new(),
-            sources: Vec::new(),
+            ..Index::default()
         }
         .finish();
         let none = HashSet::new();
@@ -1416,6 +1935,29 @@ mod tests {
     }
 
     #[test]
+    fn a_search_finds_look_alike_letters_by_their_plain_ones() {
+        assert_eq!(fold("Best of ᴏᴢ ᴀɴᴅ ʙᴇᴀᴢʏ"), "best of oz and beazy");
+        assert_eq!(fold("𝐎𝐙 ＯＺ ⓞⓩ 𝟗𝟎𝟗"), "oz oz oz 909");
+        assert_eq!(fold("Café Bøøm ß"), "cafe boom ss");
+        assert_eq!(fold("ÄÖÜ ɪ"), "aou i");
+        let kit = KitEntry::new(
+            "/lib",
+            "/lib/R/K".into(),
+            "Reddit-Drumkits",
+            "My Favorite Knocking Drums (Best of ᴏᴢ ᴀɴᴅ ʙᴇᴀᴢʏ) [ezulpq]",
+        );
+        let index = Index::of(vec![kit], Vec::new());
+        let none = HashSet::new();
+        for q in ["oz", "OZ", "beazy", "ᴏᴢ", "knocking oz"] {
+            let f = Filter {
+                query: q.into(),
+                ..Filter::default()
+            };
+            assert_eq!(search(&index, &f, &none), [0], "{q}");
+        }
+    }
+
+    #[test]
     fn settings_and_the_manifest_read_what_they_are_given() {
         let s = Settings::from_json(r#"{"folders":["/a","/b","/a"," "],"favorites":["/a/k"]}"#);
         assert_eq!(s.folders, ["/a", "/b"]);
@@ -1424,6 +1966,18 @@ mod tests {
         assert_eq!(Settings::from_json("not json"), Settings::default());
         // No folders is a choice, kept as it is.
         assert!(Settings::from_json(r#"{"folders":[]}"#).folders.is_empty());
+        // The kit of new racks: the installation's when the file does not name one, none when
+        // it names none.
+        assert_eq!(Settings::from_json("{}").default_kit, default_kit());
+        assert_eq!(Settings::from_json(r#"{"default_kit":""}"#).default_kit, "");
+        let k = Settings::from_json(r#"{"default_kit":" /k/OZ "}"#);
+        assert_eq!(k.default_kit, "/k/OZ");
+        assert_eq!(Settings::from_json(&k.to_json()), k);
+        // Copying loaded kits here: only from other computers unless set to always.
+        assert_eq!(k.copy_kits, crate::kit_copy::CopyMode::Remote);
+        let a = Settings::from_json(r#"{"copy_kits":"always"}"#);
+        assert_eq!(a.copy_kits, crate::kit_copy::CopyMode::Always);
+        assert_eq!(Settings::from_json(&a.to_json()), a);
         let dir = temp("settings");
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);

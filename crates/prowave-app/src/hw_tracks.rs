@@ -18,25 +18,61 @@ use egui::{
 // Materials of the arrange window (A.1).
 
 /// The arrange floor.
-pub const FLOOR: Color32 = theme::BONE3;
+#[allow(non_snake_case)]
+pub fn FLOOR() -> Color32 {
+    theme::BONE3()
+}
 /// The lane behind the selected track: lit a step above the floor so it reads at a glance.
-pub const FLOOR_SEL: Color32 = theme::GRID_SEL;
+#[allow(non_snake_case)]
+pub fn FLOOR_SEL() -> Color32 {
+    theme::GRID_SEL()
+}
 /// Inspector and track-list header panel.
-pub const PANEL_INSPECTOR: Color32 = Color32::from_rgb(0xe4, 0xdf, 0xd4);
+#[allow(non_snake_case)]
+pub fn PANEL_INSPECTOR() -> Color32 {
+    theme::pick(Color32::from_rgb(0xe4, 0xdf, 0xd4), theme::PANEL())
+}
 /// Menu rows (arrange, mixer).
-pub const PANEL_MENU: Color32 = Color32::from_rgb(0xe7, 0xe3, 0xd9);
+#[allow(non_snake_case)]
+pub fn PANEL_MENU() -> Color32 {
+    theme::pick(Color32::from_rgb(0xe7, 0xe3, 0xd9), theme::TOOLBAR())
+}
 /// The slot of sliders and faders.
 pub const GROOVE: Color32 = Color32::from_rgb(0x0f, 0x0f, 0x0e);
 /// Lines on the arrange floor.
-pub const BAR_LINE: Color32 = Color32::from_rgba_premultiplied(4, 4, 4, 56);
-pub const BEAT_LINE: Color32 = Color32::from_rgba_premultiplied(1, 1, 1, 18);
-pub const LANE_LINE: Color32 = Color32::from_rgba_premultiplied(3, 3, 3, 41);
+#[allow(non_snake_case)]
+pub fn BAR_LINE() -> Color32 {
+    theme::pick(
+        Color32::from_rgba_premultiplied(4, 4, 4, 56),
+        Color32::from_white_alpha(30),
+    )
+}
+#[allow(non_snake_case)]
+pub fn BEAT_LINE() -> Color32 {
+    theme::pick(
+        Color32::from_rgba_premultiplied(1, 1, 1, 18),
+        Color32::from_white_alpha(11),
+    )
+}
+#[allow(non_snake_case)]
+pub fn LANE_LINE() -> Color32 {
+    theme::pick(
+        Color32::from_rgba_premultiplied(3, 3, 3, 41),
+        Color32::from_rgb(0x26, 0x26, 0x2a),
+    )
+}
 /// The cycle's tint over the lanes.
-pub const CYCLE_TINT: Color32 = Color32::from_rgba_premultiplied(10, 4, 1, 10);
+#[allow(non_snake_case)]
+pub fn CYCLE_TINT() -> Color32 {
+    theme::pick(
+        Color32::from_rgba_premultiplied(10, 4, 1, 10),
+        Color32::from_rgba_premultiplied(12, 8, 0, 12),
+    )
+}
 /// Meter segments (A.4.6).
-pub const METER_LO: Color32 = Color32::from_rgb(0xee, 0xea, 0xdf);
-pub const METER_MID: Color32 = Color32::from_rgb(0xff, 0xe6, 0xcf);
-pub const METER_OFF: Color32 = Color32::from_rgb(0x2b, 0x29, 0x26);
+pub const METER_LO: Color32 = theme::METER_LO;
+pub const METER_MID: Color32 = theme::METER_MID;
+pub const METER_OFF: Color32 = theme::METER_OFF;
 
 // ---------------------------------------------------------------------------------------------
 // Type.
@@ -86,7 +122,7 @@ pub fn galley(
 
 /// `text` cut with "…" to fit `width` when set like [`label`].
 pub fn fit(g: &Painter, text: &str, face: Face, size: f32, em: f32, width: f32) -> String {
-    let w = |s: &str| galley(g, s, face, size, em, theme::INK).size().x - em * size;
+    let w = |s: &str| galley(g, s, face, size, em, theme::INK()).size().x - em * size;
     if w(text) <= width {
         return text.to_string();
     }
@@ -170,8 +206,8 @@ pub fn drop_shadow(g: &Painter, rect: Rect, radius: f32, dy: f32, alpha: u8) {
 /// A recessed well (track-type well, empty lanes): bone2 with a shadow cast from its top edge
 /// and a faint ring, and the light line under it.
 pub fn well(g: &Painter, rect: Rect, radius: f32) {
-    g.rect_filled(rect.translate(vec2(0.0, 1.0)), radius, theme::BONE_HI);
-    g.rect_filled(rect, radius, theme::BONE2);
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), radius, theme::BONE_HI());
+    g.rect_filled(rect, radius, theme::BONE2());
     hw::inner_shadow(g, rect, radius, 0.18);
     g.rect_stroke(
         rect,
@@ -186,31 +222,43 @@ pub fn well(g: &Painter, rect: Rect, radius: f32) {
 pub fn header_bg(g: &Painter, rect: Rect, selected: bool) {
     let (top, bottom) = if selected {
         (
-            Color32::from_rgb(0xf6, 0xf3, 0xec),
-            Color32::from_rgb(0xed, 0xe9, 0xe0),
+            theme::pick(
+                Color32::from_rgb(0xf6, 0xf3, 0xec),
+                Color32::from_rgb(0x30, 0x30, 0x35),
+            ),
+            theme::pick(
+                Color32::from_rgb(0xed, 0xe9, 0xe0),
+                Color32::from_rgb(0x2a, 0x2a, 0x2e),
+            ),
         )
     } else {
         (
-            Color32::from_rgb(0xe8, 0xe4, 0xda),
-            Color32::from_rgb(0xe0, 0xdb, 0xcf),
+            theme::pick(
+                Color32::from_rgb(0xe8, 0xe4, 0xda),
+                Color32::from_rgb(0x24, 0x24, 0x28),
+            ),
+            theme::pick(
+                Color32::from_rgb(0xe0, 0xdb, 0xcf),
+                Color32::from_rgb(0x1f, 0x1f, 0x22),
+            ),
         )
     };
     hw::gradient(g, rect, 0.0, top, bottom);
     g.hline(
         rect.x_range(),
         rect.top() + 0.5,
-        Stroke::new(1.0, Color32::from_white_alpha(150)),
+        Stroke::new(1.0, theme::emboss(150)),
     );
     g.hline(
         rect.x_range(),
         rect.bottom() - 0.5,
-        Stroke::new(1.0, theme::SEAM),
+        Stroke::new(1.0, theme::SEAM()),
     );
     if selected {
         g.rect_filled(
             Rect::from_min_size(rect.min, vec2(4.0, rect.height())),
             0.0,
-            theme::ORANGE,
+            theme::ORANGE(),
         );
     }
 }
@@ -225,19 +273,19 @@ pub fn global_header(g: &Painter, rect: Rect, name: &str) {
         Align2::LEFT_CENTER,
         name,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     seam_wide_v(g, rect.right(), rect.y_range());
 }
 
 /// A global track's lane: a recessed well on the panel, under the ruler.
 pub fn global_lane(g: &Painter, rect: Rect) {
-    g.rect_filled(rect, 0.0, theme::BONE);
+    g.rect_filled(rect, 0.0, theme::BONE());
     hw::recess(g, rect.shrink2(vec2(0.0, 2.0)), 2.0);
     g.hline(
         rect.x_range(),
         rect.bottom() - 0.5,
-        Stroke::new(1.0, theme::SEAM),
+        Stroke::new(1.0, theme::SEAM()),
     );
 }
 
@@ -246,7 +294,7 @@ pub fn plate_fill(color: Color32, lit: bool) -> Color32 {
     if lit {
         color
     } else {
-        hw::lerp(color, theme::BONE2, 0.45)
+        hw::lerp(color, theme::BONE2(), 0.45)
     }
 }
 
@@ -285,7 +333,7 @@ pub fn plate(g: &Painter, rect: Rect, color: Color32, lit: bool) {
         Stroke::new(
             1.0,
             if lit {
-                theme::INK
+                theme::INK()
             } else {
                 Color32::from_rgba_unmultiplied(20, 20, 19, 120)
             },
@@ -305,7 +353,7 @@ pub fn dark_plate(g: &Painter, rect: Rect) {
             pos2(rect.right(), rect.bottom() + 1.0),
         ),
         0.0,
-        theme::BONE_HI,
+        theme::BONE_HI(),
     );
     hw::gradient(
         g,
@@ -317,7 +365,7 @@ pub fn dark_plate(g: &Painter, rect: Rect) {
     g.rect_stroke(
         rect,
         0.0,
-        Stroke::new(1.0, theme::CAP_EDGE),
+        Stroke::new(1.0, theme::CAP_EDGE()),
         StrokeKind::Inside,
     );
 }
@@ -325,17 +373,17 @@ pub fn dark_plate(g: &Painter, rect: Rect) {
 /// The 3-point vertical seam on a panel's right edge (dark, light, dark).
 pub fn seam_wide_v(g: &Painter, x: f32, y: impl Into<egui::Rangef>) {
     let y = y.into();
-    g.vline(x - 2.5, y, Stroke::new(1.0, theme::SEAM));
-    g.vline(x - 1.5, y, Stroke::new(1.0, theme::BONE_HI));
-    g.vline(x - 0.5, y, Stroke::new(1.0, theme::SEAM));
+    g.vline(x - 2.5, y, Stroke::new(1.0, theme::SEAM()));
+    g.vline(x - 1.5, y, Stroke::new(1.0, theme::BONE_HI()));
+    g.vline(x - 0.5, y, Stroke::new(1.0, theme::SEAM()));
 }
 
 /// The 3-point horizontal seam along a row's bottom edge.
 pub fn seam_wide_h(g: &Painter, x: impl Into<egui::Rangef>, y: f32) {
     let x = x.into();
-    g.hline(x, y - 2.5, Stroke::new(1.0, theme::SEAM));
-    g.hline(x, y - 1.5, Stroke::new(1.0, theme::BONE_HI));
-    g.hline(x, y - 0.5, Stroke::new(1.0, theme::SEAM_DK));
+    g.hline(x, y - 2.5, Stroke::new(1.0, theme::SEAM()));
+    g.hline(x, y - 1.5, Stroke::new(1.0, theme::BONE_HI()));
+    g.hline(x, y - 0.5, Stroke::new(1.0, theme::SEAM_DK()));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -407,7 +455,7 @@ pub fn small_key(
 /// The colour a meter segment at `db` lights in.
 pub fn meter_colour(db: f32) -> Color32 {
     if db > 0.0 {
-        theme::ORANGE
+        theme::METER_HOT
     } else if db > -6.0 {
         METER_MID
     } else {
@@ -429,7 +477,7 @@ pub fn slider(
     dim: bool,
 ) -> Rect {
     // Groove: inner shadow and the light line under it.
-    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 2.0, theme::BONE_HI);
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 2.0, theme::BONE_HI());
     g.rect_filled(rect, 2.0, GROOVE);
     // Ticks.
     for i in 0..=4 {
@@ -437,7 +485,7 @@ pub fn slider(
         g.vline(
             x.round() + 0.5,
             rect.bottom() + 7.0..=rect.bottom() + 11.0,
-            Stroke::new(1.0, theme::INK2.gamma_multiply(0.5)),
+            Stroke::new(1.0, theme::INK2().gamma_multiply(0.5)),
         );
     }
     // The level inside the groove: 2-point segments, 1 apart, one row per channel.
@@ -451,7 +499,11 @@ pub fn slider(
             let mut x = inner.left();
             while x + 2.0 <= upto {
                 let db = db_at((x - inner.left()) / inner.width());
-                let c = if dim { theme::PRINT } else { meter_colour(db) };
+                let c = if dim {
+                    theme::PRINT()
+                } else {
+                    meter_colour(db)
+                };
                 g.rect_filled(
                     Rect::from_min_size(pos2(x, y0), vec2(2.0, row_h.max(1.0))),
                     0.0,
@@ -485,13 +537,13 @@ pub fn thumb_h(g: &Painter, r: Rect) {
     g.rect_stroke(
         r,
         2.0,
-        Stroke::new(1.0, theme::CAP_EDGE),
+        Stroke::new(1.0, theme::CAP_EDGE()),
         StrokeKind::Inside,
     );
     g.rect_filled(
         Rect::from_center_size(r.center(), vec2(3.0, r.height() - 6.0)),
         0.0,
-        theme::BONE_HI,
+        theme::BONE_HI(),
     );
 }
 
@@ -511,7 +563,7 @@ pub fn knob(g: &Painter, c: Pos2, d: f32, value: f32, scale: bool) {
                     c + dir * (r + 4.0),
                     c + dir * (r + if major { 9.5 } else { 7.0 }),
                 ],
-                Stroke::new(if major { 1.8 } else { 1.1 }, theme::INK2),
+                Stroke::new(if major { 1.8 } else { 1.1 }, theme::INK2()),
             );
         }
     }
@@ -581,7 +633,7 @@ pub fn knob(g: &Painter, c: Pos2, d: f32, value: f32, scale: bool) {
         [p0, p1],
         Stroke::new(5.0, Color32::from_rgba_unmultiplied(255, 90, 20, 70)),
     );
-    g.line_segment([p0, p1], Stroke::new(3.0, theme::ORANGE));
+    g.line_segment([p0, p1], Stroke::new(3.0, theme::ORANGE()));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -767,8 +819,9 @@ impl Material {
     /// The print on the body: notes, hits, waveform.
     pub fn ink(self) -> Color32 {
         match self {
-            Material::Inst => theme::BONE_HI,
-            Material::Drum | Material::Audio => theme::INK,
+            Material::Inst => theme::REGION_PRINT(),
+            Material::Drum => theme::pick(theme::INK(), theme::INK2()),
+            Material::Audio => theme::REGION_AUDIO_PRINT(),
         }
     }
 
@@ -776,15 +829,22 @@ impl Material {
     pub fn grid(self) -> Color32 {
         match self {
             Material::Inst => Color32::from_rgba_unmultiplied(233, 229, 219, 23),
+            _ if theme::is_dark() => Color32::from_rgba_unmultiplied(236, 235, 230, 26),
             _ => Color32::from_rgba_unmultiplied(20, 20, 19, 33),
         }
     }
 
     fn header(self) -> Color32 {
         match self {
-            Material::Inst => Color32::from_rgb(0x3d, 0x3b, 0x37),
-            Material::Drum => theme::INK,
-            Material::Audio => Color32::from_rgb(0x5c, 0x57, 0x4e),
+            Material::Inst => theme::pick(
+                Color32::from_rgb(0x3d, 0x3b, 0x37),
+                Color32::from_rgb(0x4a, 0x4a, 0x52),
+            ),
+            Material::Drum => theme::pick(theme::INK(), Color32::from_rgb(0x0f, 0x0f, 0x11)),
+            Material::Audio => theme::pick(
+                Color32::from_rgb(0x5c, 0x57, 0x4e),
+                Color32::from_rgb(0x46, 0x4e, 0x59),
+            ),
         }
     }
 }
@@ -837,8 +897,14 @@ pub fn region(g: &Painter, rect: Rect, rp: &RegionPaint<'_>) -> Rect {
             hw::lerp(body_c, Color32::BLACK, 0.35),
         ),
         Material::Drum => (
-            Color32::from_rgb(0xec, 0xe7, 0xdd),
-            Color32::from_rgb(0xdd, 0xd7, 0xca),
+            theme::pick(
+                Color32::from_rgb(0xec, 0xe7, 0xdd),
+                Color32::from_rgb(0x2e, 0x2e, 0x33),
+            ),
+            theme::pick(
+                Color32::from_rgb(0xdd, 0xd7, 0xca),
+                Color32::from_rgb(0x26, 0x26, 0x2a),
+            ),
         ),
         Material::Audio => (
             hw::lerp(body_c, Color32::WHITE, 0.06),
@@ -854,7 +920,7 @@ pub fn region(g: &Painter, rect: Rect, rp: &RegionPaint<'_>) -> Rect {
         (top, bottom)
     };
     if faded {
-        g.rect_filled(rect, radius, FLOOR);
+        g.rect_filled(rect, radius, FLOOR());
         hw::gradient(
             g,
             rect,
@@ -882,15 +948,15 @@ pub fn region(g: &Painter, rect: Rect, rp: &RegionPaint<'_>) -> Rect {
     // A selected region that does not sound keeps its faded header; only its outline says it
     // is selected.
     let head_c = if rp.recording {
-        theme::DANGER
+        theme::DANGER()
     } else if rp.selected && !faded {
-        theme::ORANGE
+        theme::ORANGE()
     } else {
         rp.material.header()
     };
     // A faded region's header is a flat bone bar: its print stays readable.
     let head_c = if faded && !rp.recording {
-        theme::BONE3
+        theme::BONE3()
     } else {
         head_c
     };
@@ -902,26 +968,26 @@ pub fn region(g: &Painter, rect: Rect, rp: &RegionPaint<'_>) -> Rect {
     };
     g.rect_filled(head, cr, head_c);
     if rp.muted {
-        hatch(g, head, 2.0, 6.0, theme::INK.gamma_multiply(0.22));
+        hatch(g, head, 2.0, 6.0, theme::INK().gamma_multiply(0.22));
     }
     let lit = (rp.selected && !faded) || rp.recording;
     let text_c = if lit {
-        theme::INK
+        theme::ON_ACCENT()
     } else if faded {
-        theme::INK2
+        theme::INK2()
     } else {
-        theme::BONE
+        theme::text_on(head_c)
     };
     let clip = g.with_clip_rect(head.shrink2(vec2(1.0, 0.0)).intersect(g.clip_rect()));
     let mut x = head.left() + 5.0 + rp.lead;
     if hh >= 11.0 && rect.width() > 34.0 + rp.lead {
         // Type chip: bone with ink print; inverted on a selected region.
         let (chip_bg, chip_fg) = if lit {
-            (theme::INK, theme::ORANGE)
+            (theme::ON_ACCENT(), head_c)
         } else if faded {
-            (theme::PRINT, theme::BONE2)
+            (theme::PRINT(), theme::BONE2())
         } else {
-            (theme::BONE, theme::INK)
+            (theme::BONE(), theme::INK())
         };
         let code = if rp.recording {
             "REC"
@@ -944,16 +1010,16 @@ pub fn region(g: &Painter, rect: Rect, rp: &RegionPaint<'_>) -> Rect {
     // A muted region says so at the right of its header.
     let mut name_end = head.right() - 4.0;
     if rp.muted && hh >= 11.0 && rect.width() > 110.0 {
-        let gal = galley(&clip, "MUTED", Face::Lcd, 9.0, 0.1, theme::BONE);
+        let gal = galley(&clip, "MUTED", Face::Lcd, 9.0, 0.1, theme::BONE());
         let chip = Rect::from_min_size(
             pos2(head.right() - 8.0 - gal.size().x, head.center().y - 5.5),
             vec2(gal.size().x + 4.0, 11.0),
         );
-        clip.rect_filled(chip, 1.5, theme::INK2);
+        clip.rect_filled(chip, 1.5, theme::INK2());
         clip.galley(
             pos2(chip.left() + 2.5, chip.center().y - gal.size().y / 2.0),
             gal,
-            theme::BONE,
+            theme::BONE(),
         );
         name_end = chip.left() - 6.0;
     }
@@ -989,14 +1055,14 @@ pub fn region(g: &Painter, rect: Rect, rp: &RegionPaint<'_>) -> Rect {
         g.rect_stroke(
             rect,
             radius,
-            Stroke::new(2.0, if faded { theme::ORANGE } else { theme::INK }),
+            Stroke::new(2.0, if faded { theme::ORANGE() } else { theme::INK() }),
             StrokeKind::Inside,
         );
     } else {
         // On the black MIDI material an ink outline would vanish: there it is a lighter edge,
         // so two regions that touch still read as two.
         let edge = if rp.material == Material::Inst && !rp.recording {
-            hw::lerp(rp.look.body, theme::BONE, if faded { 0.15 } else { 0.28 })
+            hw::lerp(rp.look.body, theme::BONE(), if faded { 0.15 } else { 0.28 })
         } else {
             Color32::from_rgba_unmultiplied(20, 20, 19, 191)
         };
@@ -1034,20 +1100,20 @@ pub fn cycle_band(g: &Painter, band: Rect, on: bool, text: &str) {
         return;
     }
     if on {
-        g.rect_filled(band, 0.0, theme::ORANGE);
+        g.rect_filled(band, 0.0, theme::ORANGE());
         g.hline(
             band.x_range(),
             band.bottom() - 0.5,
             Stroke::new(1.0, Color32::from_black_alpha(64)),
         );
     } else {
-        g.rect_filled(band, 0.0, theme::BONE2);
+        g.rect_filled(band, 0.0, theme::BONE2());
         hw::inner_shadow(g, band, 0.0, 0.15);
     }
     // "CYCLE" and the range: ink on the orange; off, ink on a lit bone chip so it still reads
     // over the recessed band.
     let text = format!("CYCLE  {text}");
-    let gal = galley(g, &text, Face::Lcd, 10.0, 0.08, theme::INK);
+    let gal = galley(g, &text, Face::Lcd, 10.0, 0.08, theme::INK());
     let w = gal.size().x + 12.0;
     if w + 4.0 < band.width() {
         let plate = Rect::from_min_size(
@@ -1055,17 +1121,17 @@ pub fn cycle_band(g: &Painter, band: Rect, on: bool, text: &str) {
             vec2(w, 12.0),
         );
         let fg = if on {
-            g.rect_filled(plate, 0.0, theme::ORANGE);
-            theme::INK
+            g.rect_filled(plate, 0.0, theme::ORANGE());
+            theme::ON_ACCENT()
         } else {
-            g.rect_filled(plate, 1.5, theme::BONE_HI);
+            g.rect_filled(plate, 1.5, theme::BONE_HI());
             g.rect_stroke(
                 plate,
                 1.5,
-                Stroke::new(1.0, theme::SEAM),
+                Stroke::new(1.0, theme::SEAM()),
                 StrokeKind::Inside,
             );
-            theme::INK2
+            theme::INK2()
         };
         label(
             g,
@@ -1108,7 +1174,7 @@ pub fn playhead_flag(g: &Painter, x: f32, top: f32, color: Color32) {
     g.add(Shape::convex_polygon(
         pts,
         color,
-        Stroke::new(1.0, theme::INK),
+        Stroke::new(1.0, theme::INK()),
     ));
 }
 
@@ -1121,15 +1187,20 @@ pub fn bbdt_text((bar, beat, div, tick): (u32, u32, u32, u32)) -> String {
 /// pointer): the system arrow is hidden and this is drawn instead, a small cross on the exact
 /// spot a click acts on and the tool's glyph on a bone chip beside it.
 pub fn tool_cursor(g: &Painter, at: Pos2, glyph: Glyph) {
-    for (w, c) in [(3.0, theme::BONE_HI), (1.0, theme::INK)] {
+    for (w, c) in [(3.0, theme::BONE_HI()), (1.0, theme::INK())] {
         let st = Stroke::new(w, c);
         g.line_segment([at - vec2(5.0, 0.0), at + vec2(5.0, 0.0)], st);
         g.line_segment([at - vec2(0.0, 5.0), at + vec2(0.0, 5.0)], st);
     }
     let chip = Rect::from_min_size(at + vec2(7.0, 7.0), vec2(22.0, 22.0));
-    g.rect_filled(chip, 3.0, theme::BONE_HI);
-    g.rect_stroke(chip, 3.0, Stroke::new(1.0, theme::INK), StrokeKind::Inside);
-    self::glyph(g, chip.center(), 16.0, glyph, theme::INK);
+    g.rect_filled(chip, 3.0, theme::BONE_HI());
+    g.rect_stroke(
+        chip,
+        3.0,
+        Stroke::new(1.0, theme::INK()),
+        StrokeKind::Inside,
+    );
+    self::glyph(g, chip.center(), 16.0, glyph, theme::INK());
 }
 
 #[cfg(test)]
@@ -1146,7 +1217,7 @@ mod tests {
     fn meter_colours_follow_the_db_thresholds() {
         assert_eq!(meter_colour(-20.0), METER_LO);
         assert_eq!(meter_colour(-3.0), METER_MID);
-        assert_eq!(meter_colour(1.0), theme::ORANGE);
+        assert_eq!(meter_colour(1.0), theme::METER_HOT);
     }
 
     #[test]

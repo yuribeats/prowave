@@ -65,7 +65,7 @@ fn tuner(ui: &mut Ui, rect: Rect, reading: Option<(f32, f32, f32)>) {
                 pos2(left, glass.top() + 70.0),
                 &t,
                 18.0,
-                gear::LCD_INK,
+                gear::LCD_INK(),
                 true,
             );
             gear::lcd_text(
@@ -89,7 +89,7 @@ fn tuner(ui: &mut Ui, rect: Rect, reading: Option<(f32, f32, f32)>) {
         pos2(glass.left() + 150.0, glass.top() + 44.0),
         pos2(glass.right() - 150.0, glass.top() + 96.0),
     );
-    let ink = gear::LCD_INK;
+    let ink = gear::LCD_INK();
     for c in (-50..=50).step_by(5) {
         let x = bar.left() + (c + 50) as f32 / 100.0 * bar.width();
         let major = c % 25 == 0;
@@ -210,7 +210,7 @@ pub fn body(
             Align2::LEFT_CENTER,
             t,
             11.0,
-            gear::INK2,
+            gear::INK2(),
         );
     };
     let mut x = left;
@@ -289,7 +289,7 @@ pub fn body(
             Align2::LEFT_CENTER,
             tr("MIDI notes from"),
             11.0,
-            gear::INK2,
+            gear::INK2(),
         );
         let refs: Vec<&str> = list.iter().map(String::as_str).collect();
         if let Some(i) = gear::choice_field(
@@ -420,7 +420,7 @@ pub fn body(
         Align2::LEFT_CENTER,
         tr("Presets"),
         11.0,
-        gear::INK2,
+        gear::INK2(),
     );
     let resp = gear::field(ui, pr, id.with("presets"), tr("Presets"), true);
     egui::Popup::menu(&resp).show(|ui| {

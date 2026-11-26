@@ -25,9 +25,18 @@ use std::sync::Arc;
 const SPACE: f32 = 9.0;
 const HALF: f32 = SPACE / 2.0;
 /// Music is printed in black on a bone sheet set into the chassis.
-const INK: Color32 = theme::INK;
-const STAFF_INK: Color32 = theme::INK2;
-const PAPER: Color32 = theme::BONE_HI;
+#[allow(non_snake_case)]
+fn INK() -> Color32 {
+    theme::INK()
+}
+#[allow(non_snake_case)]
+fn STAFF_INK() -> Color32 {
+    theme::INK2()
+}
+#[allow(non_snake_case)]
+fn PAPER() -> Color32 {
+    theme::BONE_HI()
+}
 /// Width reserved at the left for the clefs.
 const CLEF_W: f32 = 50.0;
 /// The margin of chassis around the sheet.
@@ -704,12 +713,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
                 s.score.beat_px = (lo + n * (hi - lo)).exp();
             }
             let c = pos2(hz.left() - 14.0, cy);
-            let st = Stroke::new(1.6, theme::INK2);
+            let st = Stroke::new(1.6, theme::INK2());
             g0.line_segment([c - vec2(7.0, 0.0), c + vec2(7.0, 0.0)], st);
             for (tip, d) in [(c - vec2(7.0, 0.0), 1.0), (c + vec2(7.0, 0.0), -1.0)] {
                 g0.add(Shape::convex_polygon(
                     vec![tip, tip + vec2(4.0 * d, 3.5), tip + vec2(4.0 * d, -3.5)],
-                    theme::INK2,
+                    theme::INK2(),
                     Stroke::NONE,
                 ));
             }
@@ -747,9 +756,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
     g0.rect_filled(
         sheet.translate(vec2(0.0, 1.5)),
         2.0,
-        theme::INK.gamma_multiply(0.12),
+        theme::INK().gamma_multiply(0.12),
     );
-    g0.rect_filled(sheet, 2.0, PAPER);
+    g0.rect_filled(sheet, 2.0, PAPER());
     let g = ui.painter_at(sheet);
 
     // A note just added sounds for a moment.
@@ -863,7 +872,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
     let (num, den) = p.signature_of_bar(p.beats_to_bar(origin).floor().max(0.0) as u32);
     let start_bar = p.beats_to_bar(origin).floor().max(0.0) as usize;
     let playhead = (p.position_beats - origin) as f32;
-    let staff_st = Stroke::new(1.0, STAFF_INK);
+    let staff_st = Stroke::new(1.0, STAFF_INK());
     for (k, sys) in systems.iter().enumerate() {
         if sys.bottom() < sheet.top() || sys.top() > sheet.bottom() {
             continue;
@@ -877,7 +886,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
             }
         }
         // The system's line and brace at its left.
-        g.vline(sys.left, t_top..=b_bot, Stroke::new(2.0, INK));
+        g.vline(sys.left, t_top..=b_bot, Stroke::new(2.0, INK()));
         brace(&g, sys.left - 4.0, t_top, b_bot);
         treble_clef(&g, pos2(clef_x + 10.0, lay.y(Staff::Treble, 39)));
         bass_clef(&g, pos2(clef_x + 8.0, lay.y(Staff::Bass, 33)));
@@ -907,7 +916,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
                         &text,
                         Face::SilkX,
                         22.0,
-                        INK,
+                        INK(),
                     );
                 }
             }
@@ -922,18 +931,18 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
             let x = sys.x_of(at);
             let end = b == nbars;
             if b > sys.bars.0 || k > 0 {
-                g.vline(x, t_top..=b_bot, Stroke::new(1.0, INK));
+                g.vline(x, t_top..=b_bot, Stroke::new(1.0, INK()));
             }
             if end {
-                g.vline(x - 4.0, t_top..=b_bot, Stroke::new(1.0, INK));
-                g.vline(x + 0.5, t_top..=b_bot, Stroke::new(3.0, INK));
+                g.vline(x - 4.0, t_top..=b_bot, Stroke::new(1.0, INK()));
+                g.vline(x + 0.5, t_top..=b_bot, Stroke::new(3.0, INK()));
             }
             if b < sys.bars.1 {
                 let bx = if b == sys.bars.0 { x - 4.0 } else { x };
                 g.vline(
                     bx,
                     t_top - 18.0..=t_top - 12.0,
-                    Stroke::new(1.0, theme::PRINT),
+                    Stroke::new(1.0, theme::PRINT()),
                 );
                 hw::text(
                     &g,
@@ -942,7 +951,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: usize,
                     &crate::piano_roll::bar_label((start_bar + b + 1) as u32),
                     Face::Lcd,
                     10.0,
-                    theme::INK2,
+                    theme::INK2(),
                 );
             }
         }
@@ -1111,29 +1120,29 @@ fn notehead(g: &egui::Painter, c: Pos2, value: f32) {
     if value >= 4.0 - EPS {
         g.add(Shape::convex_polygon(
             oval(6.6, 4.4, 0.0),
-            INK,
+            INK(),
             Stroke::NONE,
         ));
         g.add(Shape::convex_polygon(
             oval(2.6, 3.6, -35.0),
-            PAPER,
+            PAPER(),
             Stroke::NONE,
         ));
     } else if value >= 2.0 - EPS {
         g.add(Shape::convex_polygon(
             oval(5.8, 4.1, -22.0),
-            INK,
+            INK(),
             Stroke::NONE,
         ));
         g.add(Shape::convex_polygon(
             oval(4.6, 1.9, -22.0),
-            PAPER,
+            PAPER(),
             Stroke::NONE,
         ));
     } else {
         g.add(Shape::convex_polygon(
             oval(5.8, 4.1, -22.0),
-            INK,
+            INK(),
             Stroke::NONE,
         ));
     }
@@ -1155,7 +1164,7 @@ fn draw_chord(g: &egui::Painter, lay: &Staves, x: f32, chord: &[NoteItem]) {
     // Ledger lines for notes above or below the staff.
     let ledger = |step: i32| {
         let ly = lay.y(staff, step);
-        g.hline(x - 9.0..=x + 9.0, ly, Stroke::new(1.2, STAFF_INK));
+        g.hline(x - 9.0..=x + 9.0, ly, Stroke::new(1.2, STAFF_INK()));
     };
     let hi_line = bottom + 8;
     if low < bottom {
@@ -1196,7 +1205,7 @@ fn draw_chord(g: &egui::Painter, lay: &Staves, x: f32, chord: &[NoteItem]) {
             } else {
                 0.0
             };
-            g.circle_filled(pos2(x + dx + 10.0, y + dy), 1.7, INK);
+            g.circle_filled(pos2(x + dx + 10.0, y + dy), 1.7, INK());
         }
         if let Some(a) = n.accidental {
             let ax = x - head_w - 7.0 - (acc_k % 2) as f32 * 8.0;
@@ -1219,7 +1228,7 @@ fn draw_chord(g: &egui::Painter, lay: &Staves, x: f32, chord: &[NoteItem]) {
         let y = lay.y(staff, high);
         (x - head_w + 0.6, y + 1.0, lay.y(staff, low) + 3.5 * SPACE)
     };
-    g.line_segment([pos2(sx, y0), pos2(sx, y1)], Stroke::new(1.3, INK));
+    g.line_segment([pos2(sx, y0), pos2(sx, y1)], Stroke::new(1.3, INK()));
     let flags = if value <= 0.375 {
         2
     } else if value <= 0.75 {
@@ -1239,7 +1248,7 @@ fn draw_chord(g: &egui::Painter, lay: &Staves, x: f32, chord: &[NoteItem]) {
                 a + vec2(8.5, 7.0 * dir),
                 a + vec2(6.5, 16.0 * dir),
             ],
-            Stroke::new(1.8, INK),
+            Stroke::new(1.8, INK()),
         );
     }
 }
@@ -1275,15 +1284,15 @@ fn draw_tie(g: &egui::Painter, lay: &Staves, x0: f32, x1: f32, n: &NoteItem) {
     let (outer, inner) = (pts(1.0), pts(0.72));
     for k in 0..16 {
         let mut mesh = egui::epaint::Mesh::default();
-        mesh.colored_vertex(outer[k], INK);
-        mesh.colored_vertex(outer[k + 1], INK);
-        mesh.colored_vertex(inner[k + 1], INK);
-        mesh.colored_vertex(inner[k], INK);
+        mesh.colored_vertex(outer[k], INK());
+        mesh.colored_vertex(outer[k + 1], INK());
+        mesh.colored_vertex(inner[k + 1], INK());
+        mesh.colored_vertex(inner[k], INK());
         mesh.add_triangle(0, 1, 2);
         mesh.add_triangle(0, 2, 3);
         g.add(Shape::mesh(mesh));
     }
-    g.add(Shape::line(outer, Stroke::new(0.8, INK)));
+    g.add(Shape::line(outer, Stroke::new(0.8, INK())));
 }
 
 fn draw_rest(g: &egui::Painter, lay: &Staves, x: f32, r: &RestItem) {
@@ -1296,23 +1305,23 @@ fn draw_rest(g: &egui::Painter, lay: &Staves, x: f32, r: &RestItem) {
         g.rect_filled(
             Rect::from_min_size(pos2(x - 6.0, line(3)), vec2(12.0, HALF + 0.5)),
             0.0,
-            INK,
+            INK(),
         );
     } else if v >= 2.0 - 1e-3 {
         // A half rest sits on the middle line.
         g.rect_filled(
             Rect::from_min_size(pos2(x - 6.0, line(2) - HALF - 0.5), vec2(12.0, HALF + 0.5)),
             0.0,
-            INK,
+            INK(),
         );
     } else if v >= 1.0 - 1e-3 {
         // A quarter rest: a thin stroke down, a thick one back, a thin one down and the hook.
         let c = line(2);
-        let thin = Stroke::new(1.4, INK);
+        let thin = Stroke::new(1.4, INK());
         g.line_segment([p(x, c, -0.3, -1.5), p(x, c, 0.35, -0.65)], thin);
         g.line_segment(
             [p(x, c, 0.35, -0.65), p(x, c, -0.25, 0.1)],
-            Stroke::new(3.4, INK),
+            Stroke::new(3.4, INK()),
         );
         g.line_segment([p(x, c, -0.25, 0.1), p(x, c, 0.35, 0.8)], thin);
         curve(
@@ -1323,7 +1332,7 @@ fn draw_rest(g: &egui::Painter, lay: &Staves, x: f32, r: &RestItem) {
                 p(x, c, -0.65, 1.05),
                 p(x, c, -0.05, 1.55),
             ],
-            Stroke::new(1.8, INK),
+            Stroke::new(1.8, INK()),
         );
     } else {
         // Eighth and sixteenth rests: a slanted stem with a flag and a ball for each.
@@ -1331,7 +1340,7 @@ fn draw_rest(g: &egui::Painter, lay: &Staves, x: f32, r: &RestItem) {
         let c = line(3) - HALF;
         let top = p(x, c, 0.45, -0.55);
         let foot = p(x, c, -0.15, 1.1 + (flags - 1) as f32);
-        g.line_segment([top, foot], Stroke::new(1.4, INK));
+        g.line_segment([top, foot], Stroke::new(1.4, INK()));
         for f in 0..flags {
             let fy = f as f32;
             let tip = p(x, c, 0.45 - 0.22 * fy, -0.55 + fy);
@@ -1344,9 +1353,9 @@ fn draw_rest(g: &egui::Painter, lay: &Staves, x: f32, r: &RestItem) {
                     tip + vec2(-3.0, 2.5),
                     tip,
                 ],
-                Stroke::new(1.4, INK),
+                Stroke::new(1.4, INK()),
             );
-            g.circle_filled(ball, 2.1, INK);
+            g.circle_filled(ball, 2.1, INK());
         }
     }
 }
@@ -1366,27 +1375,27 @@ fn brace(g: &egui::Painter, x: f32, top: f32, bottom: f32) {
         let (t0, t1) = (k as f32 / n as f32, (k + 1) as f32 / n as f32);
         let u = if t0 < 0.5 { t0 * 2.0 } else { (1.0 - t0) * 2.0 };
         let w = 1.2 + 4.8 * (u * std::f32::consts::PI).sin();
-        g.line_segment([at(t0), at(t1)], Stroke::new(w, INK));
+        g.line_segment([at(t0), at(t1)], Stroke::new(w, INK()));
     }
 }
 
 /// A sharp sign centred at `c`.
 fn sharp(g: &egui::Painter, c: Pos2) {
-    let stroke = Stroke::new(1.1, INK);
+    let stroke = Stroke::new(1.1, INK());
     for dx in [-1.8, 1.8] {
         g.line_segment([c + vec2(dx, -6.0), c + vec2(dx, 6.0)], stroke);
     }
     for dy in [-1.8, 1.8] {
         g.line_segment(
             [c + vec2(-4.0, dy + 1.0), c + vec2(4.0, dy - 1.0)],
-            Stroke::new(2.0, INK),
+            Stroke::new(2.0, INK()),
         );
     }
 }
 
 /// A flat sign centred at `c`: a stem and a belly.
 fn flat(g: &egui::Painter, c: Pos2) {
-    let stroke = Stroke::new(1.2, INK);
+    let stroke = Stroke::new(1.2, INK());
     g.line_segment([c + vec2(-2.0, -7.0), c + vec2(-2.0, 3.5)], stroke);
     g.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(
         [
@@ -1403,16 +1412,16 @@ fn flat(g: &egui::Painter, c: Pos2) {
 
 /// A natural sign centred at `c`.
 fn natural(g: &egui::Painter, c: Pos2) {
-    let stroke = Stroke::new(1.1, INK);
+    let stroke = Stroke::new(1.1, INK());
     g.line_segment([c + vec2(-2.5, -7.0), c + vec2(-2.5, 3.0)], stroke);
     g.line_segment([c + vec2(2.5, -3.0), c + vec2(2.5, 7.0)], stroke);
     g.line_segment(
         [c + vec2(-2.5, 3.0), c + vec2(2.5, 1.5)],
-        Stroke::new(2.0, INK),
+        Stroke::new(2.0, INK()),
     );
     g.line_segment(
         [c + vec2(-2.5, -1.5), c + vec2(2.5, -3.0)],
-        Stroke::new(2.0, INK),
+        Stroke::new(2.0, INK()),
     );
 }
 
@@ -1427,7 +1436,7 @@ fn curve(g: &egui::Painter, pts: [Pos2; 4], stroke: Stroke) {
 
 /// The treble clef, curled round the G line, which is where `at` is.
 fn treble_clef(g: &egui::Painter, at: Pos2) {
-    let stroke = Stroke::new(1.8, INK);
+    let stroke = Stroke::new(1.8, INK());
     let p = |x: f32, y: f32| at + vec2(x, y) * SPACE;
     // The tail below the staff, the long stroke up to the top, the hump, the big loop round
     // the G line and the small curl inside it.
@@ -1461,14 +1470,14 @@ fn treble_clef(g: &egui::Painter, at: Pos2) {
         [p(1.3, 0.6), p(1.0, -0.6), p(-0.5, -0.7), p(-0.3, 0.3)],
         stroke,
     );
-    g.circle_filled(p(-0.9, 3.0), 1.8, INK);
+    g.circle_filled(p(-0.9, 3.0), 1.8, INK());
 }
 
 /// The bass clef, with its dot on the F line, which is where `at` is.
 fn bass_clef(g: &egui::Painter, at: Pos2) {
-    let stroke = Stroke::new(1.9, INK);
+    let stroke = Stroke::new(1.9, INK());
     let p = |x: f32, y: f32| at + vec2(x, y) * SPACE;
-    g.circle_filled(p(-0.7, 0.0), 0.62 * SPACE, INK);
+    g.circle_filled(p(-0.7, 0.0), 0.62 * SPACE, INK());
     curve(
         g,
         [p(-0.7, 0.0), p(0.0, -1.9), p(2.0, -1.4), p(1.8, 0.5)],
@@ -1480,7 +1489,7 @@ fn bass_clef(g: &egui::Painter, at: Pos2) {
         stroke,
     );
     for dy in [-0.65, 0.65] {
-        g.circle_filled(p(2.45, dy), 0.28 * SPACE, INK);
+        g.circle_filled(p(2.45, dy), 0.28 * SPACE, INK());
     }
 }
 

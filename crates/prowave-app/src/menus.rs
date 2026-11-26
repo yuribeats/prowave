@@ -109,6 +109,8 @@ const SUBMENUS: &[(&str, &[&str])] = &[
             "Track as Audio File…",
             "All Tracks as Audio Files…",
             "Score as MusicXML…",
+            "-",
+            "Apply Follow Rack Groove",
         ],
     ),
     (
@@ -171,6 +173,7 @@ const SUBMENUS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Language", LANGUAGE),
+    ("Theme", theme::MENU_THEMES),
     ("I/O Buffer Size", BUFFER_SIZES),
     ("Process Buffer", &["Small", "Medium", "Large"]),
     (
@@ -429,6 +432,9 @@ const VIEW: &[&str] = &[
     "Show Smart Tempo",
     "Colour Spectrogram",
     "-",
+    "Theme",
+    "Wood Cheeks",
+    "-",
     "Bigger Interface",
     "Smaller Interface",
     "Actual Interface Size",
@@ -503,6 +509,9 @@ pub(crate) const MENUS: [(&str, &[&str]); 9] = [
 
 /// Entries that can show a check mark (see [`checked`]).
 pub(crate) const CHECKABLE: &[&str] = &[
+    "Graphite Amber",
+    "Bone",
+    "Wood Cheeks",
     "Show Editor",
     "Cycle Mode",
     "Show Global Tracks",
@@ -525,6 +534,7 @@ pub(crate) const CHECKABLE: &[&str] = &[
     "Software Monitoring",
     "Low Latency Mode",
     "Fit to Grid on Drop",
+    "Apply Follow Rack Groove",
     "Channel Rack",
     "Pitch Editor",
     "MIDI Monitor",
@@ -581,40 +591,44 @@ struct Look {
 }
 
 /// Drop-downs in the black field material of the value fields.
-const DARK: Look = Look {
-    bar: theme::BONE,
-    bar_text: theme::INK,
-    menu: theme::CAP,
-    text: theme::ON_DARK,
-    dim: theme::ON_DARK_DIM,
-    key: theme::ON_DARK_DIM,
-    hover: Color32::from_rgb(0x12, 0x11, 0x10),
-    hover_shade: 0.5,
-    hover_text: theme::ON_DARK,
-    separator: Color32::from_rgb(0x0b, 0x0b, 0x0a),
-    separator_hi: Color32::from_rgb(0x3a, 0x38, 0x35),
-};
+fn dark_look() -> Look {
+    Look {
+        bar: theme::BONE(),
+        bar_text: theme::INK(),
+        menu: theme::CAP(),
+        text: theme::ON_DARK(),
+        dim: theme::ON_DARK_DIM(),
+        key: theme::ON_DARK_DIM(),
+        hover: Color32::from_rgb(0x12, 0x11, 0x10),
+        hover_shade: 0.5,
+        hover_text: theme::ON_DARK(),
+        separator: Color32::from_rgb(0x0b, 0x0b, 0x0a),
+        separator_hi: Color32::from_rgb(0x3a, 0x38, 0x35),
+    }
+}
 
 /// Drop-downs in a bone faceplate, printed in ink.
-const LIGHT: Look = Look {
-    bar: theme::BONE,
-    bar_text: theme::INK,
-    menu: theme::PANEL,
-    text: theme::INK,
-    dim: theme::PRINT,
-    key: theme::INK2,
-    hover: theme::BONE2,
-    hover_shade: 0.22,
-    hover_text: theme::INK,
-    separator: theme::SEAM,
-    separator_hi: theme::BONE_HI,
-};
+fn light_look() -> Look {
+    Look {
+        bar: theme::BONE(),
+        bar_text: theme::INK(),
+        menu: theme::PANEL(),
+        text: theme::INK(),
+        dim: theme::PRINT(),
+        key: theme::INK2(),
+        hover: theme::BONE2(),
+        hover_shade: 0.22,
+        hover_text: theme::INK(),
+        separator: theme::SEAM(),
+        separator_hi: theme::BONE_HI(),
+    }
+}
 
-fn look(light: bool) -> &'static Look {
+fn look(light: bool) -> Look {
     if light {
-        &LIGHT
+        light_look()
     } else {
-        &DARK
+        dark_look()
     }
 }
 
@@ -732,7 +746,7 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
     if FileCmd::from_menu(label).is_some() || is_checkable(label) && !CHECKABLE.contains(&label) {
         return true;
     }
-    if SettingsTab::from_menu(label).is_some() {
+    if SettingsTab::from_menu(label).is_some() || theme::menu_handles(label) {
         return true;
     }
     match label {
@@ -893,6 +907,7 @@ const ALWAYS: &[&str] = &[
     "Software Monitoring",
     "Low Latency Mode",
     "Fit to Grid on Drop",
+    "Apply Follow Rack Groove",
     "Record / Mix Mode",
     "Switch to Record Mode When Arming",
     "Show Tempo Track",
@@ -1010,6 +1025,7 @@ pub(crate) fn implemented(label: &str) -> bool {
         || ALWAYS.contains(&label)
         || CONTEXTUAL.contains(&label)
         || crate::arrange_nav::handles(label)
+        || theme::menu_handles(label)
         || crate::select_similar::handles(label)
         || crate::marker_number::handles(label)
         || buffer_frames(label).is_some()
@@ -1048,6 +1064,9 @@ fn region_starts(p: &Project) -> Vec<f64> {
 
 /// Whether `label` shows a check mark (what it shows is visible).
 pub(crate) fn checked(label: &str, p: &Project, s: &crate::UiState) -> bool {
+    if let Some(on) = theme::menu_checked(label) {
+        return on;
+    }
     if let Some(on) = crate::arrange_nav::checked(label, &s.tracks) {
         return on;
     }
@@ -1067,6 +1086,7 @@ pub(crate) fn checked(label: &str, p: &Project, s: &crate::UiState) -> bool {
         "Software Monitoring" => s.software_monitoring,
         "Low Latency Mode" => s.low_latency,
         "Fit to Grid on Drop" => s.fit.on_drop,
+        "Apply Follow Rack Groove" => s.midi_export_follow,
         "Channel Rack" => s.bottom == Bottom::ChannelRack,
         "Pitch Editor" => s.bottom == Bottom::PitchEditor,
         "MIDI Monitor" => s.show_midi_monitor,
@@ -1108,6 +1128,9 @@ fn forget_region_selection(s: &mut crate::UiState) {
 pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
     if let Some(lang) = Lang::from_native_name(label) {
         i18n::choose(lang);
+        return;
+    }
+    if theme::menu_apply(label) {
         return;
     }
     if crate::arrange_nav::apply(label, p, s) {
@@ -1169,6 +1192,7 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
             s.control_allowed = !s.control_allowed;
             crate::control_api::set_allowed(s.control_allowed);
         }
+        "Apply Follow Rack Groove" => s.midi_export_follow = !s.midi_export_follow,
         "Fit to Grid on Drop" => {
             s.fit.on_drop = !s.fit.on_drop;
             crate::fit_grid::save_on_drop(s.fit.on_drop);
@@ -1513,7 +1537,8 @@ fn mac(ctx: &egui::Context) -> bool {
 /// entry, like a macOS menu, instead of stretching across the window.
 fn menu_width(ui: &egui::Ui, labels: &[String]) -> f32 {
     let g = ui.painter();
-    let width = |t: &str, face: Face, size: f32| hw::galley(g, t, face, size, theme::INK).size().x;
+    let width =
+        |t: &str, face: Face, size: f32| hw::galley(g, t, face, size, theme::INK()).size().x;
     let mac = mac(ui.ctx());
     let (mut title, mut key) = (0.0f32, 0.0f32);
     for it in labels.iter().filter(|l| *l != "-") {
@@ -1561,7 +1586,7 @@ fn row(
                 ne: 0,
                 se: 0,
             },
-            theme::ORANGE,
+            theme::ORANGE(),
         );
     }
     let color = match (enabled, hot) {
@@ -1681,7 +1706,7 @@ fn grouped(items: &[&'static str]) -> Vec<&'static str> {
 /// The entries of one menu or submenu.
 fn entries(ui: &mut egui::Ui, items: &[&'static str], p: &mut Project, s: &mut crate::UiState) {
     let items = &grouped(&shown(items))[..];
-    let look = look(s.light_menus);
+    let look = &look(s.light_menus);
     let labels: Vec<String> = items.iter().map(|it| it.to_string()).collect();
     ui.set_width(menu_width(ui, &labels));
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -1763,14 +1788,14 @@ fn menu(
             Align2::CENTER_CENTER,
             &text,
             TITLE_SIZE,
-            theme::ON_DARK,
+            theme::ON_DARK(),
         );
         None
     } else {
         if resp.hovered() {
             hw::paint_key(g, r, hw::Cap::Bone, false, true);
         }
-        Some(theme::INK)
+        Some(theme::INK())
     };
     if let Some(ink) = ink {
         hw::silk(
@@ -1804,9 +1829,9 @@ fn menu_style(light: bool) -> impl Fn(&mut egui::Style) + Send + Sync + 'static 
         v.window_stroke = Stroke::new(
             1.0,
             if light {
-                theme::SEAM_DK
+                theme::SEAM_DK()
             } else {
-                theme::CAP_EDGE
+                theme::CAP_EDGE()
             },
         );
         v.menu_corner_radius = egui::CornerRadius::same(3);
@@ -1935,7 +1960,7 @@ pub fn menu_bar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) -> f
         &info.to_uppercase(),
         Face::Bold,
         9.5,
-        theme::PRINT,
+        theme::PRINT(),
     );
     let mut child = ui.new_child(
         egui::UiBuilder::new()
@@ -1963,7 +1988,7 @@ pub fn has_status(p: &Project, s: &crate::UiState) -> bool {
 /// are in the system menu bar).
 pub fn status_line(ui: &mut egui::Ui, p: &Project, s: &crate::UiState) {
     // The bar is bone in both looks: a dark orange print reads on it.
-    let warn = theme::ORANGE_DK;
+    let warn = theme::ORANGE_DK();
     if let Some(msg) = &s.status {
         ui.colored_label(warn, msg);
     }
@@ -2007,7 +2032,7 @@ mod tests {
                 (
                     updates(s),
                     s.show_midi_fx,
-                    (s.software_monitoring, s.fit.on_drop),
+                    (s.software_monitoring, s.fit.on_drop, s.midi_export_follow),
                     s.low_latency,
                     (s.io_buffer, s.process_buffer, s.modes.clone()),
                     s.bottom == Bottom::ChannelRack,
@@ -2134,6 +2159,11 @@ mod tests {
         s.tracks.select_only(0, 0);
         for label in all_entries() {
             if !enabled(label, &p, &s) {
+                continue;
+            }
+            // View > Theme and Wood Cheeks change the whole app's look, not the project or
+            // the window state (and would change it for the tests running beside this one).
+            if theme::menu_handles(label) {
                 continue;
             }
             let (mut p2, mut s2) = (Project::demo(), crate::UiState::new());
@@ -2418,7 +2448,7 @@ mod tests {
                 1470.0,
                 620.0,
                 2.0,
-                crate::theme::BONE,
+                crate::theme::BONE(),
                 |ui| {
                     crate::theme::apply(ui.ctx());
                     // The View menu drawn open, under its title, as in the app's top panel.

@@ -56,7 +56,7 @@ fn freeze_cell(ui: &mut Ui, rect: Rect, id: egui::Id, c: &Control) -> Option<Cha
         Align2::CENTER_CENTER,
         &c.label.to_uppercase(),
         gear::silk_font(11.5),
-        gear::INK2,
+        gear::INK2(),
         0.12,
     );
     if let Some(on) = c.automated {
@@ -86,7 +86,7 @@ fn freeze_cell(ui: &mut Ui, rect: Rect, id: egui::Id, c: &Control) -> Option<Cha
 /// The buffer LCD for the settings `v` (stored values).
 fn buffer_display(p: &egui::Painter, rect: Rect, info: &NativeFxInfo, v: &[f32]) {
     let glass = gear::lcd(p, rect);
-    let ink = gear::LCD_INK;
+    let ink = gear::LCD_INK();
     let at = |k: usize| v[k].round() as i32;
     let seconds = tx::media_of(at(tx::QUALITY)).buffer_seconds();
 
@@ -344,7 +344,7 @@ pub fn body(
             Align2::LEFT_CENTER,
             &text.to_uppercase(),
             gear::silk_font(11.5),
-            gear::INK2,
+            gear::INK2(),
             0.12,
         )
     };

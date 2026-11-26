@@ -731,7 +731,7 @@ fn panel(ui: &mut egui::Ui, f: &mut FreePlugins) -> Option<Action> {
         Align2::LEFT_CENTER,
         label,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     let install_label = tr("Install");
     let cancel_label = tr("Cancel");
@@ -754,7 +754,7 @@ fn panel(ui: &mut egui::Ui, f: &mut FreePlugins) -> Option<Action> {
                 .id(id.with("search"))
                 .frame(egui::Frame::NONE)
                 .font(theme::font(Face::Bold, 11.0))
-                .text_color(theme::ON_DARK)
+                .text_color(theme::ON_DARK())
                 .desired_width(field.width() - 8.0),
         );
     });
@@ -882,7 +882,7 @@ fn panel(ui: &mut egui::Ui, f: &mut FreePlugins) -> Option<Action> {
             &shown,
             Face::Lcd,
             size,
-            theme::LCD_INK,
+            theme::LCD_INK(),
         );
     }
     action
@@ -997,7 +997,11 @@ fn plugin_row(
     let tag_w = if tag.is_empty() {
         0.0
     } else {
-        hw::galley(&g, &tag, Face::Bold, 8.5, theme::INK2).size().x + 8.0 + 7.0
+        hw::galley(&g, &tag, Face::Bold, 8.5, theme::INK2())
+            .size()
+            .x
+            + 8.0
+            + 7.0
     };
     let shown = hw::fit(&g, &e.name, Face::Bold, 11.0, name_w - tag_w - 8.0);
     let nr = hw::text(
@@ -1007,7 +1011,7 @@ fn plugin_row(
         &shown,
         Face::Bold,
         11.0,
-        theme::INK,
+        theme::INK(),
     );
     if !tag.is_empty() {
         hu::tag(&g, pos2(nr.right() + 7.0, cy), &tag, 8.5);
@@ -1021,12 +1025,12 @@ fn plugin_row(
         &shown,
         Face::Body,
         10.5,
-        theme::INK2,
+        theme::INK2(),
     );
     let text_x = maker_x + maker_w;
     let (text, ink) = match state {
-        RowState::Failed(reason) if !reason.is_empty() => (reason.as_str(), theme::INK),
-        _ => (e.description.as_str(), theme::PRINT),
+        RowState::Failed(reason) if !reason.is_empty() => (reason.as_str(), theme::INK()),
+        _ => (e.description.as_str(), theme::PRINT()),
     };
     let shown = hw::fit(&g, text, Face::Body, 10.5, right.left() - 12.0 - text_x);
     hw::text(
@@ -1066,7 +1070,10 @@ fn plugin_row(
         hw::led_sized(&g, led, 3.5, lit);
         if matches!(state, RowState::Failed(_)) {
             let label = tr("Failed").to_uppercase();
-            let cw = hw::galley(&g, &label, Face::Bold, 8.5, theme::INK).size().x + 10.0;
+            let cw = hw::galley(&g, &label, Face::Bold, 8.5, theme::INK())
+                .size()
+                .x
+                + 10.0;
             hu::chip(&g, pos2(led.x - 12.0 - cw, cy), &label, 8.5, false);
         }
     }
@@ -1818,7 +1825,7 @@ mod tests {
             900.0,
             700.0,
             2.0,
-            theme::BONE3,
+            theme::BONE3(),
             |ui| {
                 theme::apply(ui.ctx());
                 show(ui.ctx(), s);

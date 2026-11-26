@@ -348,7 +348,7 @@ fn plugin_list(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
         out.push(json!({"id": info.id, "name": info.name, "maker": "Pro Wave", "kind": "instrument", "format": "built-in"}));
     }
     for k in FxKind::ALL {
-        out.push(json!({"id": format!("builtin:{}", k.name()), "name": k.name(), "maker": "Pro Wave", "kind": "effect", "format": "built-in"}));
+        out.push(json!({"id": crate::plugins::builtin_fx_id(k), "name": k.name(), "maker": "Pro Wave", "kind": "effect", "format": "built-in"}));
     }
     for info in prowave_engine::native_effects() {
         out.push(json!({"id": info.id, "name": info.name, "maker": "Pro Wave", "kind": "effect", "format": "built-in"}));
@@ -372,6 +372,31 @@ fn plugin_list(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
         }
         out.push(o);
     }
+    // The rating and type the menus sort by (the settings file plugin-ratings.json).
+    let ratings = crate::plugin_ratings::ratings();
+    for e in &mut out {
+        let id = e
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let alt = e.get("vst3_id").and_then(Value::as_str).map(String::from);
+        if let (Some(r), Some(o)) = (ratings.of(&id, alt.as_deref()), e.as_object_mut()) {
+            if let Some(x) = r.rating {
+                o.insert("rating".into(), json!(x));
+            }
+            if !r.kind.is_empty() {
+                o.insert("type".into(), json!(r.kind));
+            }
+            if !r.emulates.is_empty() {
+                o.insert("emulates".into(), json!(r.emulates));
+            }
+            if r.master_chain {
+                o.insert("master_chain".into(), json!(true));
+            }
+        }
+    }
+    let hidden = crate::plugins::hidden();
     out.retain(|e| {
         let is = |key: &str, want: &str| e.get(key).and_then(Value::as_str) == Some(want);
         let text = |key: &str| {
@@ -380,16 +405,27 @@ fn plugin_list(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
                 .unwrap_or("")
                 .to_lowercase()
         };
-        kind.is_none_or(|k| is("kind", k))
+        let hidden_here = hidden.hides(
+            e.get("id").and_then(Value::as_str).unwrap_or(""),
+            e.get("maker").and_then(Value::as_str).unwrap_or(""),
+        ) || e
+            .get("vst3_id")
+            .and_then(Value::as_str)
+            .is_some_and(|v| hidden.ids.iter().any(|h| h == v));
+        !hidden_here
+            && kind.is_none_or(|k| is("kind", k))
             && search.as_ref().is_none_or(|s| {
-                text("name").contains(s) || text("maker").contains(s) || text("id").contains(s)
+                text("name").contains(s)
+                    || text("maker").contains(s)
+                    || text("id").contains(s)
+                    || text("emulates").contains(s)
             })
     });
     ok(json!({
         "count": out.len(),
         "plugins": out,
         "scanning": false,
-        "note": "Audio Units and VST3s are those the app's last scan found; a plug-in in both formats is one entry (its AU id, with vst3_id)",
+        "note": "Audio Units and VST3s are those the app's last scan found; a plug-in in both formats is one entry (its AU id, with vst3_id). Hidden plug-ins (the settings file plugin-hidden, and Apple's Audio Units unless plugin-hide-apple holds 0) are left out; rating and type come from plugin-ratings.json",
     }))
 }
 
@@ -1491,12 +1527,12 @@ pub fn methods() -> Vec<Method> {
                 p("remove", Ty::Bool, "take the send away"),
             ],
             "the track as track.list gives it; a bus gets its Aux strip when it has none", track_send).changes(),
-        m("plugin.list", "The instruments and effects that can be loaded: the app's own, and the Audio Units and VST3s on this Mac.",
+        m("plugin.list", "The instruments and effects that can be loaded: the app's own, and the Audio Units and VST3s on this Mac. Hidden ones (the settings file plugin-hidden; Apple's Audio Units unless plugin-hide-apple holds 0) are left out.",
             vec![
                 p("kind", Ty::Str, "only instruments or only effects").vals(&["instrument", "effect"]),
-                p("search", Ty::Str, "only those whose name, maker or id contains this text"),
+                p("search", Ty::Str, "only those whose name, maker, id or emulated hardware (emulates) contains this text"),
             ],
-            "{count, plugins: [{id, name, maker, kind, format: built-in|AU|VST3, vst3_id?, turned_off_after_crash?}]}", plugin_list),
+            "{count, plugins: [{id, name, maker, kind, format: built-in|AU|VST3, vst3_id?, turned_off_after_crash?, rating?, type?, emulates?, master_chain?}]}", plugin_list),
         m("instrument.set", "Loads an instrument on an instrument track, in place of the one it has.",
             vec![
                 track(),

@@ -26,7 +26,7 @@ const FOOT_H: f32 = 44.0;
 
 /// The response's waveform and grid on the glass: LCD ink, faint.
 fn ink(a: f32) -> egui::Color32 {
-    gear::alpha(gear::LCD_INK, a)
+    gear::alpha(gear::LCD_INK(), a)
 }
 
 /// The drawn response: what it was made for, its min/max bins and its length in seconds.
@@ -252,7 +252,7 @@ fn glyph_key_enabled(
     let resp = gear::glyph_key(ui, rect, id, Cap::Bone, false, glyph);
     if !enabled {
         ui.painter()
-            .rect_filled(rect.expand(1.0), 5.0, gear::alpha(gear::BONE, 0.55));
+            .rect_filled(rect.expand(1.0), 5.0, gear::alpha(gear::BONE(), 0.55));
     }
     resp.on_hover_text(tip).clicked() && enabled
 }
@@ -460,7 +460,7 @@ fn body(
         Align2::LEFT_CENTER,
         tr("View:").trim_end_matches(':'),
         11.0,
-        gear::INK2,
+        gear::INK2(),
     );
     let views = ["75 %", "100 %", "125 %", "150 %"];
     let cur = [75u32, 100, 125, 150]
@@ -541,7 +541,7 @@ fn body(
             Align2::CENTER_CENTER,
             &t,
             11.0,
-            gear::INK,
+            gear::INK(),
         );
         (pr.clicked(), rr.clicked())
     };
@@ -610,7 +610,7 @@ fn body(
         Align2::LEFT_CENTER,
         tr("Stereo"),
         11.0,
-        gear::PRINT,
+        gear::PRINT(),
     );
     let out_eq = edited.params[sd::OUTPUT_EQ] >= 0.5;
     let r = Rect::from_min_size(
@@ -671,7 +671,7 @@ fn body(
         Align2::LEFT_CENTER,
         tr("Quality:").trim_end_matches(':'),
         11.0,
-        gear::INK2,
+        gear::INK2(),
     );
     let high = edited.params[sd::QUALITY] >= 0.5;
     if let Some(i) = gear::choice_field(
@@ -696,7 +696,7 @@ fn body(
         Align2::LEFT_CENTER,
         tr("IR Offset:").trim_end_matches(':'),
         11.0,
-        gear::INK2,
+        gear::INK2(),
     );
     let off = shown(edited, sd::IR_OFFSET);
     if let Some(v) = drag_value(
@@ -754,7 +754,7 @@ fn body(
                 Align2::LEFT_CENTER,
                 &short,
                 gear::silk_font(10.5),
-                gear::INK2,
+                gear::INK2(),
                 0.1,
             );
             if let Some(nv) = drag_value(
@@ -794,7 +794,7 @@ fn body(
             Align2::CENTER_CENTER,
             t,
             11.0,
-            gear::INK2,
+            gear::INK2(),
         );
     };
 
@@ -877,7 +877,7 @@ fn body(
                         Align2::CENTER_CENTER,
                         t,
                         9.5,
-                        gear::PRINT,
+                        gear::PRINT(),
                     );
                 }
             }
@@ -906,7 +906,7 @@ fn body(
             Align2::LEFT_CENTER,
             "16k",
             9.5,
-            gear::PRINT,
+            gear::PRINT(),
         );
         gear::silk(
             &g,
@@ -914,7 +914,7 @@ fn body(
             Align2::LEFT_CENTER,
             "200",
             9.5,
-            gear::PRINT,
+            gear::PRINT(),
         );
         if let Some(n) = fader(
             ui,
@@ -970,7 +970,7 @@ fn body(
                 Align2::LEFT_CENTER,
                 name,
                 11.0,
-                gear::INK2,
+                gear::INK2(),
             );
             let r = Rect::from_min_size(
                 pos2(x_at(foot, x + 42.0), fy - 12.0 * k),
@@ -1040,14 +1040,14 @@ fn fader(
                 pos2(top.x - (if major { 15.0 } else { 12.0 }) * k, y),
                 pos2(top.x - 8.0 * k, y),
             ],
-            Stroke::new(if major { 1.3 } else { 0.9 }, gear::INK2),
+            Stroke::new(if major { 1.3 } else { 0.9 }, gear::INK2()),
         );
     }
     let slot = Rect::from_min_max(
         pos2(top.x - 3.0 * k, top.y - 3.0 * k),
         pos2(top.x + 3.0 * k, top.y + height + 3.0 * k),
     );
-    g.rect_filled(slot, 3.0, gear::INK);
+    g.rect_filled(slot, 3.0, gear::INK());
     gear::inner_shadow(g, slot, 3.0, 1.0);
     let y = top.y + height * (1.0 - n);
     gear::fader_cap(g, pos2(top.x, y), 28.0 * k, 14.0 * k, false);
@@ -1228,14 +1228,14 @@ fn g_readout(
         let resp = ui.interact(r, ui.scope_id().with(("sd_curve", n)), Sense::click());
         let p = ui.painter();
         if on {
-            p.rect_filled(r, 2.0, gear::LCD_INK);
+            p.rect_filled(r, 2.0, gear::LCD_INK());
             gear::text_at(
                 p,
                 r.center(),
                 Align2::CENTER_CENTER,
                 label,
                 gear::mono_heavy(12.0),
-                gear::LCD,
+                gear::LCD(),
                 0.02,
             );
         } else {
@@ -1363,7 +1363,7 @@ fn draw_display(
             mesh.add_triangle(b, b + 2, b + 3);
         }
         g.add(Shape::mesh(mesh));
-        g.add(Shape::line(pts, Stroke::new(2.2 * k, gear::LCD_INK)));
+        g.add(Shape::line(pts, Stroke::new(2.2 * k, gear::LCD_INK())));
     }
 
     if mem.filter_view {
@@ -1437,8 +1437,8 @@ fn draw_display(
 fn handle(g: &egui::Painter, c: egui::Pos2, k: f32, on: bool, hot: bool) {
     let r = Rect::from_center_size(c, vec2(9.0 * k, 9.0 * k));
     if on {
-        g.rect_filled(r, 1.0, gear::LCD_INK);
-        g.rect_filled(r.shrink(2.5 * k), 0.0, gear::LCD);
+        g.rect_filled(r, 1.0, gear::LCD_INK());
+        g.rect_filled(r.shrink(2.5 * k), 0.0, gear::LCD());
     } else {
         g.rect_stroke(r, 1.0, Stroke::new(1.5, ink(0.5)), egui::StrokeKind::Inside);
     }
@@ -1446,7 +1446,7 @@ fn handle(g: &egui::Painter, c: egui::Pos2, k: f32, on: bool, hot: bool) {
         g.rect_stroke(
             r.expand(3.0 * k),
             2.0,
-            Stroke::new(1.0, gear::LCD_INK),
+            Stroke::new(1.0, gear::LCD_INK()),
             egui::StrokeKind::Outside,
         );
     }
@@ -1488,7 +1488,7 @@ fn filter_overlay(
         edited.params[sd::FILTER_START],
         edited.params[sd::FILTER_END],
     );
-    let colour = if on { gear::LCD_INK } else { ink(0.4) };
+    let colour = if on { gear::LCD_INK() } else { ink(0.4) };
     let n = plot.width() as usize;
     let pts: Vec<egui::Pos2> = (0..=n)
         .map(|i| {

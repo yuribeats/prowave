@@ -1120,7 +1120,7 @@ fn lcd_panel(ui: &mut egui::Ui, m: &MatchUi) {
             pos2(glass.right() - 6.0 - w, top + row_h - h - 3.0),
             &value,
             h,
-            theme::LCD_INK,
+            theme::LCD_INK(),
             true,
         );
     }
@@ -1137,7 +1137,7 @@ fn lcd_panel(ui: &mut egui::Ui, m: &MatchUi) {
         pos2(glass.right() - 6.0 - w, top + row_h - h - 3.0),
         &value,
         h,
-        theme::LCD_INK,
+        theme::LCD_INK(),
         true,
     );
     // The bottom line.
@@ -1158,7 +1158,7 @@ fn lcd_panel(ui: &mut egui::Ui, m: &MatchUi) {
             &format!("{} {}%", tr("Bouncing"), (pr.fraction * 100.0).floor()),
             11.0,
             1,
-            theme::LCD_INK,
+            theme::LCD_INK(),
         );
         hw_vocal::lcd_ladder(&g, bar, pr.fraction);
         return;
@@ -1176,13 +1176,13 @@ fn lcd_panel(ui: &mut egui::Ui, m: &MatchUi) {
             &format!("{what} {}%", (f * 100.0).floor()),
             11.0,
             1,
-            theme::LCD_INK,
+            theme::LCD_INK(),
         );
         hw_vocal::lcd_ladder(&g, bar, f);
         return;
     }
     if let Some(e) = m.error.as_ref() {
-        hw_vocal::lcd_text(&g, line, e, 11.0, 1, theme::LCD_INK);
+        hw_vocal::lcd_text(&g, line, e, 11.0, 1, theme::LCD_INK());
         return;
     }
     if m.done.is_some() {
@@ -1190,7 +1190,7 @@ fn lcd_panel(ui: &mut egui::Ui, m: &MatchUi) {
             Side::Original => tr("Original"),
             Side::Matched => tr("Matched Master"),
         };
-        hw_vocal::lcd_text(&g, text_r, side, 11.0, 1, theme::LCD_INK);
+        hw_vocal::lcd_text(&g, text_r, side, 11.0, 1, theme::LCD_INK());
         hw_vocal::lcd_ladder(&g, bar, m.phase.filter(|_| m.playing).unwrap_or(0.0));
     }
 }
@@ -1205,7 +1205,7 @@ const RANGE_DB: f32 = 12.0;
 
 /// The matching EQ: what the FIRs do to the mid (solid) and the side (faint), in dB.
 fn eq_plot(g: &egui::Painter, r: Rect, m: Option<&Matched>) {
-    let grid = Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.18));
+    let grid = Stroke::new(1.0, theme::LCD_INK().gamma_multiply(0.18));
     for hz in [100.0, 1000.0, 10_000.0] {
         let x = x_of(r, hz);
         g.vline(x, r.y_range(), grid);
@@ -1213,7 +1213,7 @@ fn eq_plot(g: &egui::Painter, r: Rect, m: Option<&Matched>) {
     let y_of = |db: f32| r.center().y - (db / RANGE_DB).clamp(-1.0, 1.0) * r.height() / 2.0;
     for db in [-RANGE_DB, -6.0, 0.0, 6.0, RANGE_DB] {
         let s = if db == 0.0 {
-            Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.4))
+            Stroke::new(1.0, theme::LCD_INK().gamma_multiply(0.4))
         } else {
             grid
         };
@@ -1227,7 +1227,7 @@ fn eq_plot(g: &egui::Painter, r: Rect, m: Option<&Matched>) {
             label,
             Face::Lcd,
             8.0,
-            theme::LCD_INK.gamma_multiply(0.7),
+            theme::LCD_INK().gamma_multiply(0.7),
         );
     }
     for (hz, label) in [(100.0, "100"), (1000.0, "1K"), (10_000.0, "10K")] {
@@ -1238,11 +1238,11 @@ fn eq_plot(g: &egui::Painter, r: Rect, m: Option<&Matched>) {
             label,
             Face::Lcd,
             8.0,
-            theme::LCD_INK.gamma_multiply(0.7),
+            theme::LCD_INK().gamma_multiply(0.7),
         );
     }
     // The legend: a solid line for the mid, a dashed one for the side.
-    let ink = theme::LCD_INK;
+    let ink = theme::LCD_INK();
     let mid = hw_vocal::lcd_label(g, pos2(r.left() + 3.0, r.top() - 12.0), tr("Mid Channel"));
     let y = mid.center().y;
     g.line_segment(
@@ -1266,8 +1266,8 @@ fn eq_plot(g: &egui::Painter, r: Rect, m: Option<&Matched>) {
     };
     let rate = f64::from(Config::default().internal_sample_rate);
     for (eq, color, dashed) in [
-        (&m.side, theme::LCD_INK.gamma_multiply(0.45), true),
-        (&m.mid, theme::LCD_INK, false),
+        (&m.side, theme::LCD_INK().gamma_multiply(0.45), true),
+        (&m.mid, theme::LCD_INK(), false),
     ] {
         let n = eq.smoothed.len();
         if n < 3 {
@@ -1481,7 +1481,7 @@ mod tests {
                 WIDTH + 40.0,
                 640.0,
                 2.0,
-                theme::BONE3,
+                theme::BONE3(),
                 |u| {
                     theme::apply(u.ctx());
                     show(u.ctx(), "Untitled", m, None);

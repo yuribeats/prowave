@@ -256,7 +256,7 @@ pub const BIG: Density = Density {
     fader_gap: 14.0,
     cap: vec2(72.0, 44.0),
     meter_w: 64.0,
-    seg: 6.0,
+    seg: 3.0,
     seg_gap: 2.0,
     pad: 14.0,
     tick_w: 12.0,
@@ -288,7 +288,7 @@ pub const MAIN: Density = Density {
     fader_gap: 10.0,
     cap: vec2(44.0, 30.0),
     meter_w: 30.0,
-    seg: 4.0,
+    seg: 3.0,
     seg_gap: 2.0,
     pad: 10.0,
     tick_w: 7.0,
@@ -320,7 +320,7 @@ pub const COMPACT: Density = Density {
     fader_gap: 4.0,
     cap: vec2(30.0, 22.0),
     meter_w: 22.0,
-    seg: 4.0,
+    seg: 3.0,
     seg_gap: 2.0,
     pad: 8.0,
     tick_w: 5.0,
@@ -335,7 +335,7 @@ impl Density {
     /// The largest density whose fader still has a useful travel in a strip `h` tall and `w`
     /// wide with these rows.
     pub fn fit(h: f32, w: f32, fx_rows: usize, send_rows: usize) -> Density {
-        for (d, min_fader, min_w) in [(BIG, 340.0, 200.0), (MAIN, 190.0, 140.0)] {
+        for (d, min_fader, min_w) in [(BIG, 340.0, 200.0), (MAIN, MAIN_MIN_FADER, 140.0)] {
             let r = rows(0.0, fx_rows, send_rows, d);
             if bottom_parts(d) + r.fader_top + min_fader <= h && w >= min_w {
                 return d;
@@ -347,6 +347,10 @@ impl Density {
 
 /// The shortest fader travel a strip is drawn with; a shorter panel scrolls the strips.
 const MIN_FADER: f32 = 150.0;
+/// The shortest fader travel the main window's density (`MAIN`) is chosen for.
+const MAIN_MIN_FADER: f32 = 190.0;
+/// Room the Mixer's body keeps above and below the strips when it picks their density.
+const BODY_MARGIN: f32 = 16.0;
 
 /// Height of the keys, the plate and their gaps under the fader zone.
 fn bottom_parts(d: Density) -> f32 {
@@ -577,7 +581,7 @@ fn knurl_knob(g: &Painter, c: Pos2, d: f32, value: f32, scale: bool, hot: bool) 
                     polar(c, deg, r + 4.0),
                     polar(c, deg, r + if major { 9.5 } else { 7.0 }),
                 ],
-                Stroke::new(if major { 1.8 } else { 1.1 }, theme::INK2),
+                Stroke::new(if major { 1.8 } else { 1.1 }, theme::INK2()),
             );
         }
         let off = r + if d >= 40.0 { 22.0 } else { 15.0 };
@@ -588,7 +592,7 @@ fn knurl_knob(g: &Painter, c: Pos2, d: f32, value: f32, scale: bool, hot: bool) 
                 Align2::CENTER_CENTER,
                 t,
                 11.0,
-                theme::INK2,
+                theme::INK2(),
             );
         }
     }
@@ -650,15 +654,15 @@ fn knurl_knob(g: &Painter, c: Pos2, d: f32, value: f32, scale: bool, hot: bool) 
     let glow = if hot { 0.9 } else { 0.6 };
     g.line_segment(
         [a, b],
-        Stroke::new(5.0, theme::ORANGE.gamma_multiply(glow * 0.35)),
+        Stroke::new(5.0, theme::ORANGE().gamma_multiply(glow * 0.35)),
     );
-    g.line_segment([a, b], Stroke::new(3.0, theme::ORANGE));
+    g.line_segment([a, b], Stroke::new(3.0, theme::ORANGE()));
 }
 
 /// The fader groove (A.4.5): 6 wide, overshooting the travel by 6 at each end.
 fn fader_slot(g: &Painter, cx: f32, top: f32, len: f32) {
     let r = Rect::from_min_max(pos2(cx - 3.0, top - 6.0), pos2(cx + 3.0, top + len + 6.0));
-    g.rect_filled(r.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI);
+    g.rect_filled(r.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI());
     g.rect_filled(r, 3.0, Color32::from_rgb(0x0f, 0x0f, 0x0e));
     g.hline(
         r.left() + 1.0..=r.right() - 1.0,
@@ -714,7 +718,7 @@ fn fader_cap(g: &Painter, r: Rect) {
     g.hline(
         r.left() + 3.0..=r.right() - 3.0,
         cy,
-        Stroke::new(3.0, theme::BONE_HI),
+        Stroke::new(3.0, theme::BONE_HI()),
     );
 }
 
@@ -740,7 +744,7 @@ fn tick_col(g: &Painter, x: f32, top: f32, len: f32, w: f32, align_right: bool) 
             y,
             Stroke::new(
                 1.0,
-                theme::INK2.gamma_multiply(if major { 0.7 } else { 0.38 }),
+                theme::INK2().gamma_multiply(if major { 0.7 } else { 0.38 }),
             ),
         );
     }
@@ -760,15 +764,15 @@ fn ladder(
     gap: f32,
     inactive: bool,
 ) {
-    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI);
-    g.rect_filled(rect, 3.0, theme::METER_WELL);
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI());
+    g.rect_filled(rect, 3.0, theme::METER_WELL());
     hw::inner_shadow(g, rect, 3.0, 0.6);
     let y_of = |db: f32| top + (1.0 - db_to_frac(db)) * len;
     let (y0, y6) = (y_of(0.0), y_of(-6.0));
     let col_w = (rect.width() - 10.0) / 2.0;
     let n = ((rect.height() - 6.0) / (seg + gap)).floor().max(1.0) as usize;
     let bottom = rect.bottom().round();
-    let off = Color32::from_rgb(0x2b, 0x29, 0x26);
+    let off = theme::METER_OFF;
     let dead = Color32::from_rgb(0x8b, 0x85, 0x78);
     for (c, lvl) in [levels.0, levels.1].into_iter().enumerate() {
         let x0 = rect.left() + 3.0 + c as f32 * (col_w + 4.0);
@@ -787,11 +791,11 @@ fn ladder(
             let lit_col = if inactive {
                 dead
             } else if hot {
-                theme::ORANGE
+                theme::METER_HOT
             } else if warm {
-                Color32::from_rgb(0xff, 0xe6, 0xcf)
+                theme::METER_MID
             } else {
-                Color32::from_rgb(0xee, 0xea, 0xdf)
+                theme::METER_LO
             };
             let mut lit = mid >= thr;
             if !lit && !pk_done && mid < pk_y + seg && mid >= pk_y - gap - seg {
@@ -804,7 +808,7 @@ fn ladder(
                     let glow = if hot {
                         Color32::from_rgba_unmultiplied(255, 90, 20, 70)
                     } else {
-                        Color32::from_rgba_unmultiplied(255, 250, 235, 30)
+                        Color32::from_rgba_unmultiplied(127, 140, 106, 40)
                     };
                     g.rect_filled(r.expand(1.0), 1.0, glow);
                 }
@@ -827,13 +831,13 @@ fn lcd_chip(g: &Painter, rect: Rect, label: &str, value: Option<&str>, d: Densit
         label,
         Face::Lcd,
         d.chip_label,
-        theme::LCD_INK.gamma_multiply(0.72),
+        theme::LCD_INK().gamma_multiply(0.72),
     );
     let h = d.digit.min(rect.height() - d.chip_label - 6.0);
     let pad = if d.digit >= 20.0 { 8.0 } else { 6.0 };
     let (text, ink) = match value {
-        Some(v) => (v, theme::LCD_INK),
-        None => ("88.8", theme::LCD_GHOST),
+        Some(v) => (v, theme::LCD_INK()),
+        None => ("88.8", theme::LCD_GHOST()),
     };
     let w = hw::seg_width(text, h);
     hw::seg(
@@ -892,20 +896,21 @@ fn paint_strip_slot(
 ) {
     hw::paint_slot(g, r, kind, "", None, false, hovered);
     let ink = match kind {
-        SlotKind::Filled if dim => theme::ON_DARK_DIM,
-        SlotKind::Filled => theme::ON_DARK,
-        SlotKind::Plain if dim => theme::PRINT,
-        _ => theme::INK,
+        SlotKind::Filled if dim => theme::ON_DARK_DIM(),
+        SlotKind::Filled => theme::ON_DARK(),
+        SlotKind::Plain if dim => theme::PRINT(),
+        _ => theme::INK(),
     };
     let mut x = r.left() + 8.0;
     if let Some(on) = led {
         let c = pos2(x + 2.5, r.center().y);
         if on {
-            g.circle_filled(c, 5.0, Color32::from_rgba_unmultiplied(255, 90, 20, 50));
-            g.circle_filled(c, 3.6, Color32::from_rgba_unmultiplied(255, 90, 20, 90));
-            g.circle_filled(c, 2.5, Color32::from_rgb(0xff, 0x6a, 0x22));
+            let [lr, lg, lb] = hw::led_glow();
+            g.circle_filled(c, 5.0, Color32::from_rgba_unmultiplied(lr, lg, lb, 50));
+            g.circle_filled(c, 3.6, Color32::from_rgba_unmultiplied(lr, lg, lb, 90));
+            g.circle_filled(c, 2.5, hw::led_lit());
         } else {
-            g.circle_filled(c, 2.5, Color32::from_rgb(0x4a, 0x47, 0x41));
+            g.circle_filled(c, 2.5, hw::led_dark_off());
         }
         x += 13.0;
     }
@@ -1021,9 +1026,9 @@ fn strip_key(
     let face = hw::paint_key(g, r, Cap::Bone, down, resp.hovered());
     hw::led_sized(g, pos2(face.left() + 9.0 + 2.5, face.center().y), 3.0, on);
     let ink = if on && orange_legend {
-        theme::ORANGE_DK
+        theme::ORANGE_DK()
     } else {
-        theme::INK
+        theme::INK()
     };
     hw::text(
         g,
@@ -1102,7 +1107,7 @@ fn name_plate(
                 sw: rad as u8,
                 se: rad as u8,
             },
-            theme::ORANGE,
+            theme::ORANGE(),
         );
     }
     g.hline(
@@ -1169,21 +1174,18 @@ fn plate_face(g: &Painter, r: Rect, plate: Plate, selected: bool) -> (Color32, C
             g,
             r,
             rad,
-            &[
-                (0.0, Color32::from_rgb(0xff, 0x6e, 0x2e)),
-                (1.0, Color32::from_rgb(0xf2, 0x52, 0x0f)),
-            ],
+            &[(0.0, theme::ORANGE_HI()), (1.0, theme::ORANGE())],
         );
-        (theme::INK, theme::INK, theme::ORANGE)
+        (theme::ON_ACCENT(), theme::ON_ACCENT(), theme::ORANGE())
     } else {
         match plate {
             Plate::Black => {
                 vgrad(g, r, rad, &black);
-                (theme::ON_DARK, theme::ON_DARK, theme::INK)
+                (theme::ON_DARK(), theme::ON_DARK(), theme::ON_ACCENT())
             }
             Plate::Master => {
                 vgrad(g, r, rad, &black);
-                (theme::ON_DARK, theme::ORANGE, theme::INK)
+                (theme::ON_DARK(), theme::ORANGE(), theme::ON_ACCENT())
             }
             Plate::Hatch => {
                 vgrad(
@@ -1191,12 +1193,24 @@ fn plate_face(g: &Painter, r: Rect, plate: Plate, selected: bool) -> (Color32, C
                     r,
                     rad,
                     &[
-                        (0.0, Color32::from_rgb(0xe4, 0xdf, 0xd3)),
-                        (1.0, Color32::from_rgb(0xd3, 0xcd, 0xbf)),
+                        (
+                            0.0,
+                            theme::pick(
+                                Color32::from_rgb(0xe4, 0xdf, 0xd3),
+                                Color32::from_rgb(0x3a, 0x3a, 0x40),
+                            ),
+                        ),
+                        (
+                            1.0,
+                            theme::pick(
+                                Color32::from_rgb(0xd3, 0xcd, 0xbf),
+                                Color32::from_rgb(0x30, 0x30, 0x35),
+                            ),
+                        ),
                     ],
                 );
-                hatch(g, r, 6.0, 2.0, theme::INK.gamma_multiply(0.16));
-                (theme::INK, theme::INK, theme::ON_DARK)
+                hatch(g, r, 6.0, 2.0, theme::INK().gamma_multiply(0.16));
+                (theme::INK(), theme::INK(), theme::text_on(theme::INK()))
             }
             Plate::Grey => {
                 vgrad(
@@ -1204,11 +1218,23 @@ fn plate_face(g: &Painter, r: Rect, plate: Plate, selected: bool) -> (Color32, C
                     r,
                     rad,
                     &[
-                        (0.0, Color32::from_rgb(0xab, 0xa5, 0x97)),
-                        (1.0, Color32::from_rgb(0x95, 0x8f, 0x81)),
+                        (
+                            0.0,
+                            theme::pick(
+                                Color32::from_rgb(0xab, 0xa5, 0x97),
+                                Color32::from_rgb(0x5b, 0x64, 0x70),
+                            ),
+                        ),
+                        (
+                            1.0,
+                            theme::pick(
+                                Color32::from_rgb(0x95, 0x8f, 0x81),
+                                Color32::from_rgb(0x4a, 0x52, 0x5d),
+                            ),
+                        ),
                     ],
                 );
-                (theme::INK, theme::INK, theme::ON_DARK)
+                (theme::INK(), theme::INK(), theme::text_on(theme::INK()))
             }
             Plate::Bone => {
                 vgrad(
@@ -1216,11 +1242,17 @@ fn plate_face(g: &Painter, r: Rect, plate: Plate, selected: bool) -> (Color32, C
                     r,
                     rad,
                     &[
-                        (0.0, theme::BONE_TOP),
-                        (1.0, Color32::from_rgb(0xe3, 0xde, 0xd3)),
+                        (0.0, theme::BONE_TOP()),
+                        (
+                            1.0,
+                            theme::pick(
+                                Color32::from_rgb(0xe3, 0xde, 0xd3),
+                                Color32::from_rgb(0x2c, 0x2c, 0x31),
+                            ),
+                        ),
                     ],
                 );
-                (theme::INK, theme::INK, theme::ON_DARK)
+                (theme::INK(), theme::INK(), theme::text_on(theme::INK()))
             }
         }
     }
@@ -1238,25 +1270,37 @@ fn strip_face(g: &Painter, r: Rect, master: bool, selected: bool, lit: bool) {
     }
     let (top, bottom) = if master {
         (
-            Color32::from_rgb(0xe3, 0xde, 0xd2),
-            Color32::from_rgb(0xd8, 0xd2, 0xc5),
+            theme::pick(
+                Color32::from_rgb(0xe3, 0xde, 0xd2),
+                Color32::from_rgb(0x26, 0x26, 0x2a),
+            ),
+            theme::pick(
+                Color32::from_rgb(0xd8, 0xd2, 0xc5),
+                Color32::from_rgb(0x20, 0x20, 0x23),
+            ),
         )
     } else {
         (
-            Color32::from_rgb(0xed, 0xe9, 0xe0),
-            Color32::from_rgb(0xe4, 0xdf, 0xd4),
+            theme::pick(
+                Color32::from_rgb(0xed, 0xe9, 0xe0),
+                Color32::from_rgb(0x2e, 0x2e, 0x33),
+            ),
+            theme::pick(
+                Color32::from_rgb(0xe4, 0xdf, 0xd4),
+                Color32::from_rgb(0x27, 0x27, 0x2b),
+            ),
         )
     };
     vgrad(g, r, 4.0, &[(0.0, top), (1.0, bottom)]);
     g.hline(
         r.left() + 4.0..=r.right() - 4.0,
         r.top() + 1.0,
-        Stroke::new(1.0, Color32::WHITE),
+        Stroke::new(1.0, theme::emboss(255)),
     );
     g.vline(
         r.left() + 1.0,
         r.top() + 4.0..=r.bottom() - 4.0,
-        Stroke::new(1.0, Color32::from_white_alpha(180)),
+        Stroke::new(1.0, theme::emboss(180)),
     );
     g.rect_stroke(
         r,
@@ -1264,9 +1308,12 @@ fn strip_face(g: &Painter, r: Rect, master: bool, selected: bool, lit: bool) {
         Stroke::new(
             1.0,
             if selected {
-                theme::INK
+                theme::INK()
             } else {
-                Color32::from_rgb(0xac, 0xa5, 0x94)
+                theme::pick(
+                    Color32::from_rgb(0xac, 0xa5, 0x94),
+                    Color32::from_rgb(0x3a, 0x3a, 0x40),
+                )
             },
         ),
         StrokeKind::Outside,
@@ -1280,7 +1327,7 @@ fn strip_face(g: &Painter, r: Rect, master: bool, selected: bool, lit: bool) {
                 sw: 0,
                 se: 0,
             },
-            theme::ORANGE,
+            theme::ORANGE(),
         );
     }
 }
@@ -1382,7 +1429,7 @@ fn fader_and_meter(
             label,
             Face::Bold,
             d.num_size,
-            theme::INK2,
+            theme::INK2(),
         );
     }
     tick_col(
@@ -1647,7 +1694,7 @@ fn send_slot(
     if send.pre {
         // The eye a pre-fader send shows.
         let c = pos2(slot_r.right() - 10.0, slot_r.center().y);
-        let ink = theme::ON_DARK;
+        let ink = theme::ON_DARK();
         g.circle_stroke(c, 4.0, Stroke::new(1.2, ink));
         g.circle_filled(c, 1.6, ink);
     }
@@ -1806,98 +1853,317 @@ fn insert_slot(
     }
 }
 
-/// A menu of the Audio Units in `list` (instruments or effects), one submenu per maker.
-/// Returns the one picked.
-fn au_menu(
-    ui: &mut Ui,
+/// What an entry of the Instrument or Audio FX menu makes when it is picked.
+#[derive(Clone)]
+enum Pick {
+    /// An Audio Unit or VST3 (with the id of the format picked).
+    Plugin(crate::plugins::AuChoice),
+    /// A built-in instrument: what makes its slot.
+    BuiltIn(fn() -> crate::plugins::PluginSlot),
+    NativeInst(&'static prowave_engine::NativeInstInfo),
+    NativeFx(&'static prowave_engine::NativeFxInfo),
+    SpaceDesigner,
+}
+
+/// One entry of the Instrument or Audio FX menu: Pro Wave's own and the plug-ins alike.
+struct MenuOffer {
+    /// The `plugin.list` id (the AU's when the plug-in is in both formats).
+    id: String,
+    alt_id: Option<String>,
+    name: String,
+    maker: String,
+    pick: Pick,
+}
+
+impl MenuOffer {
+    fn own(id: &str, name: &str, pick: Pick) -> Self {
+        Self {
+            id: id.to_string(),
+            alt_id: None,
+            name: name.to_string(),
+            maker: "Pro Wave".to_string(),
+            pick,
+        }
+    }
+}
+
+/// The Audio Units and VST3s of `list` that the menu offers (instruments or effects): not
+/// hidden, and not Pro Wave's own plug-in builds of a built-in already in `own` (the
+/// built-in is offered instead).
+fn plugin_offers(
     list: &[crate::plugins::AuChoice],
     instruments: bool,
-) -> Option<crate::plugins::AuChoice> {
+    own: &[MenuOffer],
+) -> Vec<MenuOffer> {
+    let keys: Vec<String> = own
+        .iter()
+        .map(|o| crate::plugin_ratings::own_name_key(&o.name))
+        .collect();
+    crate::plugins::hidden()
+        .visible(list)
+        .into_iter()
+        .filter(|c| c.instrument == instruments)
+        .filter(|c| {
+            c.manufacturer != "Pro Wave"
+                || !keys.contains(&crate::plugin_ratings::own_name_key(&c.name))
+        })
+        .map(|c| MenuOffer {
+            id: c.id.clone(),
+            alt_id: c.alt_id.clone(),
+            name: c.name.clone(),
+            maker: c.manufacturer.clone(),
+            pick: Pick::Plugin(c.clone()),
+        })
+        .collect()
+}
+
+/// The Instrument or Audio FX menu: a search field, then one submenu per type (alphabetical,
+/// "Other" last; the Audio FX menu's `master` folder, Master Chain, first), the best rated first
+/// in each, every entry with its rating chip, shown by the name of what it emulates or its own
+/// (see `plugin_ratings.rs`). Typing in the search field lists the entries whose names or maker
+/// match instead of the folders. `all` is every plug-in, hidden ones included (for the
+/// checkboxes at the foot). Returns the one picked.
+fn type_menu(
+    ui: &mut Ui,
+    offers: &[MenuOffer],
+    all: &[crate::plugins::AuChoice],
+    master: bool,
+) -> Option<Pick> {
     let mut picked = None;
     let prefer_vst3 = crate::plugins::prefer_vst3();
-    let mut makers: Vec<&str> = list
+    let hidden = crate::plugins::hidden();
+    let ratings = crate::plugin_ratings::ratings();
+    let other = tr("Other").to_string();
+    let master_name = tr("Master Chain").to_string();
+    let refs: Vec<crate::plugin_ratings::Offer> = offers
         .iter()
-        .filter(|c| c.instrument == instruments)
-        .map(|c| c.manufacturer.as_str())
+        .map(|o| crate::plugin_ratings::Offer {
+            id: &o.id,
+            alt_id: o.alt_id.as_deref(),
+            name: &o.name,
+            maker: &o.maker,
+        })
         .collect();
-    // A maker with both plain and MIDI-taking effects (Soundtoys) is one submenu.
-    makers.sort_by_key(|m| m.to_lowercase());
-    makers.dedup();
-    if makers.is_empty() {
+    let folders = crate::plugin_ratings::arrange(
+        &refs,
+        &ratings,
+        &other,
+        master.then_some(master_name.as_str()),
+    );
+    if folders.is_empty() {
         ui.label(tr("No Audio Units found"));
     }
-    for m in makers {
-        ui.menu_button(m, |ui| {
-            let mut items: Vec<&crate::plugins::AuChoice> = list
-                .iter()
-                .filter(|c| c.instrument == instruments && c.manufacturer == m)
-                .collect();
-            items.sort_by_key(|c| c.name.to_lowercase());
-            let off = crate::plugins::quarantined();
-            // A maker with more plug-ins than the window has room for scrolls.
-            crate::widgets::menu_scroll(ui, |ui| {
-                for c in items {
-                    if let Some(id) = plugin_menu_item(ui, c, &off, prefer_vst3) {
-                        crate::plugins::release(&id);
-                        picked = Some(crate::plugins::AuChoice {
-                            id,
-                            alt_id: None,
-                            ..c.clone()
-                        });
-                        ui.close();
+    let off = crate::plugins::quarantined();
+    let query = menu_search(ui, master);
+    if query.trim().is_empty() {
+        for (kind, items) in folders {
+            ui.menu_button(kind, |ui| {
+                // A type with more entries than the window has room for scrolls.
+                crate::widgets::menu_scroll(ui, |ui| {
+                    for i in items {
+                        let o = &offers[i];
+                        let rated = ratings.of(&o.id, o.alt_id.as_deref());
+                        if let Some(p) = offer_item(ui, o, rated, &off, prefer_vst3) {
+                            picked = Some(p);
+                            ui.close();
+                        }
                     }
-                }
+                });
             });
-        });
+        }
+    } else {
+        // The matches of every type, best rated first (each once: Master Chain is left out,
+        // its tools are in their own types too).
+        let skip = usize::from(master && folders.first().is_some_and(|(k, _)| *k == master_name));
+        let mut seen = std::collections::HashSet::new();
+        for i in folders.into_iter().skip(skip).flat_map(|(_, v)| v) {
+            let o = &offers[i];
+            let rated = ratings.of(&o.id, o.alt_id.as_deref());
+            if !seen.insert(i) || !crate::plugin_ratings::matches(&query, &o.name, &o.maker, rated)
+            {
+                continue;
+            }
+            if let Some(p) = offer_item(ui, o, rated, &off, prefer_vst3) {
+                picked = Some(p);
+                ui.close();
+            }
+        }
     }
     // A plug-in installed as both AU and VST3 is one entry; this picks which one it loads.
-    if list.iter().any(|c| c.alt_id.is_some()) {
+    let apple = all
+        .iter()
+        .any(|c| crate::plugins::is_apple(&c.id, &c.manufacturer));
+    let both = offers.iter().any(|o| o.alt_id.is_some());
+    if apple || both {
         ui.separator();
+    }
+    if both {
         let mut on = prefer_vst3;
         if ui.checkbox(&mut on, tr("Prefer VST3")).changed() {
             crate::plugins::set_prefer_vst3(on);
         }
     }
+    // Apple's Audio Units (AUDelay, DLSMusicDevice and the rest macOS comes with) are hidden
+    // unless this is on.
+    if apple {
+        let mut on = hidden.show_apple;
+        if ui
+            .checkbox(&mut on, tr("Show macOS built-in plug-ins"))
+            .changed()
+        {
+            crate::plugins::set_show_apple(on);
+        }
+    }
     picked
 }
 
-/// One plug-in in [`au_menu`]: its name (loads the preferred format), and when it is
-/// installed as both AU and VST3, a small button for each. Returns the id picked.
-fn plugin_menu_item(
+/// The width of a rating chip.
+const CHIP_W: f32 = 28.0;
+
+/// The search field at the top of the Instrument (`master` false) or Audio FX menu. What was
+/// typed is kept while the menu stays open and cleared when it opens again; the field has the
+/// keyboard as the menu opens. Returns what is typed.
+fn menu_search(ui: &mut Ui, master: bool) -> String {
+    let id = egui::Id::unique(("plugin_menu_search", master));
+    let pass = ui.ctx().cumulative_pass_nr();
+    let (mut text, last) = ui
+        .data(|d| d.get_temp::<(String, u64)>(id))
+        .unwrap_or_default();
+    let fresh = pass > last + 2;
+    if fresh {
+        text.clear();
+    }
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(id.with("field"))
+            .hint_text(tr("Search"))
+            .desired_width(f32::INFINITY),
+    );
+    if fresh {
+        resp.request_focus();
+    }
+    ui.separator();
+    ui.data_mut(|d| d.insert_temp(id, (text.clone(), pass)));
+    text
+}
+
+/// One entry of [`type_menu`]: its rating chip (blank when unrated), its name with the maker in
+/// small print, or for an emulation the proper name of what it emulates with its own name in
+/// small print (the tooltip: the plug-in and its maker, the rating and why), and for a plug-in
+/// in both formats a small AU and VST3 button. Returns what was picked.
+fn offer_item(
     ui: &mut Ui,
-    c: &crate::plugins::AuChoice,
+    o: &MenuOffer,
+    rated: Option<&crate::plugin_ratings::Rated>,
     off: &[String],
     prefer_vst3: bool,
-) -> Option<String> {
-    let warn = off.contains(&c.id) || c.alt_id.as_ref().is_some_and(|a| off.contains(a));
-    let only_vst3 = crate::plugins::format_label(&c.id) == "VST3";
-    let mut label = c.name.clone();
-    if only_vst3 {
-        label.push_str("  (VST3)");
-    }
-    if warn {
-        label.push_str(" ⚠");
-    }
-    let Some(alt) = &c.alt_id else {
-        return ui.button(label).clicked().then(|| c.id.clone());
+) -> Option<Pick> {
+    let rating = rated.and_then(|r| r.rating);
+    let (mut label, small) = crate::plugin_ratings::shown(&o.name, &o.maker, rated);
+    let (own, maker) = match rated {
+        Some(r) if !r.name.is_empty() => (
+            r.name.as_str(),
+            if r.maker.is_empty() {
+                &o.maker
+            } else {
+                &r.maker
+            },
+        ),
+        _ => (o.name.as_str(), &o.maker),
     };
+    let mut tip = trf("Plug-in: {} by {}", &[&own, maker]);
+    if let Some(r) = rated {
+        if let Some(x) = r.rating {
+            tip.push_str(&format!("\n{} / 5", crate::plugin_ratings::label(x)));
+        }
+        if !r.why.is_empty() {
+            tip.push('\n');
+            tip.push_str(&r.why);
+        }
+    }
+    if let Pick::Plugin(c) = &o.pick {
+        if crate::plugins::format_label(&c.id) == "VST3" {
+            label.push_str("  (VST3)");
+        }
+        if off.contains(&c.id) || c.alt_id.as_ref().is_some_and(|a| off.contains(a)) {
+            label.push_str(" ⚠");
+        }
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let style = ui.style().clone();
+    egui::RichText::new(label).append_to(
+        &mut job,
+        &style,
+        egui::FontSelection::Default,
+        egui::Align::Center,
+    );
+    egui::RichText::new(format!("   {small}"))
+        .small()
+        .color(theme::PRINT())
+        .append_to(
+            &mut job,
+            &style,
+            egui::FontSelection::Default,
+            egui::Align::Center,
+        );
     let mut picked = None;
     ui.horizontal(|ui| {
-        if ui.button(label).clicked() {
-            picked = Some(c.preferred_id(prefer_vst3).to_string());
+        rating_chip(ui, rating);
+        let resp = ui.button(job).on_hover_text(&tip);
+        if resp.clicked() {
+            picked = Some(match &o.pick {
+                Pick::Plugin(c) => plugin_pick(c, c.preferred_id(prefer_vst3)),
+                p => p.clone(),
+            });
         }
-        for (name, id, default) in [("AU", &c.id, !prefer_vst3), ("VST3", alt, prefer_vst3)] {
-            let b = egui::Button::new(egui::RichText::new(name).small()).selected(default);
-            if ui
-                .add(b)
-                .on_hover_text(format!("{} as {name}", c.name))
-                .clicked()
-            {
-                picked = Some(id.clone());
+        if let Pick::Plugin(c) = &o.pick {
+            if let Some(alt) = &c.alt_id {
+                for (name, id, default) in [("AU", &c.id, !prefer_vst3), ("VST3", alt, prefer_vst3)]
+                {
+                    let b = egui::Button::new(egui::RichText::new(name).small()).selected(default);
+                    if ui
+                        .add(b)
+                        .on_hover_text(format!("{} as {name}", c.name))
+                        .clicked()
+                    {
+                        picked = Some(plugin_pick(c, id));
+                    }
+                }
             }
         }
     });
     picked
+}
+
+/// Plug-in `c` picked in the format with this id.
+fn plugin_pick(c: &crate::plugins::AuChoice, id: &str) -> Pick {
+    crate::plugins::release(id);
+    Pick::Plugin(crate::plugins::AuChoice {
+        id: id.to_string(),
+        alt_id: None,
+        ..c.clone()
+    })
+}
+
+/// A rating's chip: the number on its colour (cream at 1 to orange at 5), outlined with
+/// the seam colour so the palest still shows on the menu; empty room when unrated.
+fn rating_chip(ui: &mut Ui, rating: Option<f32>) {
+    let h = ui.spacing().interact_size.y - 4.0;
+    let (r, _) = ui.allocate_exact_size(vec2(CHIP_W, h), Sense::hover());
+    let Some(x) = rating else {
+        return;
+    };
+    let g = ui.painter();
+    let fill = crate::plugin_ratings::color(x);
+    g.rect_filled(r, 2.0, fill);
+    g.rect_stroke(r, 2.0, Stroke::new(1.0, theme::SEAM()), StrokeKind::Inside);
+    g.text(
+        r.center(),
+        Align2::CENTER_CENTER,
+        crate::plugin_ratings::label(x),
+        egui::FontId::proportional(11.0),
+        crate::plugin_ratings::chip_text(fill),
+    );
 }
 
 /// The slot's tooltip: the plug-in's name and its format.
@@ -1907,6 +2173,59 @@ fn plugin_tooltip(s: &crate::plugins::PluginSlot) -> String {
         "AU" => format!("{}\nAudio Unit", s.name),
         f => format!("{}\n{f}", s.name),
     }
+}
+
+/// Everything the Instrument menu offers: Pro Wave's own instruments that are not hidden,
+/// then the Audio Unit and VST3 instruments of `list`.
+fn instrument_offers(list: &[crate::plugins::AuChoice]) -> Vec<MenuOffer> {
+    let hidden = crate::plugins::hidden();
+    let mut own = vec![
+        MenuOffer::own(
+            crate::channel_rack::RACK_ID,
+            tr("Channel Rack"),
+            Pick::BuiltIn(crate::channel_rack::new_slot),
+        ),
+        MenuOffer::own(
+            crate::singer::SINGER_ID,
+            tr("Singer"),
+            Pick::BuiltIn(crate::singer::new_slot),
+        ),
+        MenuOffer::own(
+            crate::bass808::BASS808_ID,
+            "808",
+            Pick::BuiltIn(crate::bass808::new_slot),
+        ),
+    ];
+    for info in prowave_engine::native_instruments() {
+        own.push(MenuOffer::own(info.id, info.name, Pick::NativeInst(info)));
+    }
+    // Pro Wave's plug-in builds of a built-in stay out even when the built-in is hidden.
+    let plugins = plugin_offers(list, true, &own);
+    own.retain(|o| !hidden.hides(&o.id, "Pro Wave"));
+    own.extend(plugins);
+    own
+}
+
+/// Everything the Audio FX menu offers: Pro Wave's native effects and Space Designer (while
+/// the strip has `room` for a built-in) that are not hidden, then the Audio Unit and VST3
+/// effects of `list`.
+fn effect_offers(list: &[crate::plugins::AuChoice], room: bool) -> Vec<MenuOffer> {
+    let hidden = crate::plugins::hidden();
+    let mut own: Vec<MenuOffer> = prowave_engine::native_effects()
+        .iter()
+        .map(|info| MenuOffer::own(info.id, info.name, Pick::NativeFx(info)))
+        .collect();
+    if room {
+        own.push(MenuOffer::own(
+            &crate::plugins::builtin_fx_id(prowave_engine::FxKind::Reverb),
+            tr("Space Designer"),
+            Pick::SpaceDesigner,
+        ));
+    }
+    let plugins = plugin_offers(list, false, &own);
+    own.retain(|o| !hidden.hides(&o.id, "Pro Wave"));
+    own.extend(plugins);
+    own
 }
 
 /// The Instrument slot of a software instrument or Drummer strip: the Audio Unit instrument,
@@ -1955,10 +2274,6 @@ fn instrument_slot(
         }
     }
     let (mut pick, mut remove, mut open) = (None, false, false);
-    // A built-in instrument picked: what makes its slot.
-    let mut built_in: Option<fn() -> crate::plugins::PluginSlot> = None;
-    // A native instrument picked (the engine's table).
-    let mut native: Option<&'static prowave_engine::NativeInstInfo> = None;
     let list = &v.au_list;
     let popup = if loaded.is_some() {
         egui::Popup::context_menu(&resp)
@@ -1967,7 +2282,7 @@ fn instrument_slot(
     };
     popup.show(|ui| {
         ui.set_min_width(170.0);
-        // More makers than the window has room for: the menu scrolls.
+        // More types than the window has room for: the menu scrolls.
         crate::widgets::menu_scroll(ui, |ui| {
             if loaded.is_some() {
                 if ui.button(tr("Open")).clicked() {
@@ -1976,28 +2291,8 @@ fn instrument_slot(
                 }
                 ui.separator();
             }
-            if ui.button(tr("Channel Rack")).clicked() {
-                built_in = Some(crate::channel_rack::new_slot);
-                ui.close();
-            }
-            if ui.button(tr("Singer")).clicked() {
-                built_in = Some(crate::singer::new_slot);
-                ui.close();
-            }
-            if ui.button("808").clicked() {
-                built_in = Some(crate::bass808::new_slot);
-                ui.close();
-            }
-            for info in prowave_engine::native_instruments() {
-                if ui.button(info.name).clicked() {
-                    native = Some(info);
-                    ui.close();
-                }
-            }
-            ui.separator();
-            if let Some(c) = au_menu(ui, list, true) {
-                pick = Some(c.clone());
-            }
+            let offers = instrument_offers(list);
+            pick = type_menu(ui, &offers, list, false);
             if loaded.is_some() {
                 ui.separator();
                 if ui.button(tr("Remove")).clicked() {
@@ -2008,9 +2303,12 @@ fn instrument_slot(
         });
     });
     let t = &mut p.tracks[i];
-    let made = native
-        .map(crate::native_inst_ui::new_slot)
-        .or_else(|| built_in.map(|new_slot| new_slot()));
+    let (made, pick) = match pick {
+        Some(Pick::NativeInst(info)) => (Some(crate::native_inst_ui::new_slot(info)), None),
+        Some(Pick::BuiltIn(new_slot)) => (Some(new_slot()), None),
+        Some(Pick::Plugin(c)) => (None, Some(c)),
+        _ => (None, None),
+    };
     if let Some(slot) = made {
         v.open_plugin = Some((slot.uid, slot.name.clone()));
         t.au_instrument = Some(slot);
@@ -2033,7 +2331,7 @@ fn instrument_slot(
 
 /// The empty Audio FX slot after the last effect of track `i` (or of the Stereo Out strip,
 /// [`MASTER_STRIP`]): click for the native effects, Space Designer and the Audio Unit and VST3
-/// effects, one submenu per maker.
+/// effects, one submenu per type (see [`type_menu`]).
 fn empty_fx_slot(
     ui: &Ui,
     g: &Painter,
@@ -2057,37 +2355,22 @@ fn empty_fx_slot(
     );
     let mut pick = None;
     let list = &v.au_list;
-    let mut native = None;
     let room = strip_inserts(p, i).len() < prowave_engine::MAX_INSERTS;
-    let mut space = false;
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(170.0);
-        // More makers than the window has room for: the menu scrolls.
+        // More types than the window has room for: the menu scrolls.
         crate::widgets::menu_scroll(ui, |ui| {
-            // The native effects (FL Studio's dynamics, as Lemon Studio recreated them).
-            for info in prowave_engine::native_effects() {
-                if ui.button(info.name).clicked() {
-                    native = Some(info);
-                    ui.close();
-                }
-            }
-            if room && ui.button(tr("Space Designer")).clicked() {
-                space = true;
-                ui.close();
-            }
-            ui.separator();
-            if let Some(c) = au_menu(ui, list, false) {
-                pick = Some(c.clone());
-            }
+            let offers = effect_offers(list, room);
+            pick = type_menu(ui, &offers, list, true);
         });
     });
-    if space {
-        apply_insert(p, v, i, 0, InsertAct::Add(prowave_engine::FxKind::Reverb));
-        return;
-    }
-    let slot = match (native, pick) {
-        (Some(info), _) => Some(crate::native_fx_ui::new_slot(info)),
-        (None, Some(c)) => Some(crate::plugins::PluginSlot::new(&c.id, &c.label())),
+    let slot = match pick {
+        Some(Pick::SpaceDesigner) => {
+            apply_insert(p, v, i, 0, InsertAct::Add(prowave_engine::FxKind::Reverb));
+            return;
+        }
+        Some(Pick::NativeFx(info)) => Some(crate::native_fx_ui::new_slot(info)),
+        Some(Pick::Plugin(c)) => Some(crate::plugins::PluginSlot::new(&c.id, &c.label())),
         _ => None,
     };
     if let (Some(slot), Some((fx, _))) = (slot, p.strip_plugins_mut(i)) {
@@ -2332,7 +2615,7 @@ pub fn channel_strip(
             Align2::CENTER_CENTER,
             tr("VCA"),
             d.name_text,
-            theme::INK2,
+            theme::INK2(),
         );
     }
     if !vca_strip {
@@ -2470,7 +2753,7 @@ pub fn channel_strip(
                     pos2(sx, r.sends),
                     pos2(sx + inner_w, r.pan + d.pan_h - 6.0),
                 );
-                let st = Stroke::new(1.0, theme::INK2.gamma_multiply(0.32));
+                let st = Stroke::new(1.0, theme::INK2().gamma_multiply(0.32));
                 let c = [
                     panel.left_top(),
                     panel.right_top(),
@@ -2488,7 +2771,7 @@ pub fn channel_strip(
                     Align2::CENTER_CENTER,
                     "MAIN BUS",
                     11.0,
-                    theme::PRINT,
+                    theme::PRINT(),
                 );
                 hw::silk(
                     g,
@@ -2496,7 +2779,7 @@ pub fn channel_strip(
                     Align2::CENTER_CENTER,
                     "2 CH · NO PAN",
                     11.0,
-                    theme::PRINT,
+                    theme::PRINT(),
                 );
             }
         }
@@ -2602,7 +2885,7 @@ pub fn channel_strip(
             "PEAK",
             Face::Lcd,
             d.chip_label,
-            theme::ORANGE_DK,
+            theme::ORANGE_DK(),
         );
     }
     if ui
@@ -3067,7 +3350,7 @@ fn filter_key_w(label: &str) -> f32 {
 
 /// The power pictogram of the Sends on Faders key.
 fn power_icon(g: &Painter, c: Pos2, s: f32) {
-    let st = Stroke::new(2.0, theme::INK);
+    let st = Stroke::new(2.0, theme::INK());
     let r = s * 0.36;
     let pts: Vec<Pos2> = (0..=24)
         .map(|k| polar(c, 35.0 + k as f32 * (290.0 / 24.0), r))
@@ -3078,7 +3361,7 @@ fn power_icon(g: &Painter, c: Pos2, s: f32) {
 
 /// The strip-width pictograms: a panel with its divider left (narrow) or right (wide).
 fn layout_icon(g: &Painter, c: Pos2, wide: bool) {
-    let st = Stroke::new(1.6, theme::INK);
+    let st = Stroke::new(1.6, theme::INK());
     let r = Rect::from_center_size(c, vec2(15.0, 13.0));
     g.rect_stroke(r, 0.0, st, StrokeKind::Middle);
     let x = if wide { r.left() + 9.5 } else { r.left() + 5.5 };
@@ -3088,18 +3371,28 @@ fn layout_icon(g: &Painter, c: Pos2, wide: bool) {
 fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect) {
     const NS: &str = "mixer_toolbar";
     let g = ui.painter_at(bar);
-    g.rect_filled(bar, 0.0, Color32::from_rgb(0xe7, 0xe3, 0xd9));
+    g.rect_filled(
+        bar,
+        0.0,
+        theme::pick(
+            Color32::from_rgb(0xe7, 0xe3, 0xd9),
+            Color32::from_rgb(0x23, 0x23, 0x26),
+        ),
+    );
     g.hline(
         bar.x_range(),
         bar.top() + 0.5,
-        Stroke::new(1.0, Color32::WHITE),
+        Stroke::new(1.0, theme::emboss(255)),
     );
     // A 3-point seam under the row.
     let seam_y = bar.bottom() - 3.0;
     g.rect_filled(
         Rect::from_min_max(pos2(bar.left(), seam_y), bar.max),
         0.0,
-        Color32::from_rgb(0xd6, 0xd0, 0xc3),
+        theme::pick(
+            Color32::from_rgb(0xd6, 0xd0, 0xc3),
+            Color32::from_rgb(0x1a, 0x1a, 0x1d),
+        ),
     );
     hw::seam_h(&g, bar.x_range(), seam_y);
     let cy = bar.top() + (bar.height() - 3.0) / 2.0;
@@ -3216,7 +3509,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect) {
             Align2::RIGHT_CENTER,
             "Show",
             11.0,
-            theme::PRINT,
+            theme::PRINT(),
         );
     } else {
         // Not enough room for a key per strip type: one menu with a check for each.
@@ -3304,7 +3597,7 @@ fn draw_sends_on_faders(ui: &Ui, g: &egui::Painter, x: f32, cy: f32, bus: &mut O
         Align2::LEFT_CENTER,
         &label,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     let kr = Rect::from_min_size(
         pos2(lr.right() + 14.0, cy - BAR_KEY_H / 2.0),
@@ -3402,32 +3695,54 @@ struct Racks {
     end_cap: Rect,
 }
 
+/// The channel strips the Mixer shows, in order, and whether the Stereo Out strip shows.
+fn shown_strips(p: &Project, v: &MixerView) -> (Vec<StripKey>, bool) {
+    let filters = v.filters;
+    let keys: Vec<StripKey> = if p.tracks.is_empty() {
+        Vec::new()
+    } else {
+        match v.mode {
+            MixerMode::Single => {
+                vec![StripKey::Track(p.selected_track.min(p.tracks.len() - 1))]
+            }
+            MixerMode::Tracks => (0..p.tracks.len())
+                .filter(|i| strip_visible(p.tracks[*i].kind, &filters))
+                .map(StripKey::Track)
+                .collect(),
+        }
+    };
+    (keys, filters[3])
+}
+
+/// The Audio FX and Send rows the shown strips need (see [`fx_rows_for`], [`send_rows_for`]).
+fn shown_rows(p: &Project, keys: &[StripKey], master: bool) -> (usize, usize) {
+    let mut all = keys.to_vec();
+    if master {
+        all.push(StripKey::StereoOut);
+    }
+    (fx_rows_for(p, &all), send_rows_for(p, &all))
+}
+
+/// The height of a Mixer panel that shows its channel strips whole, top to bottom, at the main
+/// window's density: the menu row, the body's margin, every slot row from Setting to Group,
+/// the pan and dB zones, a fader of `MAIN` travel, the keys and the name plate. It grows with
+/// the inserts and sends the shown strips have. A shorter panel hides rows at the top or
+/// drops to the compact density.
+pub fn full_height(p: &Project, v: &MixerView) -> f32 {
+    let (keys, master) = shown_strips(p, v);
+    let (fx, sends) = shown_rows(p, &keys, master);
+    let r = rows(0.0, fx, sends, MAIN);
+    TOOLBAR_H + BODY_MARGIN + r.fader_top + bottom_parts(MAIN) + MAIN_MIN_FADER
+}
+
 impl Layout {
     fn new(area: Rect, p: &Project, v: &MixerView) -> Layout {
         let bar = Rect::from_min_size(area.min, vec2(area.width(), TOOLBAR_H));
         let body = Rect::from_min_max(pos2(area.left(), bar.bottom()), area.max);
         // Which strips, in order.
-        let filters = v.filters;
-        let keys: Vec<StripKey> = if p.tracks.is_empty() {
-            Vec::new()
-        } else {
-            match v.mode {
-                MixerMode::Single => {
-                    vec![StripKey::Track(p.selected_track.min(p.tracks.len() - 1))]
-                }
-                MixerMode::Tracks => (0..p.tracks.len())
-                    .filter(|i| strip_visible(p.tracks[*i].kind, &filters))
-                    .map(StripKey::Track)
-                    .collect(),
-            }
-        };
-        let master = filters[3];
-        let mut all = keys.clone();
-        if master {
-            all.push(StripKey::StereoOut);
-        }
-        let (fx, sends) = (fx_rows_for(p, &all), send_rows_for(p, &all));
-        let d = Density::fit(body.height() - 16.0, f32::INFINITY, fx, sends);
+        let (keys, master) = shown_strips(p, v);
+        let (fx, sends) = shown_rows(p, &keys, master);
+        let d = Density::fit(body.height() - BODY_MARGIN, f32::INFINITY, fx, sends);
         let (top_m, bottom_m) = if d == BIG {
             (16.0, 14.0)
         } else if d == MAIN {
@@ -3565,8 +3880,8 @@ fn end_cap(g: &Painter, r: Rect) {
         return;
     }
     let size = 14.0;
-    let word = hw::galley(g, "PRO WAVE", Face::SilkX, size, theme::INK2);
-    let model = hw::galley(g, "PW-1", Face::SilkX, size, theme::INK2);
+    let word = hw::galley(g, "PRO WAVE", Face::SilkX, size, theme::INK2());
+    let model = hw::galley(g, "PW-1", Face::SilkX, size, theme::INK2());
     let sq = size * 0.7;
     let gap = size * 0.9;
     let len = word.size().x + gap + sq + gap + model.size().x;
@@ -3575,15 +3890,15 @@ fn end_cap(g: &Painter, r: Rect) {
     let mut y = r.center().y + len / 2.0;
     let angle = -std::f32::consts::FRAC_PI_2;
     let wx = word.size().x;
-    g.add(TextShape::new(pos2(cx - gh / 2.0, y), word, theme::INK2).with_angle(angle));
+    g.add(TextShape::new(pos2(cx - gh / 2.0, y), word, theme::INK2()).with_angle(angle));
     y -= wx + gap;
     g.rect_filled(
         Rect::from_min_max(pos2(cx - sq / 2.0, y - sq), pos2(cx + sq / 2.0, y)),
         0.0,
-        theme::ORANGE,
+        theme::ORANGE(),
     );
     y -= sq + gap;
-    g.add(TextShape::new(pos2(cx - gh / 2.0, y), model, theme::INK2).with_angle(angle));
+    g.add(TextShape::new(pos2(cx - gh / 2.0, y), model, theme::INK2()).with_angle(angle));
 }
 
 /// A child of `ui` that draws and takes clicks only inside `clip`.
@@ -3627,8 +3942,20 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         lay.body,
         0.0,
         &[
-            (0.0, Color32::from_rgb(0xd6, 0xd0, 0xc3)),
-            (1.0, Color32::from_rgb(0xcf, 0xc9, 0xbb)),
+            (
+                0.0,
+                theme::pick(
+                    Color32::from_rgb(0xd6, 0xd0, 0xc3),
+                    Color32::from_rgb(0x1a, 0x1a, 0x1d),
+                ),
+            ),
+            (
+                1.0,
+                theme::pick(
+                    Color32::from_rgb(0xcf, 0xc9, 0xbb),
+                    Color32::from_rgb(0x17, 0x17, 0x1a),
+                ),
+            ),
         ],
     );
 
@@ -3641,7 +3968,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     // Row labels: silkscreen in the label column, each with a short rule to its row. Rows
     // hidden at the top lose their labels with them.
     let gl = ui.painter_at(lay.labels);
-    gl.rect_filled(lay.labels, 0.0, Color32::from_rgb(0xdd, 0xd8, 0xcb));
+    gl.rect_filled(
+        lay.labels,
+        0.0,
+        theme::pick(
+            Color32::from_rgb(0xdd, 0xd8, 0xcb),
+            Color32::from_rgb(0x1e, 0x1e, 0x21),
+        ),
+    );
     hw::seam_v(&gl, lay.labels.right() - 2.0, lay.labels.y_range());
     let lx = lay.labels.right() - 22.0;
     let label_at = |y: f32, h: f32, t: &str| {
@@ -3655,12 +3989,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
             Align2::RIGHT_CENTER,
             t,
             11.0,
-            theme::INK2,
+            theme::INK2(),
         );
         gl.hline(
             lay.labels.right() - 14.0..=lay.labels.right() - 4.0,
             cy,
-            Stroke::new(1.0, theme::INK2.gamma_multiply(0.5)),
+            Stroke::new(1.0, theme::INK2().gamma_multiply(0.5)),
         );
     };
     label_at(r.setting, d.sh, tr("Setting"));
@@ -3682,8 +4016,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     let gs = ui.painter_at(lay.strips);
     if let Some(x) = racks.seam {
         let y = lay.clip_top..=lay.strip_top + lay.strip_h + 4.0;
-        gs.vline(x, y.clone(), Stroke::new(2.0, theme::SEAM));
-        gs.vline(x + 1.5, y, Stroke::new(1.0, theme::BONE_HI));
+        gs.vline(x, y.clone(), Stroke::new(2.0, theme::SEAM()));
+        gs.vline(x + 1.5, y, Stroke::new(1.0, theme::BONE_HI()));
     }
     if racks.end_cap.left() < lay.strips.right() {
         end_cap(&gs, racks.end_cap);
@@ -3755,7 +4089,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
         gb.rect_filled(
             Rect::from_min_max(lay.body.min, pos2(lay.body.right(), lay.clip_top)),
             0.0,
-            Color32::from_rgb(0xd6, 0xd0, 0xc3),
+            theme::pick(
+                Color32::from_rgb(0xd6, 0xd0, 0xc3),
+                Color32::from_rgb(0x1a, 0x1a, 0x1d),
+            ),
         );
         hw::seam_h(&gb, x, lay.clip_top - 1.5);
     }
@@ -3789,6 +4126,34 @@ mod tests {
         for _ in 0..n {
             h.frame(vec![], |ui| show(ui, p, s, &Meters::default()));
         }
+    }
+
+    #[test]
+    fn full_height_shows_the_whole_strip_and_is_the_least_that_does() {
+        let mut busy = mixer_project();
+        busy.tracks[0].inserts = (0..5).map(|_| Insert::new(FxKind::Reverb)).collect();
+        busy.tracks[0].sends = vec![SendSlot::default(); 3];
+        let v = MixerView::default();
+        for p in [mixer_project(), Project::demo(), busy.clone()] {
+            let h = full_height(&p, &v);
+            let lay = Layout::new(Rect::from_min_size(Pos2::ZERO, vec2(1400.0, h)), &p, &v);
+            assert_eq!(lay.rows.d, MAIN, "{h}");
+            assert_eq!(lay.max_hidden, 0, "{h}");
+            assert!(lay.rows.setting >= lay.body.top(), "{h}");
+            for r in lay.strip_rects(0.0) {
+                assert!(r.top() >= lay.body.top() && r.bottom() <= lay.body.bottom());
+            }
+            // A point shorter and the strips drop to the compact density.
+            let short = Layout::new(
+                Rect::from_min_size(Pos2::ZERO, vec2(1400.0, h - 1.0)),
+                &p,
+                &v,
+            );
+            assert_ne!(short.rows.d, MAIN, "{h}");
+        }
+        // Every insert or send row adds one slot pitch.
+        let plain = full_height(&mixer_project(), &v);
+        assert_eq!(full_height(&busy, &v), plain + 6.0 * MAIN.pitch);
     }
 
     #[test]
@@ -3882,6 +4247,33 @@ mod tests {
         );
         assert!(p.tracks[0].volume_db < moved);
         assert_eq!(p.tracks[second].volume_db, before);
+    }
+
+    /// The Audio FX menu offers Pro Wave's own effects with the plug-ins, and leaves out Pro
+    /// Wave's separately installed plug-in builds of them (AU and VST3).
+    #[test]
+    fn own_plugin_builds_of_a_built_in_are_not_offered_twice() {
+        let c = |id: &str, maker: &str, name: &str| crate::plugins::AuChoice {
+            id: id.into(),
+            manufacturer: maker.into(),
+            name: name.into(),
+            instrument: false,
+            alt_id: None,
+        };
+        let list = vec![
+            c("aufx:dqxw:PrWv", "Pro Wave", "Press"),
+            c("vst3:CF84DA22", "Pro Wave", "Pro Wave Press"),
+            c("aufx:Pro3:FbFt", "FabFilter", "Pro-Q 3"),
+        ];
+        let offers = effect_offers(&list, true);
+        let ids: Vec<&str> = offers.iter().map(|o| o.id.as_str()).collect();
+        assert!(ids.contains(&"prowave:press"), "{ids:?}");
+        assert!(ids.contains(&"builtin:Space D"));
+        assert!(ids.contains(&"aufx:Pro3:FbFt"));
+        assert!(!ids.contains(&"aufx:dqxw:PrWv") && !ids.contains(&"vst3:CF84DA22"));
+        assert!(!effect_offers(&list, false)
+            .iter()
+            .any(|o| matches!(o.pick, Pick::SpaceDesigner)));
     }
 
     #[test]
@@ -4214,7 +4606,7 @@ mod tests {
             w,
             h,
             2.0,
-            theme::BONE,
+            theme::BONE(),
             |ui| {
                 theme::apply(ui.ctx());
                 show(ui, &mut p, &mut s, &meters)
@@ -4234,5 +4626,65 @@ mod tests {
         picture("mixer-main-narrow.png", 1400.0, 700.0, false);
         picture("mixer-compact.png", 1400.0, 470.0, false);
         picture("mixer-compact-wide.png", 1400.0, 420.0, true);
+    }
+
+    /// A plug-in type menu's entries with their rating chips, in each look
+    /// (`PROWAVE_UI_PNG_DIR`, else the temp folder).
+    #[test]
+    #[ignore = "pictures"]
+    fn rating_menu_pictures() {
+        use crate::theme::{self, Theme};
+        let dir = std::env::var_os("PROWAVE_UI_PNG_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("prowave-mixer"));
+        let _ = std::fs::create_dir_all(&dir);
+        let rows: Vec<(MenuOffer, crate::plugin_ratings::Rated)> = [
+            ("JC303", "midilab", 5.0, "Roland TB-303"),
+            ("OB-Xd", "discoDSP", 4.5, "Oberheim OB-X"),
+            ("Osirus", "The Usual Suspects", 4.5, "Access Virus C"),
+            ("TAL-U-NO-LX", "TAL Software", 4.0, "Roland Juno-60"),
+            ("Vital", "Vital Audio", 4.0, ""),
+            ("Space D", "Pro Wave", 3.5, "Apple Space Designer"),
+            ("Chip 6581", "Pro Wave", 3.0, "Commodore 64 SID 6581"),
+            ("Surge XT", "Surge Synth Team", 3.0, ""),
+            ("Odd Synth", "Some Maker", 1.5, ""),
+        ]
+        .into_iter()
+        .map(|(n, m, r, e)| {
+            let mut o = MenuOffer::own(n, n, Pick::SpaceDesigner);
+            o.maker = m.into();
+            let rated = crate::plugin_ratings::Rated {
+                rating: Some(r),
+                why: "Why it is rated so.".into(),
+                kind: "Synth".into(),
+                emulates: e.into(),
+                ..Default::default()
+            };
+            (o, rated)
+        })
+        .collect();
+        for (look, name) in [
+            (Theme::Graphite, "rating-menu-graphite-amber.png"),
+            (Theme::Bone, "rating-menu-bone.png"),
+        ] {
+            theme::set_for_thread(Some(look));
+            crate::ui_test::render_png(
+                460.0,
+                320.0,
+                2.0,
+                theme::BG(),
+                |ui| {
+                    theme::apply(ui.ctx());
+                    egui::Frame::menu(ui.style()).show(ui, |ui| {
+                        for (o, r) in &rows {
+                            let _ = offer_item(ui, o, Some(r), &[], false);
+                        }
+                    });
+                },
+                &dir.join(name),
+            )
+            .unwrap();
+        }
+        theme::set_for_thread(None);
     }
 }

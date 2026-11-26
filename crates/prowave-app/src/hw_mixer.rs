@@ -35,7 +35,7 @@ pub fn galley_t(
 
 /// Width of `text` as [`text_t`] sets it.
 pub fn width_t(g: &Painter, text: &str, face: Face, size: f32, track: f32) -> f32 {
-    galley_t(g, text, face, size, track, theme::INK).size().x - track * size
+    galley_t(g, text, face, size, track, theme::INK()).size().x - track * size
 }
 
 /// [`galley_t`] placed by `anchor` at `pos`; returns where it went.
@@ -190,17 +190,17 @@ pub fn step_key(ui: &Ui, g: &Painter, rect: Rect, id: egui::Id, plus: bool, enab
         let face = hw::paint_key(g, rect, Cap::Bone, false, false);
         let c = face.center();
         if plus {
-            icon_plus(g, c, 10.0, theme::PRINT);
+            icon_plus(g, c, 10.0, theme::PRINT());
         } else {
-            icon_minus(g, c, 10.0, theme::PRINT);
+            icon_minus(g, c, 10.0, theme::PRINT());
         }
         return false;
     }
     let (resp, face) = hw::key(ui, g, rect, id, Cap::Bone, false, None, hw::Legend::Custom);
     if plus {
-        icon_plus(g, face.center(), 10.0, theme::INK);
+        icon_plus(g, face.center(), 10.0, theme::INK());
     } else {
-        icon_minus(g, face.center(), 10.0, theme::INK);
+        icon_minus(g, face.center(), 10.0, theme::INK());
     }
     resp.clicked()
 }
@@ -208,7 +208,7 @@ pub fn step_key(ui: &Ui, g: &Painter, rect: Rect, id: egui::Id, plus: bool, enab
 /// A section bracket at `y` from `left` to `right` with `label` in silkscreen `size` and ink
 /// (the window title's bracket; [`hw::bracket`] is the 11-point one).
 pub fn bracket_title(g: &Painter, left: f32, right: f32, y: f32, label: &str, size: f32) {
-    let st = Stroke::new(1.0, theme::INK2.gamma_multiply(0.6));
+    let st = Stroke::new(1.0, theme::INK2().gamma_multiply(0.6));
     g.hline(left..=left + 10.0, y, st);
     let r = text_t(
         g,
@@ -218,7 +218,7 @@ pub fn bracket_title(g: &Painter, left: f32, right: f32, y: f32, label: &str, si
         Face::Silk,
         size,
         0.16,
-        theme::INK,
+        theme::INK(),
     );
     if r.right() + 8.0 < right {
         g.hline(r.right() + 8.0..=right, y, st);
@@ -253,8 +253,8 @@ pub fn dialog<R>(
 ) -> (Option<R>, bool) {
     let mut closed = false;
     let frame = egui::Frame::NONE
-        .fill(Color32::from_rgb(0xe9, 0xe5, 0xdb))
-        .stroke(Stroke::new(1.0, theme::SEAM_DK))
+        .fill(theme::BONE())
+        .stroke(Stroke::new(1.0, theme::SEAM_DK()))
         .corner_radius(4)
         .shadow(WINDOW_SHADOW);
     let out = egui::Window::new(title)
@@ -272,13 +272,19 @@ pub fn dialog<R>(
                 &g,
                 hr.shrink(1.0),
                 3.0,
-                Color32::from_rgb(0xf1, 0xee, 0xe7),
-                Color32::from_rgb(0xe6, 0xe2, 0xd8),
+                theme::pick(
+                    Color32::from_rgb(0xf1, 0xee, 0xe7),
+                    Color32::from_rgb(0x2e, 0x2e, 0x33),
+                ),
+                theme::pick(
+                    Color32::from_rgb(0xe6, 0xe2, 0xd8),
+                    Color32::from_rgb(0x26, 0x26, 0x2a),
+                ),
             );
             g.hline(
                 hr.left() + 4.0..=hr.right() - 4.0,
                 hr.top() + 1.5,
-                Stroke::new(1.0, Color32::from_white_alpha(200)),
+                Stroke::new(1.0, theme::emboss(200)),
             );
             hw::screw(&g, hr.left_top() + vec2(12.0, 12.0), 4.5, 35.0);
             hw::screw(&g, hr.right_top() + vec2(-12.0, 12.0), 4.5, -20.0);
@@ -296,7 +302,7 @@ pub fn dialog<R>(
                 None,
                 hw::Legend::Custom,
             );
-            icon_x(&g, face.center(), 8.0, theme::INK);
+            icon_x(&g, face.center(), 8.0, theme::INK());
             closed = resp.clicked();
             hw::seam_h(&g, hr.left() + 1.0..=hr.right() - 1.0, hr.bottom() - 2.0);
             let inner = egui::Frame::NONE

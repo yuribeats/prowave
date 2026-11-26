@@ -22,7 +22,10 @@ use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Sense, Shape, Strok
 use prowave_engine::FadeCurve;
 
 /// The Inspector's panel (A.1: panel-inspector).
-const PANEL_BG: Color32 = Color32::from_rgb(0xe4, 0xdf, 0xd4);
+#[allow(non_snake_case)]
+fn PANEL_BG() -> Color32 {
+    theme::pick(Color32::from_rgb(0xe4, 0xdf, 0xd4), theme::PANEL())
+}
 const ROW_H: f32 = 28.0;
 /// Value fields: their height inside a row.
 const FIELD_H: f32 = 22.0;
@@ -93,6 +96,9 @@ pub struct InspectorView {
     scroll_y: f32,
     /// Edits waiting for the mouse to be released before the engine song is rebuilt.
     pending_song_change: bool,
+    /// What Auto picked for a track following a rack: (track, song revision, class), so the
+    /// track's notes are read once per change, not every frame.
+    follow_auto: Option<(usize, u64, crate::kit_classify::DrumClass)>,
 }
 
 impl Default for InspectorView {
@@ -102,6 +108,7 @@ impl Default for InspectorView {
             track_open: false,
             scroll_y: 0.0,
             pending_song_change: false,
+            follow_auto: None,
         }
     }
 }
@@ -122,9 +129,9 @@ fn note_name(n: u8) -> String {
 /// material stays; only the print fades).
 fn label_ink(enabled: bool) -> Color32 {
     if enabled {
-        theme::INK2
+        theme::INK2()
     } else {
-        theme::PRINT
+        theme::PRINT()
     }
 }
 
@@ -159,7 +166,7 @@ fn section_header(
             c + vec2(-3.0, 5.0),
         ]
     };
-    g.add(Shape::convex_polygon(tri, theme::INK, Stroke::NONE));
+    g.add(Shape::convex_polygon(tri, theme::INK(), Stroke::NONE));
     let title = title.trim_end_matches(':');
     let t = hw::silk(
         g,
@@ -167,7 +174,7 @@ fn section_header(
         Align2::LEFT_CENTER,
         title,
         14.0,
-        theme::INK,
+        theme::INK(),
     );
     let name_left = t.right() + 10.0;
     // The name: a size smaller and tighter, then shortened word by word, before it is cut.
@@ -186,12 +193,12 @@ fn section_header(
         Face::Silk,
         fitted.size,
         fitted.track,
-        theme::PRINT,
+        theme::PRINT(),
     );
     g.hline(
         r.left() + 14.0..=r.right() - 14.0,
         r.bottom() - 4.0,
-        Stroke::new(1.0, theme::INK2.gamma_multiply(0.35)),
+        Stroke::new(1.0, theme::INK2().gamma_multiply(0.35)),
     );
     resp
 }
@@ -301,6 +308,170 @@ fn drag_value(
     None
 }
 
+/// Follow Rack (see `rack_follow.rs`): the switch, and while it is on the rack, the class
+/// (Auto shows what it picked) and the groove's velocities. Returns the next row's top.
+#[allow(clippy::too_many_arguments)]
+fn follow_rack_rows(
+    ui: &Ui,
+    g: &Painter,
+    p: &Project,
+    s: &mut UiState,
+    ti: usize,
+    tp: &mut crate::model::TrackParams,
+    (left, vx, vw): (f32, f32, f32),
+    mut y: f32,
+) -> f32 {
+    use crate::rack_follow as rf;
+    // An audio track has Groove Flex only (its hits stretched to the groove).
+    let audio = p.tracks[ti].kind == TrackKind::Audio;
+    let f = &mut tp.follow_rack;
+    if !audio {
+        label(g, left, y, tr("Follow Rack:"), true);
+        if checkbox(ui, g, pos2(vx, y), "follow_rack", f.on, true) {
+            f.on = !f.on;
+        }
+        y += ROW_H;
+    }
+    // Groove Q: the strength the track's regions take unless they have their own.
+    let groove_label = if audio {
+        tr("Groove Flex:")
+    } else {
+        tr("Groove Q:")
+    };
+    label(g, left, y, groove_label, true);
+    if let Some(v) = drag_value(
+        ui,
+        g,
+        field_rect(vx, y, vw),
+        "track_groove_q",
+        i32::from(f.groove_q),
+        (0, i32::from(rf::MAX_GROOVE_Q)),
+        0,
+        percent_text(f.groove_q),
+        true,
+    ) {
+        f.groove_q = v.clamp(0, 100) as u8;
+    }
+    y += ROW_H;
+    let own_q = p.tracks[ti]
+        .regions
+        .iter()
+        .any(|r| r.params.groove_q.is_some_and(|q| q > 0));
+    if !f.on && f.groove_q == 0 && !own_q {
+        return y;
+    }
+    let racks = rf::racks(p);
+    let rack = racks
+        .get(usize::from(f.rack))
+        .or(racks.first())
+        .map(|i| p.tracks[*i].name.clone());
+    label(g, left, y, tr("Rack:"), true);
+    let shown = rack.unwrap_or_else(|| tr("No Channel Rack").to_string());
+    if let Some(resp) = popup(
+        ui,
+        g,
+        field_rect(vx, y, vw),
+        "follow_rack_rack",
+        &shown,
+        racks.len() > 1,
+    ) {
+        egui::Popup::menu(&resp).show(|ui| {
+            for (n, i) in racks.iter().enumerate() {
+                let on = usize::from(f.rack) == n || (n == 0 && usize::from(f.rack) >= racks.len());
+                if ui.selectable_label(on, &p.tracks[*i].name).clicked() {
+                    f.rack = n.min(255) as u8;
+                    ui.close();
+                }
+            }
+        });
+    }
+    y += ROW_H;
+    // What Auto picks, read again only when the song changes.
+    let auto = match s.inspector.follow_auto {
+        Some((t, rev, c)) if t == ti && rev == p.song_rev => c,
+        _ => {
+            let c = rf::auto_of(p, ti);
+            s.inspector.follow_auto = Some((ti, p.song_rev, c));
+            c
+        }
+    };
+    label(g, left, y, tr("Follow:"), true);
+    let shown = match f.class {
+        None => format!("{} · {}", tr("Auto"), auto.tag()),
+        Some(c) => c.tag().to_string(),
+    };
+    if let Some(resp) = popup(
+        ui,
+        g,
+        field_rect(vx, y, vw),
+        "follow_rack_class",
+        &shown,
+        true,
+    ) {
+        egui::Popup::menu(&resp).show(|ui| {
+            let auto_text = format!("{} · {}", tr("Auto"), auto.tag());
+            if ui.selectable_label(f.class.is_none(), auto_text).clicked() {
+                f.class = None;
+                ui.close();
+            }
+            for c in rf::MAIN_CLASSES {
+                if ui.selectable_label(f.class == Some(c), c.tag()).clicked() {
+                    f.class = Some(c);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            for c in rf::other_classes() {
+                if ui.selectable_label(f.class == Some(c), c.tag()).clicked() {
+                    f.class = Some(c);
+                    ui.close();
+                }
+            }
+        });
+    }
+    y += ROW_H;
+    if audio {
+        return y;
+    }
+    if f.on {
+        label(g, left, y, tr("Groove Velocity:"), true);
+        if checkbox(ui, g, pos2(vx, y), "follow_rack_velocity", f.velocity, true) {
+            f.velocity = !f.velocity;
+        }
+        y += ROW_H;
+    }
+    // Groove Live: keys played live wait for a step the groove plays late (never earlier).
+    label(g, left, y, tr("Groove Live:"), f.groove_q > 0);
+    if checkbox(
+        ui,
+        g,
+        pos2(vx, y),
+        "follow_rack_live",
+        f.live,
+        f.groove_q > 0,
+    ) {
+        f.live = !f.live;
+    }
+    y + ROW_H
+}
+
+/// A strength in %: "Off" at 0.
+fn percent_text(q: u8) -> String {
+    if q == 0 {
+        tr("Off").to_string()
+    } else {
+        format!("{q} %")
+    }
+}
+
+/// A region's Groove Q: its own, or "Track" and its track's (double-click goes back to it).
+fn groove_q_text(own: Option<u8>, track: u8) -> String {
+    match own {
+        Some(q) => percent_text(q),
+        None => format!("{} · {}", tr("Track"), percent_text(track)),
+    }
+}
+
 fn signed(v: i32) -> String {
     match v {
         0 => String::new(),
@@ -313,7 +484,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
     let panel = ui.available_rect_before_wrap();
     ui.allocate_rect(panel, Sense::hover());
     let g = ui.painter_at(panel);
-    g.rect_filled(panel, 0.0, PANEL_BG);
+    g.rect_filled(panel, 0.0, PANEL_BG());
     hw::seam_v(&g, panel.right() - 3.0, panel.y_range());
     let left = panel.left();
     let w = panel.width();
@@ -391,6 +562,30 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                     }
                 }
             });
+        }
+        y += ROW_H;
+        // Groove Q: a second quantize, toward the rack's groove (see `rack_follow.rs`); on
+        // audio regions Groove Flex, its Flex Time version (see `flex_edit.rs`).
+        let track_q = sel.map_or(0, |(t, _)| p.tracks[t].params.follow_rack.groove_q);
+        let groove_label = if is_audio {
+            tr("Groove Flex:")
+        } else {
+            tr("Groove Q:")
+        };
+        label(&g, left, y, groove_label, has);
+        let r = field_rect(vx, y, vw);
+        if let Some(v) = drag_value(
+            ui,
+            &g,
+            r,
+            "region_groove_q",
+            i32::from(params.groove_q.unwrap_or(track_q)),
+            (0, i32::from(crate::rack_follow::MAX_GROOVE_Q)),
+            -1,
+            groove_q_text(params.groove_q, track_q),
+            has,
+        ) {
+            params.groove_q = u8::try_from(v).ok();
         }
         y += ROW_H;
         label(&g, left, y, tr("Transpose:"), midi);
@@ -814,6 +1009,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &Meters) {
                 tp.vel_limit.1 = v as u8;
             }
             y += ROW_H;
+            y = follow_rack_rows(ui, &g, p, s, ti, &mut tp, (left, vx, vw), y);
+        } else {
+            // Groove Flex: the audio regions' hits stretched toward a rack's groove.
+            y = follow_rack_rows(ui, &g, p, s, ti, &mut tp, (left, vx, vw), y);
         }
         if p.tracks[ti].params != tp {
             p.tracks[ti].params = tp;
@@ -940,7 +1139,7 @@ mod tests {
                 244.0,
                 980.0,
                 2.0,
-                theme::BONE,
+                theme::BONE(),
                 |ui| {
                     theme::apply(ui.ctx());
                     show(ui, &mut p, &mut s, &meters)

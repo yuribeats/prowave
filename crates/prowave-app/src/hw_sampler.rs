@@ -131,7 +131,7 @@ pub fn paint_key_sized(
 
 /// Width a toolbar key needs for `label`.
 fn key_width(g: &Painter, label: &str, led: bool) -> f32 {
-    let w = hw::galley(g, &label.to_uppercase(), Face::Bold, 11.0, theme::INK)
+    let w = hw::galley(g, &label.to_uppercase(), Face::Bold, 11.0, theme::INK())
         .size()
         .x;
     (w + 20.0 + if led { 12.0 } else { 0.0 }).max(44.0)
@@ -179,7 +179,7 @@ pub fn bracket(g: &Painter, left: f32, right: f32, y: f32, label: &str) {
         hw::bracket(g, left, right, y, label);
         return;
     }
-    let ink = theme::INK2.gamma_multiply(0.6);
+    let ink = theme::INK2().gamma_multiply(0.6);
     let st = Stroke::new(1.0, ink);
     g.vline(left, y..=y + 7.0, st);
     g.vline(right, y..=y + 7.0, st);
@@ -193,7 +193,7 @@ pub fn bracket(g: &Painter, left: f32, right: f32, y: f32, label: &str) {
         Align2::CENTER_CENTER,
         label,
         size,
-        theme::INK2,
+        theme::INK2(),
     );
 }
 
@@ -203,24 +203,24 @@ pub fn fields<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     ui.scope(|ui| {
         let r = CornerRadius::same(3);
         let v = ui.visuals_mut();
-        v.override_text_color = Some(theme::ON_DARK);
-        v.extreme_bg_color = theme::CAP;
-        v.text_edit_bg_color = Some(theme::CAP);
+        v.override_text_color = Some(theme::ON_DARK());
+        v.extreme_bg_color = theme::CAP();
+        v.text_edit_bg_color = Some(theme::CAP());
         for (w, fill) in [
-            (&mut v.widgets.inactive, theme::CAP),
-            (&mut v.widgets.hovered, theme::CAP_TOP),
-            (&mut v.widgets.active, theme::CAP_TOP),
-            (&mut v.widgets.open, theme::CAP_TOP),
+            (&mut v.widgets.inactive, theme::CAP()),
+            (&mut v.widgets.hovered, theme::CAP_TOP()),
+            (&mut v.widgets.active, theme::CAP_TOP()),
+            (&mut v.widgets.open, theme::CAP_TOP()),
         ] {
             w.bg_fill = fill;
             w.weak_bg_fill = fill;
-            w.bg_stroke = Stroke::new(1.0, theme::CAP_EDGE);
-            w.fg_stroke = Stroke::new(1.0, theme::ON_DARK);
+            w.bg_stroke = Stroke::new(1.0, theme::CAP_EDGE());
+            w.fg_stroke = Stroke::new(1.0, theme::ON_DARK());
             w.corner_radius = r;
             w.expansion = 0.0;
         }
-        v.selection.bg_fill = theme::ORANGE_DK;
-        v.selection.stroke = Stroke::new(1.0, theme::ON_DARK);
+        v.selection.bg_fill = theme::ORANGE_DK();
+        v.selection.stroke = Stroke::new(1.0, theme::ON_DARK());
         let s = ui.style_mut();
         s.text_styles
             .insert(egui::TextStyle::Button, theme::font(Face::Bold, 11.0));
@@ -309,9 +309,9 @@ pub fn readout(ui: &mut Ui, value: &str, width: f32) {
 /// A small type chip ("A1", "IN"): ink with bone print, or orange with ink print when `lit`.
 pub fn chip(g: &Painter, left_center: egui::Pos2, label: &str, size: f32, lit: bool) -> Rect {
     let (bg, ink) = if lit {
-        (theme::ORANGE, theme::INK)
+        (theme::ORANGE(), theme::INK())
     } else {
-        (theme::INK, theme::ON_DARK)
+        (theme::INK(), theme::ON_DARK())
     };
     let gal = hw::galley(g, label, Face::Lcd, size, ink);
     let r = Rect::from_min_size(

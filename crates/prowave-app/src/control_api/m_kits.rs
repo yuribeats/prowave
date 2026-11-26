@@ -14,6 +14,29 @@ use crate::kit_files::Kit;
 use crate::kit_library::Filter;
 use serde_json::{json, Value};
 
+/// The kit list: what is set, whether it is read and on, how many of its kits were found.
+fn list_json(v: &kit_browser::KitBrowser) -> Value {
+    let types: Vec<Value> = v
+        .index
+        .types
+        .iter()
+        .map(|(t, n)| json!({ "type": t, "kits": n }))
+        .collect();
+    json!({
+        "path": v.settings.kit_list,
+        "on": v.settings.kit_list_on,
+        "active": v.list_active(),
+        "file": v.list_now().map(|l| l.file.clone()),
+        "rows": v.list_now().map(|l| l.rows.len()),
+        "matched": v.index.list_matched(),
+        "types": types,
+        "error": match &v.list {
+            Some(Err(e)) => Some(e.clone()),
+            _ => None,
+        },
+    })
+}
+
 fn status_json(cx: &Cx) -> Value {
     let v = &cx.app.ui.kits;
     let folders: Vec<Value> = v
@@ -38,7 +61,9 @@ fn status_json(cx: &Cx) -> Value {
     let listed = v.index.kits.iter().filter(|k| k.listed.is_some()).count();
     json!({
         "folders": folders,
-        "kits": v.index.kits.len(),
+        "kits": if v.list_active() { v.results_all() } else { v.index.kits.len() },
+        "all_kits": v.index.kits.len(),
+        "kit_list": list_json(v),
         "listed": listed,
         "pools": v.index.kits.iter().filter(|k| k.is_pool()).count(),
         "sources": sources,
@@ -52,6 +77,10 @@ fn status_json(cx: &Cx) -> Value {
         })),
         "favorites": v.settings.favorites.len(),
         "audition": v.settings.audition,
+        "default_kit": v.settings.default_kit,
+        "copy_kits": v.settings.copy_kits.id(),
+        "copying": kit_browser::copying(v),
+        "local": v.local_dir().map(|d| d.to_string_lossy().into_owned()),
     })
 }
 
@@ -105,8 +134,15 @@ fn search(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
         source: params.str("source").map(str::to_string),
         best: params.bool("best").unwrap_or(false),
         favorites: params.bool("favorites").unwrap_or(false),
+        list: params.bool("list").unwrap_or(true) && v.list_active(),
+        kind: params.str("type").map(str::to_string),
     };
-    let hits = crate::kit_library::search(&v.index, &filter, &v.settings.favorites);
+    let hits = crate::kit_library::search_keeping(
+        &v.index,
+        &filter,
+        &v.settings.favorites,
+        &v.settings.default_kit,
+    );
     let offset = params.i64("offset").unwrap_or(0).max(0) as usize;
     let limit = params.i64("limit").unwrap_or(50).clamp(1, 1000) as usize;
     let kits: Vec<Value> = hits
@@ -125,6 +161,8 @@ fn search(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
                 "favorite": v.is_favorite(&k.path),
                 "channels": k.pads,
                 "pool": k.is_pool(),
+                "rank": k.list.map(|l| l.0),
+                "type": k.list.and_then(|l| v.index.types.get(usize::from(l.1)).map(|t| t.0.clone())),
             })
         })
         .collect();
@@ -211,7 +249,7 @@ fn rack_json(cx: &Cx, ti: usize) -> Value {
         .unwrap_or_default()
         .into_iter()
         .enumerate()
-        .map(|(k, c)| json!({ "channel": k + 1, "name": c.name, "path": c.path }))
+        .map(|(k, c)| json!({ "channel": k + 1, "name": c.name, "path": c.path, "class": c.class.id() }))
         .collect();
     json!({
         "track": state::strip_id(&cx.core.ids, ti),
@@ -253,7 +291,8 @@ fn load(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
                 .find(&path)
                 .map(|k| k.name.clone())
                 .unwrap_or_default();
-            let ti = kit_browser::load_soundfont(&mut cx.app.project, &name, &kit.path_of(*i));
+            let sf = cx.app.ui.kits.localize(&kit.path_of(*i));
+            let ti = kit_browser::load_soundfont(&mut cx.app.project, &name, &sf);
             cx.core.ids.reconcile(&cx.app.project);
             let t = &cx.app.project.tracks[ti];
             return ok(json!({
@@ -284,11 +323,17 @@ fn load(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
         });
+    let pads = cx
+        .app
+        .ui
+        .kits
+        .localize_pads(&path, &kit_browser::pad_paths(&kit));
     let ti = channel_rack::load_kit(
         &mut cx.app.project,
         track,
         &name,
-        &kit_browser::pad_paths(&kit),
+        &pads,
+        &kit_browser::pad_classes(&kit),
     );
     cx.core.ids.reconcile(&cx.app.project);
     ok(rack_json(cx, ti))
@@ -311,8 +356,10 @@ fn assign(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
     };
     let ti = match track {
         Some(ti) => ti,
-        None => channel_rack::load_kit(&mut cx.app.project, None, "", &[]),
+        None => channel_rack::load_kit(&mut cx.app.project, None, "", &[], &[]),
     };
+    cx.app.ui.kits.start();
+    let file = cx.app.ui.kits.localize(&file);
     if !channel_rack::assign_sample(&mut cx.app.project, ti, channel.max(1) as usize - 1, &file) {
         return Err(RpcError::failed("the sample could not be put there"));
     }
@@ -441,6 +488,42 @@ fn audition(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
     ok(reply)
 }
 
+fn copy(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
+    let v = &mut cx.app.ui.kits;
+    v.start();
+    if let Some(m) = params.str("mode") {
+        let mode = crate::kit_copy::CopyMode::parse(m)
+            .ok_or_else(|| RpcError::invalid("mode", "remote or always"))?;
+        v.set_copy_mode(mode);
+    }
+    ok(json!({
+        "mode": v.settings.copy_kits.id(),
+        "local": v.local_dir().map(|d| d.to_string_lossy().into_owned()),
+    }))
+}
+
+fn list(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
+    ready(cx);
+    let v = &mut cx.app.ui.kits;
+    if params.has("path") {
+        let text = params.str("path").unwrap_or("").trim();
+        let path = if text.is_empty() || !(text.starts_with('~') || text.starts_with('/')) {
+            text.to_string()
+        } else {
+            super::params::expand_path(text)
+                .map_err(|e| RpcError::invalid("path", e))?
+                .to_string_lossy()
+                .into_owned()
+        };
+        v.set_kit_list(&path);
+        v.read_list_now();
+    }
+    if let Some(on) = params.bool("on") {
+        v.set_list_on(on);
+    }
+    ok(list_json(v))
+}
+
 fn favorite(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
     let path = params.req_path("path")?.to_string_lossy().into_owned();
     let on = params.bool("on").unwrap_or(true);
@@ -458,8 +541,9 @@ pub fn methods() -> Vec<Method> {
             "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack, else a new Channel Rack track",
         )
     };
-    let status_result = "{folders: [{path, present, kits}], kits, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition}";
-    let rack_result = "{track, kit, channels: [{channel, name, path}]}";
+    let list_result = "{path, on, active (set, read and on), file (the file read), rows, matched (kits of the list found), types: [{type, kits}], error}";
+    let status_result = "{folders: [{path, present, kits}], kits (with the kit list active: the kits it shows), all_kits, kit_list: {path, on, active, file, rows, matched, types, error}, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition, default_kit, copy_kits (remote, always), copying (a kit load waits for its samples to be copied here), local}";
+    let rack_result = "{track, kit, channels: [{channel, name, path, class}]}";
     vec![
         m("kits.status", "The drum-kit library: its folders (present: the folder is there now), the number of kits (listed: those whose files are read and kept; pools: sources of one-sample folders shown as one) and the sources. The first call reads the folders.",
             vec![], status_result, status),
@@ -469,16 +553,18 @@ pub fn methods() -> Vec<Method> {
         m("kits.folders", "Sets the library folders (saved), then scans them. A folder that is not there is kept and shows present: false.",
             vec![p("folders", Ty::Arr, "the folders, a list of paths").req()],
             status_result, folders),
-        m("kits.search", "The kits whose source or name holds every word of the query, as the Kit Browser lists them.",
+        m("kits.search", "The kits whose source or name holds every word of the query, as the Kit Browser lists them: with the kit list active, only its kits (and the favourites and the kit of new racks) in its order, grouped by type.",
             vec![
                 p("query", Ty::Str, "words to look for (left out: every kit)"),
                 p("source", Ty::Str, "only kits of this source"),
                 p("best", Ty::Bool, "only kits the library's BEST.md ranks, in its order"),
                 p("favorites", Ty::Bool, "only the favourites"),
+                p("list", Ty::Bool, "false: every kit, as if the kit list were off (default: the kit list when it is active)"),
+                p("type", Ty::Str, "with the kit list: only kits of this type of it"),
                 p("limit", Ty::Int, "most kits to return (default 50)").range(1.0, 1000.0),
                 p("offset", Ty::Int, "kits to skip (default 0)").range(0.0, 10_000_000.0),
             ],
-            "{total, offset, kits: [{path, source, name, files, license, best, favorite, channels, pool}]}", search),
+            "{total, offset, kits: [{path, source, name, files, license, best, favorite, channels, pool, rank, type}]}", search),
         m("kits.get", "A kit's files (from its kept listing, else read from its folder): its audio and SoundFont files with the class of each (kick, snare, clap, closed_hat, open_hat, rim, tom_low, tom_mid, tom_high, perc, shaker, crash, ride, 808, fx, loop, other, sf2), the channels a load fills and the samples its audition plays.",
             vec![
                 p("path", Ty::Str, "the kit's folder (a pool's: its source's folder)").req(),
@@ -486,7 +572,7 @@ pub fn methods() -> Vec<Method> {
                 p("limit", Ty::Int, "most samples to list (default 200)").range(0.0, 100_000_000.0),
             ],
             "{path, kind (files, sfz, hydrogen, drumgizmo), files, classes: [{class, files}], offset, samples: [{index, file, name, class}], channels: [{channel, file, class}], audition: [file]}", get),
-        m("kits.load", "Loads a kit into a Channel Rack: its samples go on the channels kits.get lists; levels, pans, mutes and steps stay. A kit of SoundFonts alone goes on a new instrument track as its SoundFont (its drum preset when it has one).",
+        m("kits.load", "Loads a kit into a Channel Rack: its samples go on the channels kits.get lists (copied to this computer first as kits.copy says); levels, pans, mutes and steps stay. A kit of SoundFonts alone goes on a new instrument track as its SoundFont (its drum preset when it has one).",
             vec![p("path", Ty::Str, "the kit's folder").req(), track()],
             rack_result, load).changes(),
         m("kits.assign", "Puts one audio file on one channel of a Channel Rack (empty channels are added up to it).",
@@ -503,6 +589,15 @@ pub fn methods() -> Vec<Method> {
                 p("capture", Ty::Str, "a WAV file to write the audition into instead of playing it"),
             ],
             "{playing: [file]}, or with capture {capture, rate, frames, seconds, peak, rms, hits: [{file, at_seconds, correlation}]}", audition),
+        m("kits.copy", "When a kit or sample loaded into a rack is copied to this computer (kit-library/local/<source>/<kit>/, the rack then plays the copies): remote copies only from folders on a network share (the default), always from every folder. Left out: tells the setting.",
+            vec![p("mode", Ty::Str, "remote or always (saved)").vals(&["remote", "always"])],
+            "{mode, local}", copy),
+        m("kits.list", "The kit list: a TSV (header with path, and rank, type, reason) naming kits by their folder relative to the library folder. Set, the Kit Browser, kits.search and kits.status show only its kits (and the favourites and the kit of new racks), in rank order, grouped by type. A list path not found as written is looked for in the library folders (the same file on another Mac's mount). Left out: tells the setting.",
+            vec![
+                p("path", Ty::Str, "the TSV (saved; turns the list on); \"\" clears it"),
+                p("on", Ty::Bool, "false: the list is kept but not used (saved), as the Kit Browser's Kit List switch"),
+            ],
+            list_result, list),
         m("kits.favorite", "Marks a kit as a favourite, or takes the mark off.",
             vec![
                 p("path", Ty::Str, "the kit's folder").req(),

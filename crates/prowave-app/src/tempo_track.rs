@@ -21,7 +21,10 @@ const MIN_GAP: f64 = 0.25;
 pub const HEIGHT: f32 = 50.0;
 
 /// The tempo line: printed in ink on the recessed lane, with a faint ink fill under it.
-const LINE: Color32 = theme::INK;
+#[allow(non_snake_case)]
+fn LINE() -> Color32 {
+    theme::INK()
+}
 const FILL: Color32 = Color32::from_rgba_premultiplied(2, 2, 2, 28);
 /// Margin above and below the slowest and fastest tempo, in BPM.
 const MARGIN: f32 = 8.0;
@@ -96,7 +99,7 @@ pub fn show(
         Face::Bold,
         10.0,
         0.04,
-        theme::PRINT,
+        theme::PRINT(),
     );
 
     // ---- lane: double-click an empty spot to add a tempo change
@@ -141,7 +144,7 @@ pub fn show(
             Stroke::NONE,
         ));
     }
-    g.add(Shape::line(line, Stroke::new(2.0, LINE)));
+    g.add(Shape::line(line, Stroke::new(2.0, LINE())));
 
     // ---- points
     let mut delete = None;
@@ -209,9 +212,9 @@ pub fn show(
         });
         // A point is a small ink head; the one under the pointer lights orange.
         let hot = resp.hovered() || resp.dragged() || context_click(&resp);
-        g.circle_filled(at + vec2(0.0, 1.0), 4.5, theme::BONE_HI);
-        g.circle_filled(at, 4.5, if hot { theme::ORANGE } else { theme::INK });
-        g.circle_stroke(at, 4.5, Stroke::new(1.0, theme::INK));
+        g.circle_filled(at + vec2(0.0, 1.0), 4.5, theme::BONE_HI());
+        g.circle_filled(at, 4.5, if hot { theme::ORANGE() } else { theme::INK() });
+        g.circle_stroke(at, 4.5, Stroke::new(1.0, theme::INK()));
         if hot || resp.dragged() {
             hw_tracks::label(
                 &g,
@@ -221,7 +224,7 @@ pub fn show(
                 Face::Bold,
                 11.0,
                 0.04,
-                theme::INK,
+                theme::INK(),
             );
         }
     }

@@ -110,7 +110,7 @@ fn render(
     ppp: f32,
 ) -> (image::RgbaImage, egui::Context) {
     let meters = crate::mixer::Meters::default();
-    crate::ui_test::render_image(w, h, ppp, theme::BONE, |ui| {
+    crate::ui_test::render_image(w, h, ppp, theme::BONE(), |ui| {
         theme::apply(ui.ctx());
         show(ui, p, s, &meters)
     })

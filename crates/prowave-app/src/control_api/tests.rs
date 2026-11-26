@@ -2320,3 +2320,36 @@ fn kits_are_found_read_and_loaded_into_a_rack() {
     r.call("ui.window", json!({"id": "kits", "open": true}));
     assert!(r.app.ui.kits.open);
 }
+
+/// rack.offset: each drum class's own share of its offsets, under the rack's offset amount;
+/// rack.get gives it per channel and per feel.
+#[test]
+fn rack_offset_sets_one_drum_classes_offset_amount() {
+    let mut r = Rig::new();
+    r.app.project = crate::channel_rack::picture_project(5);
+    let mut offsets = vec![0.0; 16];
+    offsets[4] = 0.04;
+    r.call(
+        "rack.groove",
+        json!({"groove": {"default": {"swing": 50, "offsets": offsets}}}),
+    );
+    let rack = r.call("rack.offset", json!({"class": "snare", "pct": 50}));
+    assert_eq!(rack["channels"][1]["offset"], json!(50.0));
+    assert_eq!(rack["channels"][0]["offset"], json!(100.0));
+    assert_eq!(rack["groove"]["classes"]["snare"]["offset"], json!(50.0));
+    assert!(rack["moved"].as_u64().unwrap() > 0);
+    // The snare's step 5 plays half its offset.
+    let starts = rack["channels"][1]["starts"].as_array().unwrap();
+    assert_eq!(starts[0], json!(1.02));
+    let rack = r.call("rack.offset", json!({"class": "all", "pct": 0}));
+    assert!(rack["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["offset"] == json!(0.0)));
+    assert_eq!(
+        r.err("rack.offset", json!({"class": "tuba", "pct": 10}))
+            .code,
+        Code::InvalidParams
+    );
+}

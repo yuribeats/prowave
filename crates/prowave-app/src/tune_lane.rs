@@ -33,12 +33,27 @@ use std::sync::{Arc, Mutex};
 /// (as the Piano Roll's): the analysed pitch is printed in ink with a bone edge, what the
 /// effect heard live in print grey, what it made in deep LCD green, and what the user drew
 /// (the override) in the signal orange.
-pub const CURVE: Color32 = crate::theme::INK;
-pub const LIVE: Color32 = crate::theme::PRINT;
+#[allow(non_snake_case)]
+pub fn CURVE() -> Color32 {
+    crate::theme::INK()
+}
+#[allow(non_snake_case)]
+pub fn LIVE() -> Color32 {
+    crate::theme::PRINT()
+}
 /// What the effect made while playing.
-pub const MADE: Color32 = crate::theme::LCD_INK;
-pub const OVERRIDE: Color32 = crate::theme::ORANGE;
-pub const AMOUNT: Color32 = crate::theme::ORANGE;
+#[allow(non_snake_case)]
+pub fn MADE() -> Color32 {
+    crate::theme::LCD_INK()
+}
+#[allow(non_snake_case)]
+pub fn OVERRIDE() -> Color32 {
+    crate::theme::ORANGE()
+}
+#[allow(non_snake_case)]
+pub fn AMOUNT() -> Color32 {
+    crate::theme::ORANGE()
+}
 /// The width at a note's left kept for its name.
 const LABEL_W: f32 = 26.0;
 /// The Amount lane's scale, at the well's left.
@@ -779,11 +794,11 @@ pub fn draw_grid(g: &Painter, p: &Project, link: Link, geom: &Geom) {
             }
         }
     };
-    let edge = |w: f32| Stroke::new(w, crate::theme::BONE_HI.gamma_multiply(0.85));
+    let edge = |w: f32| Stroke::new(w, crate::theme::BONE_HI().gamma_multiply(0.85));
     // The track's audio, as analysed.
     let c = curve(p, link.track);
     if !c.is_empty() {
-        line(&c, &[edge(3.6), Stroke::new(1.6, CURVE)], 0.25, true);
+        line(&c, &[edge(3.6), Stroke::new(1.6, CURVE())], 0.25, true);
     }
     // What the effect heard and made while playing (instrument tracks, and fresh takes).
     if let Some(uid) = p
@@ -797,9 +812,9 @@ pub fn draw_grid(g: &Painter, p: &Project, link: Link, geom: &Geom) {
             let heard: Vec<(f64, f32)> = h.iter().map(|(b, i, _)| (*b, *i)).collect();
             let made: Vec<(f64, f32)> = h.iter().map(|(b, _, o)| (*b, *o)).collect();
             if c.is_empty() {
-                line(&heard, &[edge(3.0), Stroke::new(1.2, LIVE)], 0.25, true);
+                line(&heard, &[edge(3.0), Stroke::new(1.2, LIVE())], 0.25, true);
             }
-            line(&made, &[edge(3.2), Stroke::new(1.4, MADE)], 0.25, true);
+            line(&made, &[edge(3.2), Stroke::new(1.4, MADE())], 0.25, true);
         }
     }
     // The override, thick, with an ink edge and a handle where it starts.
@@ -807,15 +822,15 @@ pub fn draw_grid(g: &Painter, p: &Project, link: Link, geom: &Geom) {
         line(
             &span,
             &[
-                Stroke::new(4.6, crate::theme::INK.gamma_multiply(0.7)),
-                Stroke::new(3.0, OVERRIDE),
+                Stroke::new(4.6, crate::theme::INK().gamma_multiply(0.7)),
+                Stroke::new(3.0, OVERRIDE()),
             ],
             f64::INFINITY,
             false,
         );
         if let Some((b, m)) = span.first() {
             let c = pos2((geom.x_of)(*b), (geom.y_of)(*m));
-            g.circle(c, 3.5, OVERRIDE, Stroke::new(1.0, crate::theme::INK));
+            g.circle(c, 3.5, OVERRIDE(), Stroke::new(1.0, crate::theme::INK()));
         }
     }
 }
@@ -870,7 +885,7 @@ pub fn amount_lane(
         }
     }
     let g = ui.painter_at(rect.expand(1.0));
-    let ink = |a: f32| crate::theme::INK.gamma_multiply(a);
+    let ink = |a: f32| crate::theme::INK().gamma_multiply(a);
     crate::hw::recess(&g, rect, 3.0);
     let y_of = |pos: f32| r.bottom() - pos * r.height();
     let left = rect.left() + SCALE_W;
@@ -915,7 +930,7 @@ pub fn amount_lane(
         gl.hline(
             left..=rect.right(),
             y_of(knob),
-            Stroke::new(1.5, AMOUNT.gamma_multiply(0.6)),
+            Stroke::new(1.5, AMOUNT().gamma_multiply(0.6)),
         );
     } else {
         let mut line: Vec<Pos2> = Vec::new();
@@ -932,14 +947,14 @@ pub fn amount_lane(
             line.push(pos2(rect.right(), y_of(l.value)));
         }
         line.sort_by(|a, b| a.x.total_cmp(&b.x));
-        gl.add(egui::Shape::line(line, Stroke::new(2.0, AMOUNT)));
+        gl.add(egui::Shape::line(line, Stroke::new(2.0, AMOUNT())));
         for h in handles {
             let hr = Rect::from_center_size(h, vec2(6.0, 6.0));
-            gl.rect_filled(hr, 1.0, AMOUNT);
+            gl.rect_filled(hr, 1.0, AMOUNT());
             gl.rect_stroke(
                 hr,
                 1.0,
-                Stroke::new(1.0, crate::theme::INK),
+                Stroke::new(1.0, crate::theme::INK()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -959,7 +974,7 @@ pub fn lane_header(g: &Painter, r: Rect, name: &str, holds: &str) {
         &n,
         Face::Silk,
         11.0,
-        INK2,
+        INK2(),
     );
     let h = hw::fit(g, &holds.to_uppercase(), Face::Silk, 9.0, r.width() - 6.0);
     hw::text(
@@ -969,7 +984,7 @@ pub fn lane_header(g: &Painter, r: Rect, name: &str, holds: &str) {
         &h,
         Face::Silk,
         9.0,
-        PRINT,
+        PRINT(),
     );
 }
 
@@ -1093,18 +1108,18 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
     // ---- The grid: key rows on the recess (the scale's notes lit, the others a shade
     // deeper), octave lines, beat and bar lines.
     let gg = ui.painter_at(grid);
-    gg.rect_filled(grid, 0.0, theme::BONE2);
+    gg.rect_filled(grid, 0.0, theme::BONE2());
     let lo = pitch_at(grid.bottom()).floor() as i32;
     let hi = pitch_at(grid.top()).ceil() as i32;
     for n in lo..=hi {
         let y = y_of(n as f32);
         let row = Rect::from_center_size(pos2(grid.center().x, y), vec2(grid.width(), kh));
         let fill = if !in_scale(p, link, n) {
-            hw::lerp(theme::BONE3, theme::SEAM, 0.45)
+            hw::lerp(theme::BONE3(), theme::SEAM(), 0.45)
         } else if black(n) {
-            hw::lerp(theme::BONE2, theme::BONE3, 0.62)
+            hw::lerp(theme::BONE2(), theme::BONE3(), 0.62)
         } else {
-            theme::BONE2
+            theme::BONE2()
         };
         gg.rect_filled(row, 0.0, fill);
         if n.rem_euclid(12) == 0 {
@@ -1192,13 +1207,13 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
             tr("Analysing the pitch of this track…"),
             Face::Bold,
             12.0,
-            theme::INK2,
+            theme::INK2(),
         );
     }
 
     // ---- The keyboard: bone keys with seams, black caps; the Cs named.
     let gk = ui.painter_at(keys);
-    gk.rect_filled(keys, 0.0, theme::SEAM);
+    gk.rect_filled(keys, 0.0, theme::SEAM());
     for n in lo..=hi {
         let r = Rect::from_center_size(pos2(keys.center().x, y_of(n as f32)), vec2(KEYS, kh));
         // Two white keys meet (E over F, B over C): the row under is a white key too.
@@ -1212,7 +1227,7 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
                 &tune::scale::note_name(n),
                 Face::Bold,
                 (kh * 0.75).clamp(7.5, 9.0),
-                theme::INK2,
+                theme::INK2(),
             );
         }
     }
@@ -1244,11 +1259,11 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
             pos2(b.min(ruler.right()), ruler.bottom()),
         );
         if span.width() > 0.0 {
-            gr.rect_filled(span, 0.0, theme::BONE_HI);
+            gr.rect_filled(span, 0.0, theme::BONE_HI());
             gr.hline(
                 span.x_range(),
                 span.bottom() - 1.0,
-                Stroke::new(2.0, theme::INK2),
+                Stroke::new(2.0, theme::INK2()),
             );
         }
     }
@@ -1267,7 +1282,7 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
         gr.vline(
             x,
             ruler.top() + 4.0..=ruler.bottom(),
-            Stroke::new(1.0, theme::INK2),
+            Stroke::new(1.0, theme::INK2()),
         );
         hw::text(
             &gr,
@@ -1276,7 +1291,7 @@ pub fn audio_editor(ui: &mut Ui, p: &mut Project, s: &mut crate::UiState, body: 
             &pr::bar_label(bar.max(0) as u32 + 1),
             Face::Lcd,
             11.0,
-            theme::INK,
+            theme::INK(),
         );
     }
     hw::seam_h(&gr, head.x_range(), strip.top() - 1.0);
@@ -1337,7 +1352,7 @@ fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
     use crate::hw;
     use crate::theme::{self, Face};
     let gi = ui.painter_at(insp);
-    gi.rect_filled(insp, 0.0, theme::TOOLBAR);
+    gi.rect_filled(insp, 0.0, theme::TOOLBAR());
     hw::seam_v(&gi, insp.right() - 3.0, insp.y_range());
     hw::seam_v(&gi, insp.right() - 2.0, insp.y_range());
     let t = &p.tracks[link.track];
@@ -1350,7 +1365,7 @@ fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
         .iter()
         .find(|r| pos >= p.region_start_beats(r) && pos < p.region_end_beats(r))
         .or_else(|| t.regions.first());
-    hw::tri_down(&gi, pos2(ix + 4.0, y + 1.0), theme::INK);
+    hw::tri_down(&gi, pos2(ix + 4.0, y + 1.0), theme::INK());
     let head = hw::text(
         &gi,
         pos2(ix + 14.0, y),
@@ -1358,7 +1373,7 @@ fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
         &crate::piano_roll::caption(tr("Region:")).to_uppercase(),
         Face::Silk,
         14.0,
-        theme::INK,
+        theme::INK(),
     );
     if let Some(r) = region {
         let room = ix + iw - head.right() - 10.0;
@@ -1370,7 +1385,7 @@ fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
             &name,
             Face::Silk,
             14.0,
-            theme::PRINT,
+            theme::PRINT(),
         );
     }
     y += 20.0;
@@ -1383,7 +1398,7 @@ fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
         &line,
         Face::Silk,
         11.0,
-        theme::PRINT,
+        theme::PRINT(),
     );
     y += 16.0;
     hw::seam_h(&gi, insp.left()..=insp.right() - 3.0, y);
@@ -1405,7 +1420,7 @@ fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
             Align2::RIGHT_CENTER,
             label,
             11.0,
-            theme::INK2,
+            theme::INK2(),
         );
         Rect::from_min_size(pos2(ix + 92.0, y), vec2(iw - 92.0, 24.0))
     };
@@ -1458,7 +1473,7 @@ fn inspector(ui: &Ui, p: &Project, link: Link, insp: Rect) {
             &tune::PARAMS[k].unit.to_uppercase(),
             Face::Silk,
             10.0,
-            theme::PRINT,
+            theme::PRINT(),
         );
         y += 32.0;
     }

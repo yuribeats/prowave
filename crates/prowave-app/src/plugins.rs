@@ -222,6 +222,108 @@ pub fn set_prefer_vst3(on: bool) {
     }
 }
 
+// ---------------------------------------------------------------- hidden plug-ins
+//
+// Plug-ins left out of every menu and list that offers them: the ids in the settings file
+// `plugin-hidden` (one per line; Pro Wave's own instruments and effects by the ids
+// `plugin.list` gives them, Audio Units and VST3s by theirs), and Apple's Audio Units (the
+// ones macOS comes with, manufacturer code `appl`) unless `plugin-hide-apple` holds `0`.
+// A project that already uses a hidden plug-in still opens and plays it. The files are read
+// again at most once a second, so a change another program makes shows the next time a menu
+// opens.
+
+/// What is hidden: the listed ids, and whether Apple's Audio Units are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Hidden {
+    pub ids: Vec<String>,
+    pub show_apple: bool,
+}
+
+impl Hidden {
+    /// Whether the plug-in `id` (made by `maker`) is left out of menus and lists.
+    pub fn hides(&self, id: &str, maker: &str) -> bool {
+        (!self.show_apple && is_apple(id, maker)) || self.ids.iter().any(|h| h == id)
+    }
+
+    /// Whether menu entry `c` is left out (its AU or its VST3 is listed, or it is Apple's).
+    pub fn hides_choice(&self, c: &AuChoice) -> bool {
+        self.hides(&c.id, &c.manufacturer)
+            || c.alt_id.as_ref().is_some_and(|a| self.ids.contains(a))
+    }
+
+    /// The entries of `list` that menus show.
+    pub fn visible<'a>(&self, list: &'a [AuChoice]) -> Vec<&'a AuChoice> {
+        list.iter().filter(|c| !self.hides_choice(c)).collect()
+    }
+
+    /// Reads the two settings texts (`None`: the file is not there).
+    pub fn parse(hidden: Option<&str>, hide_apple: Option<&str>) -> Self {
+        Self {
+            ids: hidden
+                .unwrap_or("")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect(),
+            show_apple: hide_apple.is_some_and(|t| t.trim() == "0"),
+        }
+    }
+}
+
+/// The id `plugin.list` and `plugin-hidden` give built-in effect `kind` ("builtin:Space D").
+pub fn builtin_fx_id(kind: prowave_engine::FxKind) -> String {
+    format!("builtin:{}", kind.name())
+}
+
+/// One of the Audio Units macOS comes with (manufacturer code `appl`, or maker "Apple").
+pub fn is_apple(id: &str, maker: &str) -> bool {
+    (is_au_id(id) && id.rsplit(':').next() == Some("appl")) || maker == "Apple"
+}
+
+static HIDDEN: std::sync::Mutex<Option<(std::time::Instant, Hidden)>> = std::sync::Mutex::new(None);
+
+/// What is hidden now (the settings files, read again at most once a second).
+pub fn hidden() -> Hidden {
+    let Ok(mut h) = HIDDEN.lock() else {
+        return Hidden::default();
+    };
+    if let Some((at, now)) = h.as_ref() {
+        if cfg!(test) || at.elapsed() < std::time::Duration::from_secs(1) {
+            return now.clone();
+        }
+    }
+    let read = |name| setting(name).and_then(|f| std::fs::read_to_string(f).ok());
+    let now = if cfg!(test) {
+        Hidden::default()
+    } else {
+        Hidden::parse(
+            read("plugin-hidden").as_deref(),
+            read("plugin-hide-apple").as_deref(),
+        )
+    };
+    *h = Some((std::time::Instant::now(), now.clone()));
+    now
+}
+
+/// Shows (`true`) or hides Apple's Audio Units in the menus.
+pub fn set_show_apple(on: bool) {
+    if let Ok(mut h) = HIDDEN.lock() {
+        if let Some((_, now)) = h.as_mut() {
+            now.show_apple = on;
+        }
+    }
+    if cfg!(test) {
+        return;
+    }
+    if let Some(f) = setting("plugin-hide-apple") {
+        if let Some(dir) = f.parent() {
+            let _ = std::fs::create_dir_all(dir)
+                .and_then(|_| std::fs::write(f, if on { "0" } else { "1" }));
+        }
+    }
+}
+
 /// A maker or plug-in name reduced for matching: lower case, letters and digits, without
 /// company suffixes ("FabFilter" = "Fabfilter", "Valhalla DSP, LLC" = "Valhalla DSP").
 fn match_key(s: &str) -> String {
@@ -1699,6 +1801,43 @@ pub(crate) mod tests {
             instrument,
             alt_id: None,
         }
+    }
+
+    /// Apple's Audio Units are hidden unless `plugin-hide-apple` holds 0; ids listed in
+    /// `plugin-hidden` (Pro Wave's own, an AU, a VST3 twin) are hidden too.
+    #[test]
+    fn hidden_leaves_out_apple_and_listed_plugins() {
+        let list = vec![
+            c("aufx:dely:appl", "Apple", "AUDelay", false),
+            c("aumu:dls :appl", "Apple", "DLSMusicDevice", true),
+            c("aufx:Pro3:FbFt", "FabFilter", "Pro-Q 3", false),
+            AuChoice {
+                alt_id: Some("vst3:ABCD".into()),
+                ..c("aufx:DEC :SToy", "Soundtoys", "Decapitator", false)
+            },
+        ];
+        let names = |h: &Hidden| -> Vec<String> {
+            h.visible(&list).iter().map(|c| c.name.clone()).collect()
+        };
+        let none = Hidden::parse(None, None);
+        assert!(!none.show_apple, "no file: Apple's are hidden");
+        assert_eq!(names(&none), ["Pro-Q 3", "Decapitator"]);
+        assert!(Hidden::parse(None, Some("1")).hides("aufx:dely:appl", "Apple"));
+        let shown = Hidden::parse(None, Some("0\n"));
+        assert_eq!(names(&shown).len(), 4);
+        let listed = Hidden::parse(
+            Some("prowave:808\n\n builtin:Space D \nvst3:ABCD\n"),
+            Some("0"),
+        );
+        assert_eq!(names(&listed), ["AUDelay", "DLSMusicDevice", "Pro-Q 3"]);
+        assert!(listed.hides("prowave:808", "Pro Wave"));
+        assert!(listed.hides(&builtin_fx_id(prowave_engine::FxKind::Reverb), "Pro Wave"));
+        assert!(!listed.hides("prowave:rack", "Pro Wave"));
+        assert!(is_apple("aumu:samp:appl", "Apple"));
+        assert!(
+            !is_apple("aufx:appl:Xyzw", "Xyz"),
+            "only the maker code counts"
+        );
     }
 
     fn v(n: u8, maker: &str, name: &str, instrument: bool) -> AuChoice {

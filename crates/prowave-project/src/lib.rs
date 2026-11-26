@@ -186,6 +186,10 @@ pub struct RegionDoc {
     /// takes its track's colour (older files have none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// Groove Q (MIDI) or Groove Flex (audio) of this region, 0-100 %, when it has its own;
+    /// left out when it takes its track's (older files have none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groove_q: Option<u8>,
 }
 
 /// The Flex edit of an audio region.
@@ -204,6 +208,10 @@ pub struct FlexDoc {
     /// the project's tempo changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow: Option<FollowDoc>,
+    /// Groove Flex: the hits found in the recording (seconds into it), from which its markers
+    /// are made again whenever the groove, the strength or the tempo changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groove_onsets: Option<Vec<f64>>,
 }
 
 /// The beats of a recording that follows the project's tempo.
@@ -455,10 +463,32 @@ pub struct TrackDoc {
     /// The Groove Track, and the tracks that follow it.
     pub groove: bool,
     pub follow_groove: bool,
+    /// Follow Rack Groove: the notes play with the feel of a drum class of a Channel Rack
+    /// (older files have none: off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_rack: Option<FollowRackDoc>,
     /// Vocal Top Line (older files have none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vocal: Option<VocalDoc>,
     pub regions: Vec<RegionDoc>,
+}
+
+/// A track's Follow Rack Groove setting.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct FollowRackDoc {
+    pub on: bool,
+    /// Which rack: 0 the first track playing a Channel Rack, 1 the second…
+    pub rack: u8,
+    /// "auto" (or empty) or a drum class id ("closed_hat", "snare", "kick"…).
+    pub class: String,
+    /// The groove's velocities accent the notes.
+    pub velocity: bool,
+    /// Groove Q (MIDI tracks) or Groove Flex (audio tracks): how far, 0-100 %, the track's
+    /// notes or hits are pulled to where the rack plays the class's steps (older files: 0).
+    pub groove_q: u8,
+    /// Groove Live: keys played live wait for a step the groove plays late.
+    pub live: bool,
 }
 
 /// One effect of a channel strip: its kind ("Channel EQ", "Compressor", "Space D", "Tape Delay",
@@ -613,6 +643,7 @@ impl Default for TrackDoc {
             midi_fx: Vec::new(),
             groove: false,
             follow_groove: false,
+            follow_rack: None,
             vocal: None,
             regions: Vec::new(),
         }
@@ -684,6 +715,11 @@ pub struct ProjectDoc {
     pub show_master_track: bool,
     /// Names of the track-header parts that are hidden (Track > Configure Track Header).
     pub header_hidden: Vec<String>,
+    /// The heights (points) the panes under the Tracks area were dragged to, by pane
+    /// ("mixer", "piano_roll", "channel_rack", "pitch_editor"); a pane not listed opens at
+    /// its own height.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pane_heights: std::collections::BTreeMap<String, f32>,
 }
 
 /// A time-signature change: `num/den` from the start of the 1-based `bar` on.
@@ -755,6 +791,7 @@ impl Default for ProjectDoc {
             midi_clock_in: None,
             show_master_track: false,
             header_hidden: Vec::new(),
+            pane_heights: std::collections::BTreeMap::new(),
         }
     }
 }

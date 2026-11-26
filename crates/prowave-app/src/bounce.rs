@@ -166,6 +166,11 @@ impl Strip {
     /// Cuts `q` down to what is heard. Fails when the regions are not there any more.
     fn apply(&self, q: &mut Project) -> Result<(), String> {
         let gone = || "the regions to bounce are not there any more".to_string();
+        // Follow Rack Groove on Auto: the class Auto picks from all the track's regions, not
+        // from the ones bounced.
+        if let Some((_, c)) = crate::rack_follow::target(q, self.track) {
+            q.tracks[self.track].params.follow_rack.class = Some(c);
+        }
         let t = q.tracks.get_mut(self.track).ok_or_else(gone)?;
         if self.regions.is_empty() || self.regions.iter().any(|&r| r >= t.regions.len()) {
             return Err(gone());
@@ -925,17 +930,28 @@ impl Drop for Job {
 /// The project of one pass: `base` for the mix; for a track, `base` with every other track
 /// that makes sound of its own silent (no regions, no instrument, muted), so the one track is
 /// heard through its strip, its sends and their Aux strips, and the Stereo Out.
-fn pass_project(base: &Project, only: Option<usize>) -> Project {
+pub(crate) fn pass_project(base: &Project, only: Option<usize>) -> Project {
     let mut q = base.clone();
     let Some(only) = only else {
         return q;
     };
     let any_solo = (0..q.tracks.len()).any(|j| q.track_mix_of(j).2);
+    // The Channel Rack the track follows (Follow Rack Groove) keeps its regions and its rack, so
+    // the track's notes still take its feel; it stays silent.
+    let followed = crate::rack_follow::target(&q, only).map(|(r, _)| r);
     for i in 0..q.tracks.len() {
         if !is_source(&q, i) {
             continue;
         }
         let t = &mut q.tracks[i];
+        if Some(i) == followed && i != only {
+            t.mute = true;
+            t.solo = false;
+            t.sends.clear();
+            t.au_effects.clear();
+            t.inserts.clear();
+            continue;
+        }
         if i == only {
             t.mute = false;
             // Heard whatever Solo says elsewhere; the strips that are not sources keep

@@ -22,6 +22,8 @@ mod ids;
 mod m_core;
 mod m_kits;
 mod m_midi_fx;
+mod m_rack;
+mod m_rack_follow;
 mod m_regions;
 mod m_tracks;
 mod m_ui;

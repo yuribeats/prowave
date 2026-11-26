@@ -542,7 +542,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                 g.hline(
                     rect.x_range(),
                     mid,
-                    Stroke::new(0.6, theme::INK.gamma_multiply(0.4)),
+                    Stroke::new(0.6, theme::INK().gamma_multiply(0.4)),
                 );
                 let w = rect.width().max(1.0) as usize;
                 for x in (0..w).step_by(3) {
@@ -550,7 +550,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                         let xx = rect.left() + x as f32 + 1.5;
                         g.line_segment(
                             [pos2(xx, mid - hi * h), pos2(xx, mid - lo * h)],
-                            Stroke::new(1.7, theme::INK),
+                            Stroke::new(1.7, theme::INK()),
                         );
                     }
                 }
@@ -560,24 +560,24 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                 let x = rect.left() + (*b / secs) as f32 * rect.width();
                 let bar = k % num == 0;
                 if bar {
-                    g.vline(x, rect.y_range(), Stroke::new(2.0, theme::ORANGE));
+                    g.vline(x, rect.y_range(), Stroke::new(2.0, theme::ORANGE()));
                     let label = format!("{:03}", k / num + 1);
-                    let gal = crate::hw::galley(&g, &label, Face::Lcd, 9.5, theme::INK);
+                    let gal = crate::hw::galley(&g, &label, Face::Lcd, 9.5, theme::INK());
                     let chip = egui::Rect::from_min_size(
                         pos2(x + 1.0, rect.top() + 2.0),
                         vec2(gal.size().x + 6.0, 12.0),
                     );
-                    g.rect_filled(chip, 1.5, theme::ORANGE);
+                    g.rect_filled(chip, 1.5, theme::ORANGE());
                     g.galley(
                         pos2(chip.left() + 3.0, chip.center().y - gal.size().y / 2.0),
                         gal,
-                        theme::INK,
+                        theme::ON_ACCENT(),
                     );
                 } else {
                     g.vline(
                         x,
                         rect.y_range(),
-                        Stroke::new(1.0, theme::INK.gamma_multiply(0.35)),
+                        Stroke::new(1.0, theme::INK().gamma_multiply(0.35)),
                     );
                 }
             }

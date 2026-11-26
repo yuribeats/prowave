@@ -221,7 +221,10 @@ fn row_key(
     enabled: bool,
 ) -> (bool, f32) {
     let text = label.to_uppercase();
-    let w = hw::galley(g, &text, Face::Bold, 12.0, theme::INK).size().x + 26.0;
+    let w = hw::galley(g, &text, Face::Bold, 12.0, theme::INK())
+        .size()
+        .x
+        + 26.0;
     let r = Rect::from_min_size(pos2(right - w, strip.top() + KEY_Y), vec2(w, KEY_H));
     if !enabled {
         let face = hw::paint_key(g, r, Cap::Bone, false, false);
@@ -232,7 +235,7 @@ fn row_key(
             &text,
             Face::Bold,
             12.0,
-            theme::SEAM_DK,
+            theme::SEAM_DK(),
         );
         return (false, r.left());
     }
@@ -587,7 +590,7 @@ fn show_pattern(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
             &(k + 1).to_string(),
             if beat { Face::Lcd } else { Face::Bold },
             if beat { 11.0 } else { 9.5 },
-            if beat { theme::INK } else { theme::PRINT },
+            if beat { theme::INK() } else { theme::PRINT() },
         );
         hw::led_sized(
             &gr,
@@ -655,7 +658,7 @@ fn show_pattern(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
             &name,
             Face::Bold,
             11.0,
-            theme::INK,
+            theme::INK(),
         );
         for k in 0..steps {
             let c = cell(r, k).shrink2(vec2(3.0, 3.5));
@@ -673,14 +676,14 @@ fn show_pattern(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
                 continue;
             }
             let (level, lit) = match mode {
-                EditMode::Chance => (row.chance[k] as f32 / 100.0, theme::ORANGE),
-                _ => (vel as f32 / 127.0, theme::ON_DARK),
+                EditMode::Chance => (row.chance[k] as f32 / 100.0, theme::ORANGE()),
+                _ => (vel as f32 / 127.0, theme::ON_DARK()),
             };
             let well = Rect::from_min_max(
                 pos2(face.left() + 4.0, face.bottom() - 7.0),
                 pos2(face.right() - 4.0, face.bottom() - 4.0),
             );
-            g.rect_filled(well, 1.0, theme::METER_WELL);
+            g.rect_filled(well, 1.0, theme::METER_WELL());
             let bar =
                 Rect::from_min_size(well.min, vec2(well.width() * level.clamp(0.05, 1.0), 3.0));
             g.rect_filled(bar, 1.0, lit);
@@ -692,7 +695,7 @@ fn show_pattern(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
                     pos2(c.left() - 6.0, c.center().y - 2.0),
                     pos2(c.left() + 1.0, c.center().y + 2.0),
                 );
-                g.rect_filled(join, 1.0, theme::INK);
+                g.rect_filled(join, 1.0, theme::INK());
             }
             if row.repeat[k] > 1 {
                 hw::text(
@@ -702,7 +705,7 @@ fn show_pattern(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
                     &format!("×{}", row.repeat[k]),
                     Face::Lcd,
                     9.0,
-                    theme::ORANGE,
+                    theme::ORANGE(),
                 );
             }
             if row.chance[k] < 100 {
@@ -710,7 +713,7 @@ fn show_pattern(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
                 g.rect_filled(
                     Rect::from_min_size(face.min + vec2(2.0, 2.0), vec2(w, 2.0)),
                     0.0,
-                    theme::ON_DARK_DIM,
+                    theme::ON_DARK_DIM(),
                 );
             }
         }
@@ -721,7 +724,7 @@ fn show_pattern(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
         g.rect_filled(
             Rect::from_min_size(pos2(x + 2.0, top - 3.0), vec2(cw - 4.0, 2.0)),
             0.0,
-            theme::ORANGE,
+            theme::ORANGE(),
         );
     }
 
@@ -991,7 +994,7 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
         let label = trf("Variation {}", &[&""]);
         hw::lcd_readout(&gs, var, label.trim(), &format!("{:02}", d.seed % 100));
         let text = tr("New Variation").to_uppercase();
-        let w = hw::galley(&gs, &text, Face::Bold, 12.0, theme::INK)
+        let w = hw::galley(&gs, &text, Face::Bold, 12.0, theme::INK())
             .size()
             .x
             + 26.0;
@@ -1059,7 +1062,7 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
             Align2::RIGHT_CENTER,
             label,
             11.0,
-            theme::INK2,
+            theme::INK2(),
         );
         let chip = Rect::from_min_size(pos2(x1 - 52.0, y), vec2(52.0, 24.0));
         crate::piano_roll::lcd_value(&g, chip, &format!("{}", (*value).min(100)));
@@ -1137,7 +1140,7 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
         lg.vline(
             x,
             ruler.top() + 4.0..=ruler.bottom(),
-            Stroke::new(1.0, theme::INK2),
+            Stroke::new(1.0, theme::INK2()),
         );
         hw::text(
             &lg,
@@ -1146,7 +1149,7 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
             &crate::piano_roll::bar_label(start_bar + i as u32 + 1),
             Face::Lcd,
             11.0,
-            theme::INK,
+            theme::INK(),
         );
     }
     hw::seam_h(&lg, lanes.x_range(), ruler.bottom());
@@ -1171,9 +1174,9 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
             Align2::LEFT_CENTER,
             &name,
             11.0,
-            if on { theme::INK } else { theme::PRINT },
+            if on { theme::INK() } else { theme::PRINT() },
         );
-        g.rect_filled(lane.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI);
+        g.rect_filled(lane.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI());
         hw::gradient(
             &lg,
             lane,
@@ -1194,7 +1197,7 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
                 ll.vline(
                     x,
                     lane.y_range(),
-                    Stroke::new(1.0, theme::ON_DARK.gamma_multiply(a)),
+                    Stroke::new(1.0, theme::ON_DARK().gamma_multiply(a)),
                 );
             }
             t += sixteenth;
@@ -1204,12 +1207,12 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
             ll.vline(
                 x,
                 lane.y_range(),
-                Stroke::new(1.0, theme::ON_DARK.gamma_multiply(0.45)),
+                Stroke::new(1.0, theme::ON_DARK().gamma_multiply(0.45)),
             );
         }
         if !on {
             // A piece left out of the kit: its lane dims.
-            ll.rect_filled(lane, 3.0, theme::BONE.gamma_multiply(0.35));
+            ll.rect_filled(lane, 3.0, theme::BONE().gamma_multiply(0.35));
         }
         for n in notes
             .iter()
@@ -1228,9 +1231,13 @@ fn show_drummer(ui: &mut Ui, p: &mut Project, s: &mut UiState, ti: usize, ri: us
                 ),
             );
             let col = if n.vel >= 112 {
-                theme::ORANGE
+                theme::ORANGE()
             } else {
-                theme::BONE_HI.gamma_multiply(if on { 1.0 } else { 0.5 })
+                theme::pick(theme::BONE_HI(), theme::ON_DARK()).gamma_multiply(if on {
+                    1.0
+                } else {
+                    0.5
+                })
             };
             ll.rect_filled(r, 1.0, col);
         }
@@ -1271,10 +1278,10 @@ fn xy_pad(
     // The pad is LCD glass in a black bezel; the grid and the puck are printed in LCD ink.
     // Its four ends are named on the faceplate around it.
     let bezel = pad.expand(5.0);
-    g.rect_filled(bezel.translate(vec2(0.0, 1.0)), 6.0, theme::BONE_HI);
-    hw::gradient(g, bezel, 6.0, theme::CAP_TOP, theme::METER_WELL);
+    g.rect_filled(bezel.translate(vec2(0.0, 1.0)), 6.0, theme::BONE_HI());
+    hw::gradient(g, bezel, 6.0, theme::CAP_TOP(), theme::METER_WELL());
     hw::lcd_glass(g, pad);
-    let line = Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.14));
+    let line = Stroke::new(1.0, theme::LCD_INK().gamma_multiply(0.14));
     for k in 1..4 {
         let t = k as f32 / 4.0;
         g.vline(pad.left() + pad.width() * t, pad.y_range(), line);
@@ -1303,7 +1310,7 @@ fn xy_pad(
             tr("Complex"),
         ),
     ] {
-        hw::silk(g, at, anchor, text, 10.0, theme::PRINT);
+        hw::silk(g, at, anchor, text, 10.0, theme::PRINT());
     }
     let resp = ui.interact(
         pad,
@@ -1328,15 +1335,19 @@ fn xy_pad(
         pad.bottom() - pad.height() * d.loudness.min(100) as f32 / 100.0,
     );
     // The puck: crosshairs through it and a solid block of LCD ink.
-    let hair = Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.4));
+    let hair = Stroke::new(1.0, theme::LCD_INK().gamma_multiply(0.4));
     g.vline(dot.x, pad.y_range(), hair);
     g.hline(pad.x_range(), dot.y, hair);
     g.rect_filled(
         Rect::from_center_size(dot, vec2(11.0, 11.0)),
         1.5,
-        theme::LCD_INK,
+        theme::LCD_INK(),
     );
-    g.rect_filled(Rect::from_center_size(dot, vec2(5.0, 5.0)), 0.5, theme::LCD);
+    g.rect_filled(
+        Rect::from_center_size(dot, vec2(5.0, 5.0)),
+        0.5,
+        theme::LCD(),
+    );
     changed
 }
 

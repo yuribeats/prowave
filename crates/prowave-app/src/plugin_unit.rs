@@ -272,7 +272,7 @@ fn transport_row(
         Align2::LEFT_CENTER,
         "Compare",
         10.5,
-        gear::PRINT,
+        gear::PRINT(),
     );
     for (i, t) in ["A", "B"].iter().enumerate() {
         let r = Rect::from_min_size(pos2(x, cy - k / 2.0), vec2(48.0, k));
@@ -295,7 +295,7 @@ fn transport_row(
         Align2::LEFT_CENTER,
         "View",
         10.5,
-        gear::PRINT,
+        gear::PRINT(),
     );
     if gear::glyph_key(
         ui,
@@ -343,7 +343,7 @@ fn editor(
     let p = ui.painter().clone();
     gear::seam_h(&p, row.left() + 1.0, row.right() - 1.0, row.top());
     let field = Rect::from_min_size(pos2(row.left() + PAD, row.top() + 10.0), vec2(260.0, 26.0));
-    p.rect_filled(field.translate(vec2(0.0, 1.0)), 2.0, gear::BONE_HI);
+    p.rect_filled(field.translate(vec2(0.0, 1.0)), 2.0, gear::BONE_HI());
     crate::hw::gradient(
         &p,
         field,
@@ -357,7 +357,7 @@ fn editor(
             .id(id.with("search"))
             .frame(egui::Frame::NONE)
             .font(gear::mono_font(11.0))
-            .text_color(crate::theme::ON_DARK)
+            .text_color(crate::theme::ON_DARK())
             .desired_width(field.width() - 16.0),
     );
     let groups = groups(params, search);

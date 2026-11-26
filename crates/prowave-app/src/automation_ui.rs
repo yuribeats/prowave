@@ -29,10 +29,19 @@ pub const CHOOSER_H: f32 = 28.0;
 /// A lane under a track (Show Automation in New Lane).
 pub const LANE_H: f32 = 40.0;
 /// An envelope line (Live draws them red) and an overridden one (grey, dimmed).
-pub const ENVELOPE: Color32 = theme::ORANGE;
-pub const OVERRIDDEN: Color32 = theme::SEAM_DK;
+#[allow(non_snake_case)]
+pub fn ENVELOPE() -> Color32 {
+    theme::ORANGE()
+}
+#[allow(non_snake_case)]
+pub fn OVERRIDDEN() -> Color32 {
+    theme::SEAM_DK()
+}
 /// The LED of an automated control.
-pub const LED_ON: Color32 = theme::ORANGE;
+#[allow(non_snake_case)]
+pub fn LED_ON() -> Color32 {
+    theme::ORANGE()
+}
 /// How far from a breakpoint a click still takes it, and from a line, in points.
 const GRAB: f32 = 6.0;
 const LINE_GRAB: f32 = 5.0;
@@ -720,17 +729,17 @@ pub fn lane(
 
     if over_regions {
         // The regions dim under the envelope, as in Live.
-        g.rect_filled(r, 0.0, theme::INK.gamma_multiply(0.28));
+        g.rect_filled(r, 0.0, theme::INK().gamma_multiply(0.28));
     } else {
         // A lane of its own: a well of deeper bone set into the arrange floor.
-        g.rect_filled(r, 0.0, theme::BONE3);
+        g.rect_filled(r, 0.0, theme::BONE3());
         let well = r.shrink2(vec2(0.0, 2.0));
-        g.rect_filled(well, 2.0, hw::lerp(theme::BONE2, theme::BONE3, 0.55));
+        g.rect_filled(well, 2.0, hw::lerp(theme::BONE2(), theme::BONE3(), 0.55));
         hw::inner_shadow(g, well, 2.0, 0.28);
         g.hline(
             well.x_range(),
             well.bottom() + 0.5,
-            Stroke::new(1.0, theme::BONE_HI),
+            Stroke::new(1.0, theme::BONE_HI()),
         );
     }
     // The selected range.
@@ -740,27 +749,27 @@ pub fn lane(
         .filter(|s| s.strip == strip && s.target == target);
     if let Some(s) = sel {
         let sr = Rect::from_x_y_ranges(x_of(s.from)..=x_of(s.to), r.y_range());
-        g.rect_filled(sr, 0.0, theme::ORANGE.gamma_multiply(0.1));
+        g.rect_filled(sr, 0.0, theme::ORANGE().gamma_multiply(0.1));
         g.rect_stroke(
             sr,
             0.0,
-            Stroke::new(1.0, theme::ORANGE.gamma_multiply(0.7)),
+            Stroke::new(1.0, theme::ORANGE().gamma_multiply(0.7)),
             egui::StrokeKind::Inside,
         );
     }
     let line = line_points(r, target, &pts, own, x_of);
     let colour = if pts.is_empty() {
-        ENVELOPE.gamma_multiply(0.45)
+        ENVELOPE().gamma_multiply(0.45)
     } else if overridden {
-        OVERRIDDEN.gamma_multiply(0.7)
+        OVERRIDDEN().gamma_multiply(0.7)
     } else {
-        ENVELOPE
+        ENVELOPE()
     };
     // The envelope: an orange line with a thin ink edge, so it reads on the bone floor and on
     // the black regions alike.
     g.add(egui::Shape::line(
         line.clone(),
-        Stroke::new(3.0, theme::INK.gamma_multiply(0.35)),
+        Stroke::new(3.0, theme::INK().gamma_multiply(0.35)),
     ));
     g.add(egui::Shape::line(line.clone(), Stroke::new(1.8, colour)));
     let selected = |b: f64| sel.is_some_and(|s| b >= s.from - 1e-9 && b <= s.to + 1e-9);
@@ -768,12 +777,12 @@ pub fn lane(
         let c = pos2(x_of(pt.beat), y_of(r, target, pt.value));
         if r.expand(4.0).contains(c) {
             let fill = if selected(pt.beat) {
-                theme::BONE_HI
+                theme::pick(theme::BONE_HI(), theme::ON_DARK())
             } else {
                 colour
             };
             g.circle_filled(c, 3.4, fill);
-            g.circle_stroke(c, 3.4, Stroke::new(1.0, theme::INK));
+            g.circle_stroke(c, 3.4, Stroke::new(1.0, theme::INK()));
         }
     }
     // The selection's handles: right edge stretches, top edge scales.
@@ -784,11 +793,11 @@ pub fn lane(
             vec2(12.0, 7.0),
         );
         for h in [right, top] {
-            g.rect_filled(h, 1.5, theme::BONE_HI);
+            g.rect_filled(h, 1.5, theme::BONE_HI());
             g.rect_stroke(
                 h,
                 1.5,
-                Stroke::new(1.0, theme::INK),
+                Stroke::new(1.0, theme::INK()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1183,14 +1192,14 @@ fn plugin_ready(
 /// A value tag next to a breakpoint.
 fn tag(g: &Painter, lane: Rect, at: Pos2, text: &str) {
     // A small dark field, like the inspector's values.
-    let galley = hw::galley(g, text, Face::Bold, 10.5, theme::ON_DARK);
+    let galley = hw::galley(g, text, Face::Bold, 10.5, theme::ON_DARK());
     let size = galley.size() + vec2(10.0, 6.0);
     let mut r = Rect::from_min_size(at + vec2(6.0, -size.y - 4.0), size);
     if r.top() < lane.top() {
         r = r.translate(vec2(0.0, size.y + 8.0));
     }
     hw::paint_field(g, r, "", false, false);
-    g.galley(r.min + vec2(5.0, 3.0), galley, theme::ON_DARK);
+    g.galley(r.min + vec2(5.0, 3.0), galley, theme::ON_DARK());
 }
 
 // ------------------------------------------------------------------ headers
@@ -1264,7 +1273,7 @@ pub fn choosers(
                 &shown,
                 Face::Lcd,
                 10.0,
-                theme::LCD_INK,
+                theme::LCD_INK(),
             );
         }
     }
@@ -1330,7 +1339,7 @@ pub fn choosers(
     );
     // A plus or a minus printed as bars (the font's minus sits off centre).
     let c = face.center();
-    let st = Stroke::new(1.6, theme::INK);
+    let st = Stroke::new(1.6, theme::INK());
     g.hline(c.x - 4.0..=c.x + 4.0, c.y, st);
     if extra.is_none() {
         g.vline(c.x, c.y - 4.0..=c.y + 4.0, st);
@@ -1383,7 +1392,7 @@ pub fn choosers(
 
 fn chooser_text(name: &str, automated: bool) -> egui::RichText {
     if automated {
-        egui::RichText::new(format!("• {name}")).color(LED_ON)
+        egui::RichText::new(format!("• {name}")).color(LED_ON())
     } else {
         egui::RichText::new(format!("   {name}"))
     }
@@ -1507,7 +1516,7 @@ pub fn toolbar(ui: &Ui, g: &Painter, p: &mut Project, v: &mut AutoView, x: f32, 
         automation::reenable(p);
     }
     // Live's Re-Enable Automation icon: an arrow turning back.
-    let c = theme::INK;
+    let c = theme::INK();
     let (centre, rad) = (r.center() + vec2(4.0, 0.5), 6.0);
     let arc: Vec<Pos2> = (0..=12)
         .map(|k| {

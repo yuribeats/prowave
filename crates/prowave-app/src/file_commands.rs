@@ -85,6 +85,8 @@ pub fn content(p: &Project) -> ProjectDoc {
     let mut doc = project_io::to_doc(p).0;
     doc.position_beats = 0.0;
     doc.selected_track = 0;
+    // A pane dragged taller or shorter is kept with the next save but asks for none.
+    doc.pane_heights.clear();
     doc
 }
 

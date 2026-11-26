@@ -76,7 +76,7 @@ pub fn seg(g: &Painter, pos: Pos2, s: &str, h: f32, on: Color32, ghost: bool, th
                 if !lit && !ghost {
                     continue;
                 }
-                let c = if lit { on } else { theme::LCD_GHOST };
+                let c = if lit { on } else { theme::LCD_GHOST() };
                 g.add(Shape::convex_polygon(
                     poly.into_iter().map(skew).collect(),
                     c,
@@ -148,7 +148,7 @@ fn advance(c: char, h: f32) -> f32 {
 /// A section bracket over a group (`|— VIEW ——————|`) with its label set at `size`, so the
 /// silkscreen grows with the keys under it.
 pub fn bracket(g: &Painter, left: f32, right: f32, y: f32, label: &str, size: f32) {
-    let ink = theme::INK2.gamma_multiply(0.6);
+    let ink = theme::INK2().gamma_multiply(0.6);
     let st = Stroke::new(1.0, ink);
     let tick = (size * 0.9).round();
     g.hline(left..=left + tick, y, st);
@@ -158,7 +158,7 @@ pub fn bracket(g: &Painter, left: f32, right: f32, y: f32, label: &str, size: f3
         Align2::LEFT_CENTER,
         label,
         size,
-        theme::INK2,
+        theme::INK2(),
     );
     if r.right() + 6.0 < right {
         g.hline(r.right() + 6.0..=right, y, st);
@@ -177,17 +177,17 @@ pub fn wordmark(g: &Painter, left: f32, cy: f32, name: &str, model: &str) -> f32
         &name.to_uppercase(),
         Face::SilkX,
         15.0,
-        theme::INK,
+        theme::INK(),
     );
     let sq = Rect::from_center_size(pos2(r.right() + 18.0, cy), vec2(10.0, 10.0));
-    g.rect_filled(sq, 1.0, theme::ORANGE);
+    g.rect_filled(sq, 1.0, theme::ORANGE());
     let m = hw::silk(
         g,
         pos2(sq.right() + 10.0, cy + 0.5),
         Align2::LEFT_CENTER,
         model,
         10.0,
-        theme::INK2,
+        theme::INK2(),
     );
     m.right()
 }
@@ -248,7 +248,7 @@ fn shortcut_text(k: &egui::KeyboardShortcut) -> String {
 
 /// Width of a key command as [`shortcut`] prints it.
 pub fn shortcut_width(g: &Painter, k: &egui::KeyboardShortcut, mac: bool, size: f32) -> f32 {
-    let w = |s: &str| hw::galley(g, s, Face::Bold, size, theme::INK).size().x;
+    let w = |s: &str| hw::galley(g, s, Face::Bold, size, theme::INK()).size().x;
     if !mac {
         return w(&shortcut_text(k));
     }

@@ -185,7 +185,12 @@ fn tile(ui: &egui::Ui, r: Rect, t: Template, selected: bool, key: usize) -> (boo
     let g = ui.painter();
     hw::faceplate(g, r, 4.0, selected);
     if resp.hovered() && !selected {
-        g.rect_stroke(r, 4.0, Stroke::new(1.0, theme::SEAM_DK), StrokeKind::Inside);
+        g.rect_stroke(
+            r,
+            4.0,
+            Stroke::new(1.0, theme::SEAM_DK()),
+            StrokeKind::Inside,
+        );
     }
     let well = Rect::from_center_size(pos2(r.center().x, r.top() + 50.0), vec2(64.0, 64.0));
     hw_tracks::well(g, well, 4.0);
@@ -199,7 +204,7 @@ fn tile(ui: &egui::Ui, r: Rect, t: Template, selected: bool, key: usize) -> (boo
         &shown,
         Face::SilkX,
         14.0,
-        theme::INK,
+        theme::INK(),
     );
     // The description: silkscreen caps, centred, wrapped to the tile.
     let size = 11.0;
@@ -208,7 +213,7 @@ fn tile(ui: &egui::Ui, r: Rect, t: Template, selected: bool, key: usize) -> (boo
         about,
         egui::TextFormat {
             font_id: theme::font(Face::Silk, size),
-            color: theme::INK2,
+            color: theme::INK2(),
             extra_letter_spacing: theme::tracking(Face::Silk) * size,
             line_height: Some(size * 1.35),
             ..Default::default()
@@ -217,7 +222,7 @@ fn tile(ui: &egui::Ui, r: Rect, t: Template, selected: bool, key: usize) -> (boo
     job.wrap.max_width = r.width() - 24.0;
     job.halign = egui::Align::Center;
     let gal = g.layout_job(job);
-    g.galley(pos2(r.center().x, well.bottom() + 32.0), gal, theme::INK2);
+    g.galley(pos2(r.center().x, well.bottom() + 32.0), gal, theme::INK2());
     (resp.clicked(), resp.double_clicked())
 }
 
@@ -264,9 +269,9 @@ fn recent_row(
     };
     hw::paint_slot(g, slot, kind, "", Some(on), false, resp.hovered());
     let (ink, dim) = if on {
-        (theme::ON_DARK, theme::ON_DARK_DIM)
+        (theme::ON_DARK(), theme::ON_DARK_DIM())
     } else {
-        (theme::INK, theme::INK2)
+        (theme::INK(), theme::INK2())
     };
     // The date on a strip of LCD glass.
     let mut right = slot.right() - 10.0;
@@ -280,7 +285,7 @@ fn recent_row(
             pos2(glass.left() + 8.0, glass.center().y - h / 2.0),
             &date,
             h,
-            theme::LCD_INK,
+            theme::LCD_INK(),
             false,
         );
         right = glass.left() - 14.0;
@@ -328,7 +333,10 @@ fn text_key(
     key: &str,
 ) -> (Rect, bool) {
     let shown = label.to_uppercase();
-    let w = hw::galley(g, &shown, Face::Bold, 12.0, theme::INK).size().x + 36.0;
+    let w = hw::galley(g, &shown, Face::Bold, 12.0, theme::INK())
+        .size()
+        .x
+        + 36.0;
     let left = if from_right { x - w } else { x };
     let r = Rect::from_min_size(pos2(left, cy - 15.0), vec2(w, 30.0));
     if !enabled {
@@ -340,7 +348,7 @@ fn text_key(
             &shown,
             Face::Bold,
             12.0,
-            theme::PRINT.gamma_multiply(0.6),
+            theme::PRINT().gamma_multiply(0.6),
         );
         return (r, false);
     }
@@ -365,7 +373,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
     let area = ui.available_rect_before_wrap();
     ui.allocate_rect(area, Sense::hover());
     let g = ui.painter().clone();
-    g.rect_filled(area, 0.0, theme::GRID_BG);
+    g.rect_filled(area, 0.0, theme::GRID_BG());
 
     // Sidebar: the wordmark, then a key per section; the open section's key is latched (a
     // black key, bone print, LED lit).
@@ -381,7 +389,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
     let room = side.width() - 70.0;
     let mut size = 16.0;
     while size > 11.0
-        && hw::galley(&g, &word, Face::SilkX, size, theme::INK)
+        && hw::galley(&g, &word, Face::SilkX, size, theme::INK())
             .size()
             .x
             > room
@@ -395,12 +403,12 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
         &hw::fit(&g, &word, Face::SilkX, size, room),
         Face::SilkX,
         size,
-        theme::INK,
+        theme::INK(),
     );
     g.rect_filled(
         Rect::from_center_size(pos2(wm.right() + 20.0, wm.center().y), vec2(10.0, 10.0)),
         1.0,
-        theme::ORANGE,
+        theme::ORANGE(),
     );
     hw::silk(
         &g,
@@ -408,7 +416,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
         Align2::LEFT_CENTER,
         "PW-1 Digital Audio Workstation",
         9.5,
-        theme::INK2,
+        theme::INK2(),
     );
     hw::seam_h(&g, side.left()..=side.right() - 3.0, side.top() + 58.0);
     for (cx, cy, a) in [
@@ -433,7 +441,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
             Some(on),
             Legend::Custom,
         );
-        let ink = if on { theme::ON_DARK } else { theme::INK };
+        let ink = if on { theme::ON_DARK() } else { theme::INK() };
         let label = hw::fit(
             &g,
             &sec.label().to_uppercase(),
@@ -497,7 +505,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut UiState) {
                     tr("No recent projects. Start one from New Project or Project Templates."),
                     Face::Body,
                     13.0,
-                    theme::INK2,
+                    theme::INK2(),
                 );
             }
             for (k, path) in recent.iter().enumerate() {
@@ -677,7 +685,7 @@ mod tests {
                 1100.0,
                 620.0,
                 2.0,
-                theme::BONE,
+                theme::BONE(),
                 |ui| {
                     theme::apply(ui.ctx());
                     show(ui, &mut s)

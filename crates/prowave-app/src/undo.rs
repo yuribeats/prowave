@@ -101,6 +101,7 @@ impl History {
     /// never holds a new tempo with markers made for the old one.
     pub fn record_followed(&mut self, p: &mut Project, flex: &mut FlexState) -> bool {
         flex_edit::follow_now(p, flex);
+        flex_edit::groove_now(p, flex);
         self.record(p)
     }
 
@@ -108,8 +109,9 @@ impl History {
     /// tempo too (made again if not, without a step of its own).
     pub fn undo_followed(&mut self, p: &mut Project, flex: &mut FlexState) -> bool {
         flex_edit::follow_now(p, flex);
+        flex_edit::groove_now(p, flex);
         let done = self.undo(p);
-        if done && flex_edit::follow_now(p, flex) {
+        if done && (flex_edit::follow_now(p, flex) | flex_edit::groove_now(p, flex)) {
             self.rebase(p);
         }
         done
@@ -118,8 +120,9 @@ impl History {
     /// [`History::redo`] the same way.
     pub fn redo_followed(&mut self, p: &mut Project, flex: &mut FlexState) -> bool {
         flex_edit::follow_now(p, flex);
+        flex_edit::groove_now(p, flex);
         let done = self.redo(p);
-        if done && flex_edit::follow_now(p, flex) {
+        if done && (flex_edit::follow_now(p, flex) | flex_edit::groove_now(p, flex)) {
             self.rebase(p);
         }
         done

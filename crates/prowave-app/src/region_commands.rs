@@ -345,7 +345,7 @@ fn row_label(ui: &egui::Ui, x: f32, y: f32, text: &str) {
         Align2::RIGHT_CENTER,
         text.trim_end_matches(':'),
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
 }
 
@@ -357,7 +357,7 @@ fn text_field(ui: &mut egui::Ui, r: egui::Rect, text: &mut String, limit: usize)
         egui::TextEdit::singleline(text)
             .char_limit(limit)
             .font(theme::font(Face::Bold, 13.0))
-            .text_color(theme::ON_DARK)
+            .text_color(theme::ON_DARK())
             .frame(egui::Frame::NONE)
             .margin(vec2(6.0, 6.0))
             .desired_width(r.width() - 8.0)
@@ -657,6 +657,10 @@ pub(crate) fn spread_params(
         let q = &mut p.tracks[t].regions[r].params;
         if before.mute != after.mute {
             q.mute = after.mute;
+        }
+        // Groove Q (MIDI) and Groove Flex (audio) are one setting.
+        if before.groove_q != after.groove_q {
+            q.groove_q = after.groove_q;
         }
         if !audio {
             if before.quantize != after.quantize {

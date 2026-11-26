@@ -271,7 +271,7 @@ fn hz_label(hz: f32) -> String {
 
 /// The scope the spectrogram is shown on: a black bezel and a dark screen; returns the screen.
 fn scope(g: &egui::Painter, rect: Rect) -> Rect {
-    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 7.0, theme::BONE_HI);
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 7.0, theme::BONE_HI());
     hw::gradient(
         g,
         rect,
@@ -280,7 +280,7 @@ fn scope(g: &egui::Painter, rect: Rect) -> Rect {
         Color32::from_rgb(0x12, 0x11, 0x10),
     );
     let screen = rect.shrink(7.0);
-    g.rect_filled(screen, 2.0, theme::METER_WELL);
+    g.rect_filled(screen, 2.0, theme::METER_WELL());
     screen
 }
 
@@ -303,16 +303,22 @@ fn screen_message(g: &egui::Painter, screen: Rect, text: &str, busy: bool, time:
     let inner = glass.shrink2(vec2(12.0, 9.0));
     if busy {
         let (text_rect, run) = inner.split_top_bottom_at_y(inner.bottom() - 10.0);
-        hw_vocal::lcd_text(g, text_rect, text, 11.0, 1, theme::LCD_INK);
+        hw_vocal::lcd_text(g, text_rect, text, 11.0, 1, theme::LCD_INK());
         hw_vocal::lcd_chaser(g, run.shrink2(vec2(0.0, 1.0)), time);
     } else {
-        hw_vocal::lcd_text(g, inner, text, 11.0, 2, theme::LCD_INK);
+        hw_vocal::lcd_text(g, inner, text, 11.0, 2, theme::LCD_INK());
     }
 }
 
 /// A number in the scales' mono face, set tight (no letter spacing).
 fn scale_text(g: &egui::Painter, pos: Pos2, anchor: Align2, text: &str) -> Rect {
-    g.text(pos, anchor, text, theme::font(Face::Bold, 9.5), theme::INK2)
+    g.text(
+        pos,
+        anchor,
+        text,
+        theme::font(Face::Bold, 9.5),
+        theme::INK2(),
+    )
 }
 
 /// The printed scales and the faint graticule of a screen showing `low`..`high` Hz over
@@ -320,7 +326,7 @@ fn scale_text(g: &egui::Painter, pos: Pos2, anchor: Align2, text: &str) -> Rect 
 /// it (unit "S" at its end), with a closing tick at the end of the clip.
 #[allow(clippy::too_many_arguments)]
 fn scales(g: &egui::Painter, bezel: Rect, plot: Rect, low: f32, high: f32, log: bool, secs: f64) {
-    let tick = Stroke::new(1.0, theme::INK2);
+    let tick = Stroke::new(1.0, theme::INK2());
     let graticule = Stroke::new(1.0, Color32::from_white_alpha(16));
     let marks: Vec<f32> = if log {
         [
@@ -355,7 +361,7 @@ fn scales(g: &egui::Painter, bezel: Rect, plot: Rect, low: f32, high: f32, log: 
         Align2::RIGHT_TOP,
         "Hz",
         10.0,
-        theme::PRINT,
+        theme::PRINT(),
     );
     let secs = secs.max(1e-3);
     let step = tick_step(
@@ -378,7 +384,7 @@ fn scales(g: &egui::Painter, bezel: Rect, plot: Rect, low: f32, high: f32, log: 
         Align2::RIGHT_TOP,
         "s",
         10.0,
-        theme::PRINT,
+        theme::PRINT(),
     );
     let x_at = |t: f64| plot.left() + (t / secs) as f32 * plot.width();
     for i in 0.. {
@@ -393,7 +399,7 @@ fn scales(g: &egui::Painter, bezel: Rect, plot: Rect, low: f32, high: f32, log: 
         g.vline(x, bezel.bottom() + 1.0..=bezel.bottom() + 6.0, tick);
         let label = format!("{t:.decimals$}");
         let w = g
-            .layout_no_wrap(label.clone(), theme::font(Face::Bold, 9.5), theme::INK2)
+            .layout_no_wrap(label.clone(), theme::font(Face::Bold, 9.5), theme::INK2())
             .size()
             .x;
         // A label that would run into the unit is left off (its tick stays).
@@ -443,7 +449,7 @@ fn plot(ui: &mut egui::Ui, rect: Rect, spec: &Spectrogram, look: Look, tex: &egu
             hz.round(),
             spec.at(m, k)
         );
-        let w = hw::galley(&g, &label, Face::Lcd, 10.0, theme::LCD_INK)
+        let w = hw::galley(&g, &label, Face::Lcd, 10.0, theme::LCD_INK())
             .size()
             .x
             + 16.0;
@@ -456,7 +462,7 @@ fn plot(ui: &mut egui::Ui, rect: Rect, spec: &Spectrogram, look: Look, tex: &egu
             &label,
             Face::Lcd,
             10.0,
-            theme::LCD_INK,
+            theme::LCD_INK(),
         );
     }
 }
@@ -497,12 +503,12 @@ fn toolbar(ui: &mut egui::Ui, look: &mut Look) -> f32 {
             &label.to_uppercase(),
             Face::Silk,
             11.0,
-            theme::INK2,
+            theme::INK2(),
         )
         .width()
     };
     let key_w = |label: &str| {
-        hw::galley(&g, &label.to_uppercase(), Face::Bold, 11.0, theme::INK)
+        hw::galley(&g, &label.to_uppercase(), Face::Bold, 11.0, theme::INK())
             .size()
             .x
             + 30.0
@@ -746,7 +752,7 @@ mod tests {
                 w,
                 h,
                 2.0,
-                theme::BONE3,
+                theme::BONE3(),
                 |ui| {
                     theme::apply(ui.ctx());
                     show(ui.ctx(), &mut s)

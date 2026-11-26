@@ -190,6 +190,9 @@ pub struct RegionParams {
     pub loop_beats: f32,
     /// The region's own colour (Logic: View > Show Colors), or `None` for its track's colour.
     pub color: Option<egui::Color32>,
+    /// Groove Q (MIDI) or Groove Flex (audio) of this region, 0-100 % (see `rack_follow.rs`),
+    /// or `None` to take its track's.
+    pub groove_q: Option<u8>,
 }
 
 /// Project Settings > Metronome: the click's level range in dB, and where it starts (the
@@ -322,6 +325,8 @@ pub struct TrackParams {
     pub groove: bool,
     /// Plays with the Groove Track's timing.
     pub follow_groove: bool,
+    /// Plays with the feel of a drum class of a Channel Rack (see `rack_follow.rs`).
+    pub follow_rack: crate::rack_follow::FollowRack,
 }
 
 impl Default for TrackParams {
@@ -333,6 +338,7 @@ impl Default for TrackParams {
             vel_limit: (1, 127),
             groove: false,
             follow_groove: false,
+            follow_rack: crate::rack_follow::FollowRack::default(),
         }
     }
 }
@@ -639,6 +645,9 @@ pub struct Project {
     pub show_master_track: bool,
     /// Parts hidden from every track header (Track > Configure Track Header). Empty: all shown.
     pub header_hidden: Vec<HeaderPart>,
+    /// The heights the panes under the Tracks area were dragged to, by pane
+    /// (`bottom_pane::key`); saved with the project, not counted as a change.
+    pub pane_heights: std::collections::BTreeMap<String, f32>,
     /// The region (track, region) the Solo tool is held on: the only one heard meanwhile
     /// (`region_solo.rs`). Not saved.
     pub region_solo: Option<(usize, usize)>,
@@ -914,6 +923,7 @@ impl Project {
             song_rev: 0,
             show_master_track: false,
             header_hidden: Vec::new(),
+            pane_heights: std::collections::BTreeMap::new(),
             region_solo: None,
             tempo_ramp: false,
             groove_onsets: Default::default(),

@@ -38,8 +38,8 @@ pub fn window<R>(
 ) -> (bool, Option<R>) {
     let frame = egui::Frame {
         inner_margin: Margin::ZERO,
-        fill: theme::BONE,
-        stroke: Stroke::new(1.0, theme::SEAM_DK),
+        fill: theme::BONE(),
+        stroke: Stroke::new(1.0, theme::SEAM_DK()),
         corner_radius: CornerRadius::same(6),
         outer_margin: Margin::ZERO,
         shadow: ctx.global_style().visuals.window_shadow,
@@ -87,6 +87,14 @@ pub fn window<R>(
     (!close, inner)
 }
 
+/// Where the close key of the panel `id` is on screen (after a frame has laid it out), for
+/// tests that click it.
+#[cfg(test)]
+pub fn close_key_center(ctx: &Context, id: Id) -> Option<egui::Pos2> {
+    let r = ctx.memory(|m| m.area_rect(id))?;
+    Some(pos2(r.right() - 22.0, r.top() + HEAD_H / 2.0))
+}
+
 /// The title strip: a lighter band, a screw, the title in big silkscreen, an orange tab, the
 /// subtitle and a close key, over a seam.
 fn title_strip(
@@ -98,7 +106,7 @@ fn title_strip(
     subtitle: &str,
     close: &mut bool,
 ) {
-    hw::gradient(g, head, 6.0, theme::BONE_TOP, theme::BONE);
+    hw::gradient(g, head, 6.0, theme::BONE_TOP(), theme::BONE());
     hw::screw(g, pos2(head.left() + 13.0, head.center().y), 4.0, 25.0);
     let title = hw::fit(
         g,
@@ -114,10 +122,10 @@ fn title_strip(
         &title,
         Face::SilkX,
         14.0,
-        theme::INK,
+        theme::INK(),
     );
     let tab = Rect::from_center_size(pos2(t.right() + 20.0, head.center().y), vec2(9.0, 9.0));
-    g.rect_filled(tab, 1.0, theme::ORANGE);
+    g.rect_filled(tab, 1.0, theme::ORANGE());
     let key = Rect::from_center_size(pos2(head.right() - 22.0, head.center().y), vec2(26.0, 20.0));
     // A subtitle that only repeats the title is left off.
     if !subtitle.trim().is_empty() && !subtitle.trim().eq_ignore_ascii_case(title.trim()) {
@@ -136,7 +144,7 @@ fn title_strip(
             &shown,
             Face::Silk,
             11.0,
-            theme::INK2,
+            theme::INK2(),
         );
     }
     let (resp, face) = hw::key(
@@ -150,7 +158,7 @@ fn title_strip(
         Legend::Custom,
     );
     let c = face.center();
-    let st = Stroke::new(1.6, theme::INK);
+    let st = Stroke::new(1.6, theme::INK());
     g.line_segment([c + vec2(-4.0, -4.0), c + vec2(4.0, 4.0)], st);
     g.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], st);
     if resp.clicked() {
@@ -183,7 +191,7 @@ pub fn row(ui: &mut Ui, label: &str) -> Rect {
         &shown,
         Face::Silk,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     Rect::from_min_max(
         pos2(r.left() + LABEL_W + 12.0, r.center().y - 12.0),
@@ -196,7 +204,7 @@ fn list_frame() -> egui::Frame {
     egui::Frame {
         inner_margin: Margin::same(3),
         fill: Color32::from_rgb(0x1d, 0x1c, 0x1a),
-        stroke: Stroke::new(1.0, theme::CAP_EDGE),
+        stroke: Stroke::new(1.0, theme::CAP_EDGE()),
         corner_radius: CornerRadius::same(3),
         outer_margin: Margin::ZERO,
         shadow: egui::Shadow {
@@ -252,7 +260,11 @@ pub fn dropdown(
                     &shown,
                     Face::Bold,
                     11.0,
-                    if on { theme::ORANGE } else { theme::ON_DARK },
+                    if on {
+                        theme::ORANGE()
+                    } else {
+                        theme::ON_DARK()
+                    },
                 );
                 if rr.clicked() {
                     picked = Some(i);
@@ -341,7 +353,11 @@ fn dial(ui: &mut Ui, cell: Rect, id: Id, d: &mut Dial<'_>) -> bool {
     let (name, unit) = split_unit(d.label);
     let unit = if unit.is_empty() { d.unit } else { unit };
     let lines = silk_lines(&g, name, 10.5, cell.width() - 6.0);
-    let ink = if d.enabled { theme::INK2 } else { theme::PRINT };
+    let ink = if d.enabled {
+        theme::INK2()
+    } else {
+        theme::PRINT()
+    };
     for (k, l) in lines.iter().rev().enumerate() {
         hw::text(
             &g,
@@ -390,11 +406,11 @@ pub fn paint_knob_off(g: &Painter, c: Pos2, r: f32, value: f32) {
     // Over the orange pointer, a little wider so none of it shows, then the unlit pointer.
     g.line_segment(
         [c + d * (r * 0.22), c + d * (r * 0.95)],
-        Stroke::new(w + 1.4, theme::CAP),
+        Stroke::new(w + 1.4, theme::CAP()),
     );
     g.line_segment(
         [c + d * (r * 0.25), c + d * (r * 0.92)],
-        Stroke::new(w, theme::LED_OFF),
+        Stroke::new(w, theme::LED_OFF()),
     );
 }
 
@@ -436,7 +452,7 @@ pub fn lcd_readout_off(g: &Painter, rect: Rect, label: &str, value: &str) {
         &label.to_uppercase(),
         Face::Lcd,
         7.5,
-        theme::LCD_INK.gamma_multiply(0.4),
+        theme::LCD_INK().gamma_multiply(0.4),
     );
     let h = (rect.height() * 0.55).min(18.0);
     let w = hw::seg_width(value, h);
@@ -445,7 +461,7 @@ pub fn lcd_readout_off(g: &Painter, rect: Rect, label: &str, value: &str) {
         pos2(rect.right() - 5.0 - w, rect.bottom() - 4.0 - h),
         value,
         h,
-        theme::LCD_INK.gamma_multiply(0.16),
+        theme::LCD_INK().gamma_multiply(0.16),
         true,
     );
 }
@@ -490,7 +506,7 @@ fn readout_field(
             .frame(egui::Frame::NONE)
             .margin(Margin::ZERO)
             .font(theme::font(Face::Lcd, 13.0))
-            .text_color(theme::LCD_INK)
+            .text_color(theme::LCD_INK())
             .align(Align2::RIGHT_CENTER)
             .desired_width(rect.width() - 10.0)
             .char_limit(12),
@@ -521,7 +537,7 @@ pub fn focus_ring(g: &Painter, rect: Rect) {
     g.rect_stroke(
         rect.shrink(1.0),
         3.0,
-        Stroke::new(2.0, theme::ORANGE),
+        Stroke::new(2.0, theme::ORANGE()),
         egui::StrokeKind::Inside,
     );
 }
@@ -533,17 +549,23 @@ pub fn paint_key_off(g: &Painter, rect: Rect, cap: Cap, label: &str, led: bool) 
     let dark = cap == Cap::Dark;
     let (top, mid, bottom, edge) = if dark {
         (
-            theme::CAP_TOP,
-            theme::CAP,
+            theme::CAP_TOP(),
+            theme::CAP(),
             Color32::from_rgb(0x15, 0x14, 0x13),
-            theme::CAP_EDGE,
+            theme::CAP_EDGE(),
         )
     } else {
         (
-            theme::BONE_TOP,
-            Color32::from_rgb(0xee, 0xea, 0xe1),
-            Color32::from_rgb(0xe3, 0xde, 0xd3),
-            theme::KEY_EDGE,
+            theme::BONE_TOP(),
+            theme::pick(
+                Color32::from_rgb(0xee, 0xea, 0xe1),
+                Color32::from_rgb(0x36, 0x36, 0x3b),
+            ),
+            theme::pick(
+                Color32::from_rgb(0xe3, 0xde, 0xd3),
+                Color32::from_rgb(0x2b, 0x2b, 0x30),
+            ),
+            theme::KEY_EDGE(),
         )
     };
     // Seated: only a contact line under it.
@@ -563,9 +585,9 @@ pub fn paint_key_off(g: &Painter, rect: Rect, cap: Cap, label: &str, led: bool) 
         hw::led_sized(g, pos2(rect.left() + 11.0, rect.center().y), 2.5, false);
     }
     let ink = if dark {
-        theme::PRINT
+        theme::PRINT()
     } else {
-        theme::PRINT.gamma_multiply(0.8)
+        theme::PRINT().gamma_multiply(0.8)
     };
     legend(g, rect, label, ink, led);
 }
@@ -711,7 +733,7 @@ pub fn scrim(ctx: &Context, id: Id) {
         .interactable(false)
         .show(ctx, |ui| {
             ui.painter()
-                .rect_filled(screen, 0.0, theme::BONE3.gamma_multiply(0.35));
+                .rect_filled(screen, 0.0, theme::BONE3().gamma_multiply(0.35));
         });
     ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
 }
@@ -727,7 +749,7 @@ pub fn credits(ui: &mut Ui, text: &str) {
         clean,
         egui::TextFormat {
             font_id: theme::font(Face::Silk, size),
-            color: theme::INK2,
+            color: theme::INK2(),
             extra_letter_spacing: theme::tracking(Face::Silk) * size,
             line_height: Some(13.0),
             ..Default::default()
@@ -740,7 +762,7 @@ pub fn credits(ui: &mut Ui, text: &str) {
     let gal = g.layout_job(job);
     let (r, resp) = ui.allocate_exact_size(vec2(width, gal.size().y + 14.0), Sense::hover());
     hw::recess(&g, r, 3.0);
-    g.galley(pos2(r.left() + 10.0, r.top() + 7.0), gal, theme::INK2);
+    g.galley(pos2(r.left() + 10.0, r.top() + 7.0), gal, theme::INK2());
     resp.on_hover_text(text);
 }
 
@@ -753,9 +775,9 @@ pub fn lcd_ladder(g: &Painter, rect: Rect, frac: f32) {
         let x = rect.left() + i as f32 * pitch;
         let r = Rect::from_min_max(pos2(x, rect.top()), pos2(x + pitch - 1.5, rect.bottom()));
         let c = if i < lit {
-            theme::LCD_INK
+            theme::LCD_INK()
         } else {
-            theme::LCD_GHOST
+            theme::LCD_GHOST()
         };
         g.rect_filled(r, 0.0, c);
     }
@@ -771,9 +793,9 @@ pub fn lcd_chaser(g: &Painter, rect: Rect, time: f64) {
         let x = rect.left() + i as f32 * pitch;
         let r = Rect::from_min_max(pos2(x, rect.top()), pos2(x + pitch - 1.5, rect.bottom()));
         let c = if i < at && i + 3 >= at {
-            theme::LCD_INK
+            theme::LCD_INK()
         } else {
-            theme::LCD_GHOST
+            theme::LCD_GHOST()
         };
         g.rect_filled(r, 0.0, c);
     }
@@ -800,7 +822,11 @@ pub fn lcd_text(g: &Painter, rect: Rect, text: &str, size: f32, rows: usize, col
 
 /// A divider line on LCD glass.
 pub fn lcd_divider(g: &Painter, x: f32, y: impl Into<egui::Rangef>) {
-    g.vline(x, y, Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.22)));
+    g.vline(
+        x,
+        y,
+        Stroke::new(1.0, theme::LCD_INK().gamma_multiply(0.22)),
+    );
 }
 
 /// A small label on LCD glass (zone names).
@@ -812,7 +838,7 @@ pub fn lcd_label(g: &Painter, pos: Pos2, text: &str) -> Rect {
         &text.to_uppercase(),
         Face::Lcd,
         8.5,
-        theme::LCD_INK.gamma_multiply(0.72),
+        theme::LCD_INK().gamma_multiply(0.72),
     )
 }
 
@@ -823,7 +849,7 @@ pub fn edit_well(g: &Painter, rect: Rect) {
     g.rect_stroke(
         rect,
         3.0,
-        Stroke::new(2.0, theme::ORANGE),
+        Stroke::new(2.0, theme::ORANGE()),
         egui::StrokeKind::Outside,
     );
 }

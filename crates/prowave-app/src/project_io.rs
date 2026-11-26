@@ -117,6 +117,16 @@ fn flex_from_doc(d: &prowave_project::FlexDoc, original: AudioFile) -> crate::fl
         pitch,
         melody: d.melody.as_ref().and_then(crate::pitch_editor::from_doc),
         follow,
+        groove_onsets: d.groove_onsets.as_ref().map(|h| {
+            let mut v: Vec<f64> = h
+                .iter()
+                .copied()
+                .filter(|x| ok(*x))
+                .take(MAX_FLEX_POINTS)
+                .collect();
+            v.sort_by(f64::total_cmp);
+            v
+        }),
         ..crate::flex_edit::FlexEdit::new(original, mode)
     }
 }
@@ -437,6 +447,7 @@ fn flex_to_doc(f: &crate::flex_edit::FlexEdit) -> prowave_project::FlexDoc {
             first: x.first,
             bpm: x.bpm,
         }),
+        groove_onsets: f.groove_onsets.clone(),
     }
 }
 
@@ -550,6 +561,19 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
             output: t.output,
             groove: t.params.groove,
             follow_groove: t.params.follow_groove,
+            follow_rack: {
+                let f = t.params.follow_rack;
+                (f != crate::rack_follow::FollowRack::default()).then(|| {
+                    prowave_project::FollowRackDoc {
+                        on: f.on,
+                        rack: f.rack,
+                        class: crate::rack_follow::class_id(f.class).to_string(),
+                        velocity: f.velocity,
+                        groove_q: f.groove_q,
+                        live: f.live,
+                    }
+                })
+            },
             midi_fx: t
                 .midi_fx
                 .iter()
@@ -668,6 +692,7 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
                     crossfade: r.params.crossfade,
                     loop_beats: r.params.loop_beats,
                     color: r.params.color.map(|c| [c.r(), c.g(), c.b()]),
+                    groove_q: r.params.groove_q,
                     pattern: match r.generated.as_ref().map(|g| &g.source) {
                         Some(Generator::Pattern(p)) => Some(pattern_to_doc(p)),
                         _ => None,
@@ -741,6 +766,7 @@ pub fn to_doc(p: &Project) -> (ProjectDoc, Vec<MediaFile>) {
         midi_in_port: p.midi_in_port.clone(),
         midi_clock_in: p.midi_clock_in.clone(),
         show_master_track: p.show_master_track,
+        pane_heights: p.pane_heights.clone(),
         header_hidden: p
             .header_hidden
             .iter()
@@ -934,6 +960,7 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                     crossfade: r.crossfade,
                     loop_beats: finite_in(r.loop_beats, 0.0, MAX_BEATS, 0.0),
                     color: r.color.map(|[r, g, b]| Color32::from_rgb(r, g, b)),
+                    groove_q: r.groove_q.map(|q| q.min(crate::rack_follow::MAX_GROOVE_Q)),
                 },
             };
             // A Flex edit plays its recording until its sound is made again: from the same
@@ -973,6 +1000,18 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
                 vel_limit: ordered(t.vel_limit, 1),
                 groove: t.groove,
                 follow_groove: t.follow_groove && !t.groove,
+                follow_rack: t
+                    .follow_rack
+                    .as_ref()
+                    .map(|f| crate::rack_follow::FollowRack {
+                        on: f.on,
+                        rack: f.rack,
+                        class: crate::rack_follow::parse_class(&f.class).flatten(),
+                        velocity: f.velocity,
+                        groove_q: f.groove_q.min(crate::rack_follow::MAX_GROOVE_Q),
+                        live: f.live,
+                    })
+                    .unwrap_or_default(),
             },
             sends: sends_from_doc(t),
             auto: automation_from_doc(t),
@@ -1034,6 +1073,12 @@ pub fn from_doc(doc: &ProjectDoc, media_dir: &Path, ctx: &egui::Context) -> (Pro
     p.midi_in_port = port_name(&doc.midi_in_port);
     p.midi_clock_in = port_name(&doc.midi_clock_in);
     p.show_master_track = doc.show_master_track;
+    p.pane_heights = doc
+        .pane_heights
+        .iter()
+        .filter(|(_, h)| h.is_finite() && **h > 0.0)
+        .map(|(k, h)| (k.clone(), h.min(10_000.0)))
+        .collect();
     p.header_hidden = doc
         .header_hidden
         .iter()
@@ -2502,6 +2547,7 @@ pub(crate) mod tests {
             channels: 2,
         };
         let doc = prowave_project::FlexDoc {
+            groove_onsets: None,
             mode: "Nonsense".into(),
             markers: vec![
                 [f64::NAN, 1.0],

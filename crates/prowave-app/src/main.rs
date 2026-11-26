@@ -26,6 +26,7 @@ mod automation_ui;
 mod autosave;
 mod bass808;
 mod bench;
+mod bottom_pane;
 mod bounce;
 mod bounce_in_place;
 mod bounce_ui;
@@ -65,6 +66,7 @@ mod inspector;
 mod key_commands;
 mod kit_browser;
 mod kit_classify;
+mod kit_copy;
 mod kit_files;
 mod kit_library;
 mod lyrics;
@@ -100,11 +102,17 @@ mod pattern;
 mod piano_roll;
 mod piano_tools;
 mod pitch_editor;
+mod plugin_ratings;
 #[cfg(target_os = "macos")]
 mod plugin_unit;
 mod plugins;
 mod project_io;
 mod project_settings;
+/// The Channel Rack's swing and micro-timing for each drum class.
+mod rack_follow;
+mod rack_groove;
+/// Split to Tracks: each Channel Rack channel onto a track of its own.
+mod rack_split;
 mod recent_files;
 mod recorder;
 mod recovery;
@@ -134,6 +142,8 @@ mod takes;
 mod tempo_track;
 mod texture_ui;
 mod theme;
+#[cfg(test)]
+mod theme_pictures;
 mod track_commands;
 mod track_dialogs;
 mod track_icons;
@@ -160,6 +170,7 @@ mod vocal;
 mod vst3_scan;
 mod widgets;
 mod window_chrome;
+mod wood;
 
 /// The program's name (window, menus, About box, MIDI ports) and its settings folder's name.
 pub const APP_NAME: &str = "Pro Wave (Yuri's Version)";
@@ -315,6 +326,9 @@ pub struct UiState {
     pub groove: groove::GrooveState,
     /// File > Import > MIDI File… or Export > Selection as MIDI File…, run after the menus.
     pub midi_cmd: Option<midi_file::MidiCmd>,
+    /// File > Export > Apply Follow Rack Groove: an exported MIDI file has the notes of tracks
+    /// following a Channel Rack as they play (on) or as stored (off). On at every start.
+    pub midi_export_follow: bool,
     /// The Pattern and Drummer editors, which take the Piano Roll's place for those regions.
     pub steps: step_editor::StepView,
     /// True while the pointer is over the Piano Roll (it owns Delete/Cmd+R then).
@@ -428,6 +442,7 @@ impl UiState {
             fit: fit_grid::FitState::default(),
             groove: groove::GrooveState::default(),
             midi_cmd: None,
+            midi_export_follow: true,
             piano_focus: false,
             audition: Vec::new(),
             file_cmd: None,
@@ -560,7 +575,8 @@ impl App {
                     .set_file_name(format!("{}.mid", p.name))
                     .save_file();
                 if let Some(path) = picked {
-                    s.status = Some(match midi_file::export_path(p, only, &path) {
+                    let follow = s.midi_export_follow;
+                    s.status = Some(match midi_file::export_path_with(p, only, &path, follow) {
                         Ok(()) => i18n::trf("saved {}", &[&path.display()]),
                         Err(e) => i18n::trf("cannot write {}: {}", &[&path.display(), &e]),
                     });
@@ -860,6 +876,7 @@ impl App {
                 self.import(&path, ctx);
             }
         }
+        wood::cheeks(ui);
         top_bar(ui, &mut self.project, &mut self.ui);
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
@@ -895,6 +912,8 @@ impl eframe::App for App {
         musical_typing::poll(&ctx, &mut self.ui.typing);
         musical_typing::show(&ctx, &mut self.ui.typing);
         ui_scale::apply(&ctx, self.ui.ui_scale);
+        // View > Theme: a new look reaches egui's visuals on the frame after it is picked.
+        theme::sync(&ctx);
         tracks_area::poll_normalize(&ctx, &mut self.project, &mut self.ui);
         smart_tempo::poll(&ctx, &mut self.project, &mut self.ui);
         fit_grid::poll(&ctx, &mut self.project, &mut self.ui);
@@ -1182,10 +1201,11 @@ impl eframe::App for App {
         let p = &mut self.project;
         let s = &mut self.ui;
 
+        wood::cheeks(ui);
         top_bar(ui, p, s);
         egui::Panel::top("control")
             .exact_size(transport::HEIGHT)
-            .frame(egui::Frame::new().fill(theme::TOOLBAR))
+            .frame(egui::Frame::new().fill(theme::TOOLBAR()))
             .show(ui, |ui| transport::control_bar(ui, p, s, master_peaks));
         if s.show_inspector {
             egui::Panel::left("inspector")
@@ -1215,26 +1235,13 @@ impl eframe::App for App {
                 .show(ui, |ui| event_list::show(ui, p, s));
         }
         if s.show_mixer || s.bottom != Bottom::Mixer {
-            // About half of the space under the control bar (700 points at most, so tall screens
-            // get the strips' main density), so the Tracks
-            // area keeps room on short screens. The Piano Roll can be pulled taller; the mixer
-            // has a fixed height, as in Logic: its strips have a natural size and a taller panel
-            // would only stretch the faders and meters. (It follows the window, so it is never
-            // outside its range when the window shrinks.)
-            let room = ui.available_height();
-            let usual = (room * 0.48).clamp(160.0, 700.0);
-            let panel = egui::Panel::bottom("bottom").frame(egui::Frame::new());
-            let panel = if s.bottom == Bottom::Mixer {
-                panel.resizable(false).exact_size(usual)
-            } else {
-                panel.resizable(true).default_size(usual)
-            };
-            panel.show(ui, |ui| match s.bottom {
-                Bottom::Mixer => mixer::show(ui, p, s, &meters),
-                Bottom::PianoRoll => piano_roll::show(ui, p, s),
-                Bottom::ChannelRack => channel_rack::show(ui, p, s),
-                Bottom::PitchEditor => pitch_editor::show(ui, p, s),
-            });
+            // The pane opens at its own height (the Mixer as tall as its strips shown whole,
+            // the editors at about half the window: see `bottom_pane`); the grab handle on its
+            // top edge drags it taller or shorter, kept per pane with the project, and a
+            // double-click there gives it its own height back. The Mixer has a panel of its own
+            // so it never takes an editor's size. (Both follow the window, so they are never
+            // outside their range when it shrinks.)
+            bottom_pane::show(ui, p, s, &meters);
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
@@ -1661,6 +1668,7 @@ fn main() -> eframe::Result {
         APP_NAME,
         opts,
         Box::new(|cc| {
+            theme::load_settings();
             theme::apply(&cc.egui_ctx);
             // Cmd/Ctrl + = / - / 0 resize the interface through `ui_scale` instead, which
             // also keeps the fit for small windows.

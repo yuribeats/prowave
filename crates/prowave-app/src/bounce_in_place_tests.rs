@@ -462,6 +462,8 @@ fn an_instrument_track_s_regions_become_audio() {
             gain_db: 0.0,
             pan: 0.0,
             mute: false,
+            solo: false,
+            class: crate::kit_classify::DrumClass::Other,
         },
     ]));
     t.au_instrument = Some(slot);

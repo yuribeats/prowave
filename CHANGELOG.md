@@ -5,6 +5,289 @@ being released into the GitHub Release notes, so keep one `## <version>` heading
 
 ## Unreleased
 
+## 0.4.0
+
+### 2026-11-26: Plug-in menus without a ratings file are grouped by maker
+
+Checked by tests (no app was opened).
+
+- With no `plugin-ratings.json` (or one that rates nothing), the Instrument and Audio FX
+  menus have one submenu per maker again (alphabetical, Pro Wave's own built-ins under
+  "Pro Wave", a plug-in without a maker under "Other") instead of putting everything in
+  "Other". With a ratings file the menus are by type and rating as before.
+
+
+### 2026-11-25: The Channel Rack's title row is gone
+
+Checked by headless tests and offscreen pictures (no app was opened).
+
+- The Channel Rack no longer draws its bracketed "CHANNEL RACK" title over the pane. Its
+  Split to Tracks, Pattern, Groove and Kits keys now sit on the right of the amounts row
+  (Groove, Offset, Velocity, VEL), so the rack opens 38 points shorter and shows that much more
+  of its rows. When the pane is too narrow for one row, the keys go over the amounts; the
+  pattern's and kit's names shorten first. While a kit is copied from a share, its slot shows
+  only where there is room left of the keys.
+
+### 2026-11-25: An Offset for each drum in the Channel Rack
+
+Checked by headless tests and offscreen pictures (no app was opened).
+
+- Each Channel Rack row has an **OFS** readout after its swing: how much of its drum class's
+  micro-timing offsets it plays, 0 to 100 % (drag; double-click for 100). Every channel of the
+  class follows, as with the swing. The Offset knob over the rows still scales every class, so a
+  step plays its offset times both. A loaded groove (with its per-class offsets) starts every
+  class at 100 %. Saved with the project (`offset_amount` in a
+  class's feel, left out at 100 %); `rack.offset` sets it, `rack.get` gives it per channel and
+  per feel (`offset`, percent).
+
+### 2026-11-25: The bottom pane's handle and head no longer hidden
+
+Checked by headless tests and offscreen pictures (no app was opened).
+
+- A pane whose contents were taller than the pane (a Channel Rack with eight channels, or any
+  pane dragged short) pushed the Tracks area down over its top: the grab handle and the
+  pane's head (the Channel Rack's Kits, Groove, Pattern and Split to Tracks keys) were covered
+  and took no clicks, so the pane could not be dragged taller. The pane now keeps its contents
+  inside it, and the Channel Rack keeps its head and amounts in place and scrolls only its
+  rows.
+- The grab handle is easier to see: a light bar across the pane with a black grip in the
+  middle; it brightens under the pointer.
+- The Channel Rack opens as tall as its head and every channel's row (the Tracks area keeping
+  at least its menu row, ruler and one track).
+- The Piano Roll dragged to its shortest no longer stops the program (its scroll bars had a
+  negative size).
+
+### 2026-11-25: Emulation names in the plug-in menus, Master Chain, a draggable bottom pane
+
+Checked by headless tests and offscreen pictures (no app was opened).
+
+- Instrument and Audio FX menus: a plug-in that emulates a piece of hardware or a classic
+  instrument is listed by the emulated thing's proper name ("Roland TB-303"), its own name
+  ("JC303") in small print where the maker was; the tooltip names the plug-in and its maker,
+  then the rating and why. A search field at the top matches either name or the maker. Read
+  from `emulates` (and `name`, `maker`) in `plugin-ratings.json`; `plugin.list` gives
+  `emulates` and searches it.
+- Audio FX menu: a **Master Chain** folder first, with the mastering tools (`master_chain` in
+  `plugin-ratings.json`); they stay in their type folders too. `plugin.list` gives
+  `master_chain`.
+- The pane under the Tracks area (Mixer, Piano Roll, Channel Rack, Pitch Editor) has a grab
+  handle on its top edge: drag it to make the pane shorter or taller, double-click it for the
+  pane's own height. The height is kept per pane with the project (not counted as an unsaved
+  change). A Mixer dragged shorter than its strips shows them compact, the wheel bringing back
+  the rows hidden at the top.
+- Musical Typing's close key works: Caps Lock opens and closes the window when it changes, so
+  the window no longer reopens the next moment while Caps Lock stays on.
+- The Bounce progress panel's close key cancels the bounce (it did nothing).
+
+### 2026-11-25: Channel Rack Solo key and sample stepping
+
+- Channels: a **Solo** key beside Mute (`rack.mix` `solo`), and on the sample's right-click
+  Hear, ‹ › through the kit's samples of the channel's class, Samples and All Other Samples.
+
+
+### 2026-11-25: Graphite Amber look, with walnut end cheeks
+
+Checked by tests and offscreen pictures (no app was opened).
+
+- New default look, Graphite Amber: a charcoal body (#1c1c1e), raised keys #323237, light
+  print, amber (#ffb000) as the signal colour with dark print on it, amber digits on dark LCD
+  glass, graphite MIDI regions with amber notes and slate audio regions with light waveforms.
+  The level meters, in both looks: olive segments (#7f8c6a), amber near the top (#c98a2e,
+  above -6 dB) and signal orange at the top (#ff5a14, over 0 dB), unlit ones dark; the
+  Mixer's segments are 3 points tall with 2-point gaps.
+- View > Theme switches between Graphite Amber and Bone (the earlier look) at once; View >
+  Wood Cheeks draws walnut end cheeks down both sides of the main window, its grain made by
+  code once at start, hidden below 1000 points of window width. Both are kept in the settings
+  files `theme` and `wood-cheeks`.
+- The plug-in menus' rating chips run from #323237 (1) to amber (5) in Graphite Amber, their
+  numbers dark or light by contrast.
+- For code: the colour tokens in `theme.rs` are functions of the look in use (`theme::INK()`),
+  and painters mix their own shades with `theme::pick(bone, graphite)`.
+
+### 2026-11-25: Instrument and Audio FX menus by type and rating; removed plug-ins gone
+
+Checked by tests (no app was opened).
+
+- The Instrument and Audio FX menus have one submenu per type (Compressor, Delay, EQ, Reverb,
+  Synth, ...; alphabetical, "Other" last) instead of one per maker. Pro Wave's own
+  instruments and effects sit in the same submenus as the plug-ins; Pro Wave's separately
+  installed plug-in builds of a built-in are left out (the built-in is offered).
+- In each submenu the best rated come first, the unrated last. Each entry shows a chip with
+  its rating (1 to 5 in halves), coloured in nine steps from the theme's raised neutral (1)
+  to its accent orange (5), its maker in small print, and why it has that rating as its
+  tooltip. Ratings and types come from the settings file `plugin-ratings.json` (written by the
+  owner's plug-in catalog tool), read again when it changes. `plugin.list` gives `rating`
+  and `type` too.
+- Audio Units whose `.component` bundle was deleted are no longer offered, even while macOS's
+  registry still lists them (they failed to open with -3000). A unit is kept when it is
+  Apple's, an app extension, or declared by a bundle in the Components folders; when a bundle
+  there has no readable list, nothing is left out.
+- VST3s whose bundle was deleted are no longer offered from the scan cache while the next
+  scan runs.
+### 2026-11-25: The Mixer opens with its strips whole
+
+Checked by tests and an offscreen picture of the main window (no app was opened).
+
+- The Mixer pane under the tracks opens as tall as its channel strips, worked out from the
+  strip's rows (Setting, Input, every Audio FX and Send row the strips have, Output, Group,
+  Pan, the readouts, the fader, the keys and the name plate) instead of about half the room.
+  The strips no longer start cut off in the middle; the Tracks area gets the rest.
+- A window too short for the strips at the main size keeps them whole: the Tracks area shrinks
+  down to its menu row, ruler and one track row, and the strips take their compact size.
+- The Mixer has a pane of its own, so showing it no longer changes the height a Piano Roll,
+  Channel Rack or Pitch Editor pane was dragged to.
+
+### 2026-11-25: Hidden plug-ins
+
+Checked by tests (no app was opened).
+
+- The Instrument and Audio FX menus and `plugin.list` leave out Apple's Audio Units (the ones
+  macOS comes with, maker code `appl`: AUSampler, DLSMusicDevice, AUDelay, AUMatrixReverb and
+  the rest). "Show macOS built-in plug-ins" at the foot of the maker submenus shows them again;
+  the choice is kept per Mac in the settings file `plugin-hide-apple` (`0` shows them).
+- Any instrument or effect, Pro Wave's own included, is hidden by its `plugin.list` id on a
+  line of the settings file `plugin-hidden` (`prowave:808`, `builtin:Space D`,
+  `aufx:dely:appl`, `vst3:…`). The files are read again within a second; no restart.
+- A project that already uses a hidden plug-in opens and plays it as before.
+
+### 2026-11-24: Groove Flex for audio tracks
+
+Checked by tests on synthetic clicks (no app was opened and nothing was listened to): straight
+sixteenths at 120 BPM with a 60 % hat groove come out with every "e" and "a" 25 ms late and
+the beats and "&" in place (within 8 ms, measured by onset detection on the made sound), the
+same length as the recording; 0 % plays the recording itself.
+
+- Region and Track Inspector ▸ **Groove Flex** (audio), 0–100 %: the hits of each audio region
+  are found once and moved toward the same per-hit target as Groove Q (where the rack's own hit
+  of the followed class on the nearest sixteenth plays; none there: the hit stays; Rack and
+  Follow rows, Auto by hit density and the track's name), by the strength; the sound between hits is stretched with the existing Flex Time WSOLA (pitch kept,
+  Rhythmic mode by default). The region keeps its length; the recording is never changed; the
+  markers are made again when the groove, strength, tempo or place changes. Playback and the
+  bounce use the made sound.
+- Control interface: `rack.groove_flex_get` and `rack.groove_flex`.
+
+### 2026-11-24: Groove Q for MIDI tracks
+
+Checked by tests (no app was opened and nothing was listened to).
+
+- Region Inspector ▸ **Groove Q** (under Quantize) and Track Inspector ▸ **Groove Q**, 0–100 %:
+  a quantize toward a Channel Rack's hits. Each note is pulled toward Follow Rack's own target
+  for the nearest step (the region's Quantize grid, else sixteenths) of the class Follow picks:
+  where that step's one hit plays (played times, never a mean), between two hits its share of
+  the way, and where the class has no hit the note stays. By the strength. A region takes its track's strength unless it has its own, so a recorded take
+  is grooved at once. Non-destructive: playback, the bounce and the MIDI export take it; the
+  stored notes do not move. With Follow Rack on too, the result is the same at 100 % (no
+  double move).
+- Track Inspector ▸ **Groove Live** (off by default): keys played live while the song plays
+  wait for a hit the rack plays late, by the Groove Q strength (never earlier, at most a
+  sixteenth); their releases wait as long. Takes are recorded at the moment the keys were
+  pressed.
+- Control interface: `rack.groove_q_get` and `rack.groove_q`; `rack.follow_get` reports
+  `groove_q` and `live`.
+
+### 2026-11-24: Follow Rack Groove for MIDI tracks
+
+Checked by tests and end to end on a windowless app: a Channel Rack with a measured groove
+(closed hat swing 53 % and its own offset on each sixteenth), hats on all sixteen steps, and a
+MIDI track of straight sixteenths following the hat. Exported MIDI (480 ppq): the sixteenths moved
+by −4 to +15 ticks (−4.2 to +15.6 ms at 120 bpm) and all 16 of bar 1 land on the rack's own hat
+ticks; with the option off, or exported as stored, every note is back on the grid. A bounce
+through Apple's DLS Music Device AU, one note per bar on each sixteenth, moved the onsets by
+−196 to +740 samples at 48 kHz, each within 2.4 samples of the expected shift. Nothing was
+listened to.
+
+- Track Inspector ▸ **Follow Rack** (off by default): a MIDI track's notes play on the hits
+  of one drum class of a Channel Rack, where the rack plays them: a loaded pattern's hits at
+  their played times, steps added by hand where the groove places them. A note on a hit's step
+  plays as far from it as that one hit, so every bar follows its own hits (no mean timing); a
+  note where the class plays no hit stays where it is. **Rack** (the first by default),
+  **Follow**: Auto, Hat, Snare, Kick, then the other classes; **Groove Velocity** (off by
+  default): the velocity of the hit carrying a note over the mean of the class's hits.
+- Auto: Kick for 808 and bass parts (by name, or median pitch below C2 with one note at a
+  time), the closed hat for dense parts (2 onsets a beat, or 10 % on the "e" and "a"),
+  else the snare (the clap when the rack plays claps and no snares). Thresholds measured on
+  3,740 labelled producer MIDI files.
+- Non-destructive: notes are moved when the song is made (playback, bounce, AU/VST3 and
+  built-in instruments, external MIDI), never in the regions. A note between two hits at most a
+  sixteenth apart plays its fraction of the way between where they play; note-offs move with note-ons and stop at the next note of the
+  same pitch. Early notes play early (pre-roll), clamped at beat 0 and, with Cycle on, at
+  the cycle's start.
+- File ▸ Export ▸ **Apply Follow Rack Groove** (on): the MIDI export writes the notes as they
+  play; off, as stored.
+- A track bounced alone (export.bounce with a track, All Tracks as Audio Files, Bounce in
+  Place) keeps the rack it follows, silent, so its notes keep the feel.
+- `prowavectl`: new `rack.follow`, `rack.follow_get`; `export.midi` takes
+  `apply_follow_groove`.
+
+### 2026-11-24: Kit Browser kit list
+
+Checked by tests and through the control interface of a windowless app on the real library;
+not seen in the live window.
+
+- A kit list (`kit_list` in the Kit Browser's `settings.json`, or `kits.list`): a TSV naming
+  kits by their folder relative to the library folder, with `rank`, `type` and `reason`
+  columns. Set, the Kit Browser shows only its kits (plus favourites and the kit for new
+  racks), in rank order, grouped by type, and the left column lists the types. A list path
+  not found as written is looked for inside the library folders, so the same setting works
+  where the library is mounted at another path. Right-click the TYPE column or the Kit List key in Folders to turn it
+  off. Unset, nothing changes.
+- `prowavectl`: new `kits.list`; `kits.search` takes `list` and `type` and reports each kit's
+  `rank` and `type`; `kits.status` reports `kit_list` and `all_kits`.
+
+### 2026-11-24: Channel Rack patterns, velocity, split steps, amounts, volume and pan knobs
+
+Checked by tests and through the control interface of a windowless app; nothing was played
+or listened to.
+
+- Every hit has its own velocity: a lit step shows it as an ink bar; drag a step up or down to
+  change it; right-click a step for a Velocity slider. The VEL field sets the velocity of hits
+  added by hand (default 100).
+- A step can be split into 2, 3 or 4 hits (right-click > Divide: 32nds, triplet thirds, 64ths)
+  for rolls and ratchets; each part turns on and off and has its own velocity. A split hit
+  plays its fraction of the way to where the next step swings to, so it stays in its step at
+  any swing.
+- Amounts row: Groove, Offset and Velocity knobs, 0-100 % (default 100 %), take the swing,
+  the micro-timing offsets and a loaded pattern's or groove's velocities toward straight, none and the
+  hits' velocities before (a pattern's: the VEL value); turning back restores them.
+- Each rack channel has a volume knob (−48 to +12 dB, the same level as the dB readout) and a
+  pan knob.
+- The rack shows "Copying kit" while a kit is copied here from a share.
+- `prowavectl`: new `rack.mix`, `rack.amounts`, `rack.hit`, `rack.divide` and `rack.pattern`;
+  `rack.get` also reports each channel's volume, pan, mute and hits (step, part, division,
+  velocity, start), the amounts and the loaded pattern.
+
+### 2026-11-24: kits from another computer are copied here when loaded
+
+- Kit Browser: a library folder on a network share is browsed and auditioned in place; Load
+  Kit, a sample put on a pad or rack channel, and Add Channel… copy the samples into
+  `kit-library/local/<source>/<kit>/` first and the rack plays the copies, so projects keep
+  their sounds without the share. `copy_kits` in `kit-library/settings.json`: `remote`
+  (default, network shares only) or `always`. A default kit on a share is copied once and
+  `default_kit` then names the copy. Load Kit and the default kit copy on another thread, so
+  the window keeps working (a first build blocked it: 19.4 s for the 54-file OZ kit, 8.6 s
+  for a 16-channel kit over SMB, and the app hung). A library folder on a network share is no
+  longer read kit by kit in the background; its kits are read when picked.
+- `prowavectl`: new `kits.copy`; `kits.status` reports `default_kit`, `copy_kits` and `local`.
+
+### 2026-11-24: Channel Rack swing, micro-timing and grooves; new racks start with a kit
+
+Checked by tests and through the control interface of a windowless app; nothing was played
+or listened to.
+
+- Each rack channel has a drum class (Load Kit sets it from the sample; changeable in the
+  rack). Each class has a swing (16th or 8th, 35-85 %) and sixteen micro-timing offsets, one a
+  sixteenth of the bar; a channel's steps are notes at the place its class's feel gives them,
+  so the Piano Roll, playback, the bounce and exported MIDI keep that timing. The rack shows
+  each channel's class and its class's swing (drag to change).
+- The Groove key's Straight puts every step back on the grid.
+- A new rack starts with the kit named by `default_kit` in `kit-library/settings.json` (none
+  unless set), empty when the folder is not there. Kit Browser: right-click a kit > Use for
+  New Racks.
+- Kit search compares look-alike letters as plain ones (small capitals, full-width, circled,
+  mathematical, accented), so "oz" finds "ᴏᴢ".
+- `prowavectl`: new `rack.get`, `rack.class`, `rack.swing`, `rack.steps` and `rack.groove`;
+  `kits.load` and `kits.assign` report each channel's class.
+
 ### 2026-11-24: the Kit Browser at the library's size
 
 - A kit picked opens at once: a scan reads the library folders first (the list is there in

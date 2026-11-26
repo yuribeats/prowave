@@ -173,17 +173,17 @@ pub(crate) fn on_region(
         let galley = painter.layout_no_wrap(
             text,
             crate::theme::font(crate::theme::Face::Lcd, 12.0),
-            crate::theme::LCD_INK,
+            crate::theme::LCD_INK(),
         );
         let rect = egui::Rect::from_min_size(
             pt + egui::vec2(14.0, -8.0 - galley.size().y),
             galley.size() + egui::vec2(10.0, 4.0),
         );
-        painter.rect_filled(rect, 2.0, crate::theme::LCD);
+        painter.rect_filled(rect, 2.0, crate::theme::LCD());
         painter.galley(
             rect.min + egui::vec2(5.0, 2.0),
             galley,
-            crate::theme::LCD_INK,
+            crate::theme::LCD_INK(),
         );
     }
     if resp.drag_stopped() || !resp.dragged() {

@@ -135,7 +135,7 @@ fn paste_panel(
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
                     .font(theme::font(Face::Bold, 12.5))
-                    .text_color(theme::LCD_INK)
+                    .text_color(theme::LCD_INK())
                     .desired_rows(4)
                     .desired_width(inner.width() - 12.0),
             )
@@ -159,7 +159,7 @@ fn paste_panel(
         pos2(chip.left() + 10.0, chip.center().y - h / 2.0),
         &count,
         h,
-        theme::LCD_INK,
+        theme::LCD_INK(),
         false,
     );
     let words = crate::i18n::trf("{} notes", &[&n]);
@@ -173,7 +173,7 @@ fn paste_panel(
         unit.trim(),
         10.0,
         1,
-        theme::LCD_INK.gamma_multiply(0.8),
+        theme::LCD_INK().gamma_multiply(0.8),
     );
     let label = if selected.len() > 1 {
         tr("Apply to Selected Notes")
@@ -185,7 +185,7 @@ fn paste_panel(
         &tr("Cancel").to_uppercase(),
         Face::Bold,
         11.0,
-        theme::INK,
+        theme::INK(),
     )
     .size()
     .x + 32.0;
@@ -239,7 +239,7 @@ fn rules(ui: &mut Ui, text: &str) {
             p.to_uppercase(),
             egui::TextFormat {
                 font_id: theme::font(Face::Silk, size),
-                color: theme::INK2,
+                color: theme::INK2(),
                 extra_letter_spacing: theme::tracking(Face::Silk) * size,
                 ..Default::default()
             },
@@ -253,9 +253,13 @@ fn rules(ui: &mut Ui, text: &str) {
         g.hline(
             r.left()..=r.left() + 6.0,
             tick_y,
-            egui::Stroke::new(1.0, theme::INK2.gamma_multiply(0.6)),
+            egui::Stroke::new(1.0, theme::INK2().gamma_multiply(0.6)),
         );
-        g.galley(egui::pos2(r.left() + 14.0, r.top() + 2.0), gal, theme::INK2);
+        g.galley(
+            egui::pos2(r.left() + 14.0, r.top() + 2.0),
+            gal,
+            theme::INK2(),
+        );
     }
 }
 
@@ -338,7 +342,7 @@ pub fn show(
                 .margin(egui::Margin::ZERO)
                 .align(egui::Align2::LEFT_CENTER)
                 .font(font)
-                .text_color(theme::ON_DARK),
+                .text_color(theme::ON_DARK()),
         );
         if !edit.has_focus() && !edit.lost_focus() {
             edit.request_focus();
@@ -434,7 +438,7 @@ mod tests {
     /// notes with their lyrics, as the Piano Roll draws them).
     fn roll(g: &egui::Painter, full: Rect, notes: &[Note], rect_of: &dyn Fn(&Note) -> Rect) {
         use egui::{pos2, vec2, Align2, Stroke};
-        g.rect_filled(full, 0.0, theme::BONE);
+        g.rect_filled(full, 0.0, theme::BONE());
         let keys_w = 60.0;
         let ruler = Rect::from_min_max(
             pos2(full.left() + keys_w, full.top()),
@@ -455,7 +459,15 @@ mod tests {
             }
             let lane = lane.intersect(grid);
             let black = matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
-            g.rect_filled(lane, 0.0, if black { theme::GRID_BG } else { theme::BONE });
+            g.rect_filled(
+                lane,
+                0.0,
+                if black {
+                    theme::GRID_BG()
+                } else {
+                    theme::BONE()
+                },
+            );
             let key = Rect::from_min_max(
                 pos2(full.left(), lane.top()),
                 pos2(full.left() + keys_w, lane.bottom()),
@@ -464,11 +476,11 @@ mod tests {
                 g.rect_filled(
                     Rect::from_min_size(key.min, vec2(keys_w * 0.62, key.height() - 1.0)),
                     1.0,
-                    theme::CAP,
+                    theme::CAP(),
                 );
             } else {
-                g.rect_filled(key, 0.0, theme::BONE_HI);
-                g.hline(key.x_range(), key.bottom(), Stroke::new(1.0, theme::SEAM));
+                g.rect_filled(key, 0.0, theme::BONE_HI());
+                g.hline(key.x_range(), key.bottom(), Stroke::new(1.0, theme::SEAM()));
             }
             if pitch % 12 == 0 {
                 hw::text(
@@ -478,7 +490,7 @@ mod tests {
                     &format!("C{}", pitch / 12 - 1),
                     Face::Bold,
                     8.5,
-                    theme::INK2,
+                    theme::INK2(),
                 );
             }
         }
@@ -495,14 +507,14 @@ mod tests {
                 grid.y_range(),
                 Stroke::new(
                     1.0,
-                    theme::INK.gamma_multiply(if bar { 0.22 } else { 0.07 }),
+                    theme::INK().gamma_multiply(if bar { 0.22 } else { 0.07 }),
                 ),
             );
             if bar {
                 g.vline(
                     x,
                     ruler.top() + 6.0..=ruler.bottom(),
-                    Stroke::new(1.0, theme::INK2),
+                    Stroke::new(1.0, theme::INK2()),
                 );
                 hw::text(
                     g,
@@ -511,13 +523,13 @@ mod tests {
                     &format!("{:03}", k / 4 + 1),
                     Face::Bold,
                     11.0,
-                    theme::INK,
+                    theme::INK(),
                 );
             } else {
                 g.vline(
                     x,
                     ruler.bottom() - 5.0..=ruler.bottom(),
-                    Stroke::new(1.0, theme::INK2.gamma_multiply(0.6)),
+                    Stroke::new(1.0, theme::INK2().gamma_multiply(0.6)),
                 );
             }
         }
@@ -537,11 +549,11 @@ mod tests {
         // The notes and their lyrics.
         for note in notes {
             let r = rect_of(note);
-            g.rect_filled(r, 2.0, theme::REGION);
+            g.rect_filled(r, 2.0, theme::REGION());
             g.rect_stroke(
                 r,
                 2.0,
-                Stroke::new(1.0, theme::CAP_EDGE),
+                Stroke::new(1.0, theme::CAP_EDGE()),
                 egui::StrokeKind::Inside,
             );
             hw::text(
@@ -551,7 +563,7 @@ mod tests {
                 note.lyric.as_str(),
                 Face::Bold,
                 11.0,
-                theme::ON_DARK,
+                theme::ON_DARK(),
             );
         }
     }
@@ -608,7 +620,7 @@ mod tests {
                 full.width(),
                 full.height(),
                 2.0,
-                theme::BONE,
+                theme::BONE(),
                 |ui| {
                     theme::apply(ui.ctx());
                     roll(ui.painter(), full, &n, &rect_of);

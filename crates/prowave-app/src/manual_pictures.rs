@@ -37,9 +37,11 @@ fn manual_pictures_mixer_and_tracks() {
     let mut p = Project::demo();
     let mut s = crate::UiState::new();
     let meters = crate::mixer::Meters::default();
+    // As tall as the main window opens it: the strips whole.
+    let h = crate::mixer::full_height(&p, &s.mixer);
     crate::ui_test::render_png(
         1400.0,
-        620.0,
+        h,
         1.0,
         BG,
         |ui| {
@@ -81,6 +83,14 @@ fn manual_pictures_channel_rack() {
             gain_db: 0.0,
             pan: 0.0,
             mute: false,
+            solo: false,
+            class: [
+                crate::kit_classify::DrumClass::Kick,
+                crate::kit_classify::DrumClass::Snare,
+                crate::kit_classify::DrumClass::ClosedHat,
+                crate::kit_classify::DrumClass::OpenHat,
+                crate::kit_classify::DrumClass::Clap,
+            ][names.iter().position(|m| m == n).unwrap_or(0)],
         })
         .collect();
     let mut slot = new_slot();
@@ -286,7 +296,7 @@ fn manual_pictures_hardware_kit() {
         1200.0,
         700.0,
         2.0,
-        theme::BONE,
+        theme::BONE(),
         |ui| {
             theme::apply(ui.ctx());
             let g = ui.painter().clone();
@@ -301,12 +311,12 @@ fn manual_pictures_hardware_kit() {
                 "PRO WAVE",
                 Face::SilkX,
                 15.0,
-                theme::INK,
+                theme::INK(),
             );
             g.rect_filled(
                 Rect::from_min_size(pos2(128.0, 5.0), vec2(14.0, 14.0)),
                 1.0,
-                theme::ORANGE,
+                theme::ORANGE(),
             );
             hw::silk(
                 &g,
@@ -314,7 +324,7 @@ fn manual_pictures_hardware_kit() {
                 Align2::LEFT_CENTER,
                 "PW-1 digital audio workstation",
                 11.0,
-                theme::INK2,
+                theme::INK2(),
             );
             hw::seam_h(&g, full.x_range(), 26.0);
             // Keys.
@@ -338,7 +348,7 @@ fn manual_pictures_hardware_kit() {
                     Align2::CENTER_CENTER,
                     "Caption",
                     9.5,
-                    theme::PRINT,
+                    theme::PRINT(),
                 );
             }
             // LCD.
@@ -353,14 +363,14 @@ fn manual_pictures_hardware_kit() {
                 "BAR",
                 Face::Lcd,
                 9.0,
-                theme::LCD_INK,
+                theme::LCD_INK(),
             );
             hw::seg(
                 &g,
                 glass.left_top() + vec2(60.0, 14.0),
                 "005 1 1 001",
                 40.0,
-                theme::LCD_INK,
+                theme::LCD_INK(),
                 true,
             );
             hw::seg(
@@ -368,7 +378,7 @@ fn manual_pictures_hardware_kit() {
                 glass.left_top() + vec2(60.0, 64.0),
                 "01:00:08:00.00",
                 14.0,
-                theme::LCD_INK,
+                theme::LCD_INK(),
                 true,
             );
             hw::seg(
@@ -376,7 +386,7 @@ fn manual_pictures_hardware_kit() {
                 glass.left_top() + vec2(330.0, 20.0),
                 "120.0000",
                 20.0,
-                theme::LCD_INK,
+                theme::LCD_INK(),
                 true,
             );
             hw::lcd_readout(
@@ -432,7 +442,7 @@ fn manual_pictures_hardware_kit() {
                 "CLASSIC ELECTRIC PIANO",
                 Face::Bold,
                 13.0,
-                theme::INK,
+                theme::INK(),
             );
             hw::slider_like(
                 &g,

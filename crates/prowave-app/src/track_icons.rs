@@ -240,7 +240,7 @@ impl Pen<'_> {
 
 /// Draws a track pictogram filling `r`, in ink (the Hardware print colour).
 pub fn draw_icon(g: &Painter, r: Rect, kind: IconKind) {
-    draw_icon_in(g, r, kind, crate::theme::INK);
+    draw_icon_in(g, r, kind, crate::theme::INK());
 }
 
 /// Draws a track pictogram filling `r` in `col` (bone on dark caps and plates).

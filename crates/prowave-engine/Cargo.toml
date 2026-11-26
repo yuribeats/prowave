@@ -58,7 +58,7 @@ objc2-core-audio = "0.3.2"
 objc2-core-audio-types = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2 = "0.6.5"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSString", "NSURL", "NSGeometry", "NSThread", "NSObject", "NSDate", "NSRunLoop", "NSNotification", "NSOperation", "block2"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSDictionary", "NSString", "NSURL", "NSGeometry", "NSThread", "NSObject", "NSDate", "NSRunLoop", "NSNotification", "NSOperation", "block2"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSScreen", "NSApplication", "NSRunningApplication", "NSColor"] }
 block2 = "0.6.2"
 # VST 3 hosting (src/vst3.rs): the COM interfaces generated from Steinberg's SDK headers

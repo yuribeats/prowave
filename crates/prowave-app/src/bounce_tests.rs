@@ -443,6 +443,8 @@ fn song(dir: &Path, source: &[f32]) -> Project {
             gain_db: 0.0,
             pan: 0.0,
             mute: false,
+            solo: false,
+            class: crate::kit_classify::DrumClass::Other,
         },
     ]));
     t.au_instrument = Some(slot);

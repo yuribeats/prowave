@@ -11,6 +11,14 @@
 //! The commands that need to know the recording (where the hits are, which notes are sung)
 //! read it on a thread too and apply their result when it comes back, if the region is still
 //! there.
+//!
+//! Groove Flex (Region and Track Inspector of audio, the audio side of Groove Q in
+//! `rack_follow.rs`): the hits of the recording are found once and kept with the edit
+//! ([`FlexEdit::groove_onsets`]); its markers are made from them whenever the groove, the strength,
+//! the tempo or the region's place changes ([`groove_markers`]): each hit moves toward where the
+//! Channel Rack plays the nearest sixteenth of the followed class, by the strength, and the
+//! sound between hits is stretched (WSOLA, the region's Flex mode) so the region keeps its length.
+//! At 0 % there are no markers: the recording itself plays.
 use crate::i18n::{tr, trf};
 use crate::model::{AudioRegion, Note, Project, Region, Track, TrackKind};
 use crate::UiState;
@@ -40,6 +48,9 @@ pub struct FlexEdit {
     /// them whenever the project's tempo (or the region's place) changes, so every beat stays
     /// on the project's beats.
     pub follow: Option<TempoFollow>,
+    /// Groove Flex: the hits of the recording (seconds into it), found once; the markers are
+    /// made from them while the region's Groove Flex strength is above 0. None: not looked for.
+    pub groove_onsets: Option<Vec<f64>>,
     /// While the sound for new `markers` is being made: the markers of the sound the region
     /// still plays (None: it plays the sound of `markers`, or the recording when they are
     /// empty). The region's offset is in the time of the sound it plays, so it never plays one
@@ -151,6 +162,7 @@ impl FlexEdit {
             rendered: 0,
             melody: None,
             follow: None,
+            groove_onsets: None,
             played: None,
         }
     }
@@ -287,6 +299,8 @@ pub enum Command {
     FollowProjectTempo,
     /// Flex Pitch: every note moved to the nearest note of the project's key.
     CorrectPitch,
+    /// Groove Flex: the hits of the recording, kept with the edit.
+    GrooveHits,
     /// A new software instrument track with the notes Flex Pitch hears.
     MidiFromPitch,
 }
@@ -300,6 +314,7 @@ enum Outcome {
     },
     Pitch(Vec<PitchShift>),
     Notes(Vec<prowave_engine::DetectedNote>),
+    Hits(Vec<f64>),
 }
 
 struct Task {
@@ -338,6 +353,13 @@ pub struct FlexState {
     /// again once it has rested for [`FOLLOW_REST`] (a dragged tempo makes one render, not one
     /// per frame).
     waiting: Option<(u64, Instant)>,
+    /// What the Groove Flex regions were last made for ([`groove_key`]), and the song revision
+    /// that key was worked out at (it is worked out again only when the song changes).
+    grooved: u64,
+    groove_rev: Option<u64>,
+    groove_seen: u64,
+    /// A [`groove_key`] not made yet and when it was first seen (as `waiting`).
+    groove_waiting: Option<(u64, Instant)>,
 }
 
 impl FlexState {
@@ -347,6 +369,14 @@ impl FlexState {
             || !self.renders.is_empty()
             || !self.removals.is_empty()
             || self.waiting.is_some()
+            || self.groove_waiting.is_some()
+    }
+
+    /// Whether the hits of region `r` of track `t` are being looked for (Groove Flex).
+    pub fn finding_hits(&self, t: usize, r: usize) -> bool {
+        self.tasks
+            .iter()
+            .any(|j| (j.track, j.region, j.command) == (t, r, Command::GrooveHits))
     }
 
     /// Removes the Flex edits of region `r` of track `t` on the next [`poll`].
@@ -596,6 +626,312 @@ pub fn follow(p: &mut Project, t: usize, r: usize) -> bool {
     true
 }
 
+// ---------------------------------------------------------------- Groove Flex
+
+/// Where moment 0 of region `r`'s recording plays as it was recorded (no Flex markers), in
+/// seconds of the song: so a hit's place before any move.
+fn recording_start_secs(p: &Project, region: &Region, f: &FlexEdit, map: &TempoMap) -> f64 {
+    let start = map.seconds_at(p.region_start_beats(region));
+    start - source_through(f.played_markers(), region.params.offset_secs.max(0.0))
+}
+
+/// The hits of the audio regions of track `ti` whose hits are known, as notes of one pitch at
+/// their places in the song as recorded (what Auto reads of an audio track).
+pub fn track_hits(p: &Project, ti: usize) -> Vec<prowave_engine::NoteEvent> {
+    let Some(t) = p.tracks.get(ti) else {
+        return Vec::new();
+    };
+    let map = p.tempo_map();
+    let mut out = Vec::new();
+    for region in t.regions.iter().filter(|r| !r.params.mute) {
+        let Some(f) = region.audio.as_ref().and_then(|a| a.flex.as_ref()) else {
+            continue;
+        };
+        let Some(hits) = &f.groove_onsets else {
+            continue;
+        };
+        let s0 = recording_start_secs(p, region, f, &map);
+        let (from, to) = (p.region_start_beats(region), p.region_end_beats(region));
+        for h in hits {
+            let b = map.beat_at(s0 + h);
+            if (from..to).contains(&b) {
+                out.push(prowave_engine::NoteEvent {
+                    start_beat: b,
+                    end_beat: b + 0.125,
+                    pitch: 60,
+                    vel: 100,
+                    track: ti as u16,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A hit moved less than this (seconds) is left where it is.
+const GROOVE_NEUTRAL: f64 = 0.0002;
+/// No hit closer than this (seconds) to the end of the recording is moved: the end stays put,
+/// so the region keeps its length.
+const GROOVE_END_GUARD: f64 = 0.01;
+
+/// Groove Flex markers: each hit `onsets` (seconds into a recording of `duration` seconds whose
+/// moment 0 plays at `s0` seconds of the song) moved `strength` % of the way to where `gq`
+/// places the nearest step of `grid`, the end of the recording held where it is (the result is
+/// as long as the recording). Empty at 0 %, or when nothing would move.
+#[allow(clippy::too_many_arguments)]
+pub fn groove_markers(
+    onsets: &[f64],
+    duration: f64,
+    s0: f64,
+    map: &TempoMap,
+    gq: &crate::rack_follow::GrooveQ,
+    strength: u8,
+    grid: f64,
+    bar_of: impl Fn(f64) -> f64,
+) -> Vec<WarpPoint> {
+    if strength == 0 || duration <= 0.0 {
+        return Vec::new();
+    }
+    let mut pairs = Vec::with_capacity(onsets.len() + 1);
+    for &src in onsets {
+        if !(src > 0.0 && src < duration - GROOVE_END_GUARD) {
+            continue;
+        }
+        let b = map.beat_at(s0 + src);
+        let to = gq.lock.step_target(b, grid, bar_of(b), false);
+        let at = crate::rack_follow::pull(b, to, strength);
+        let dst = map.seconds_at(at) - s0;
+        if dst > 0.0 && dst < duration - GROOVE_END_GUARD {
+            pairs.push((src, dst));
+        }
+    }
+    if pairs.iter().all(|(a, b)| (a - b).abs() < GROOVE_NEUTRAL) {
+        return Vec::new();
+    }
+    pairs.push((duration, duration));
+    let mut markers = markers_from(pairs);
+    // The end is held (markers_from may have left it out after a hit that moved close to it).
+    if markers.last().is_none_or(|m| m.src < duration) {
+        markers.retain(|m| m.dst < duration - 0.002);
+        markers.push(WarpPoint {
+            src: duration,
+            dst: duration,
+        });
+    }
+    markers
+}
+
+/// The Groove Flex strength of region `r` of track `t` when it is an audio region: its own or
+/// its track's.
+fn groove_strength(p: &Project, t: usize, r: usize) -> u8 {
+    let track = &p.tracks[t];
+    let region = &track.regions[r];
+    if region.audio.is_none() {
+        return 0;
+    }
+    crate::rack_follow::groove_q_of(track, region)
+}
+
+/// A number that changes with anything the Groove Flex regions' markers depend on: each such
+/// region (its place, strength and hits), the groove each track pulls to, the tempo and the
+/// signatures. 0 when there are none.
+fn groove_key(p: &Project) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |w: u64| h = (h ^ w).wrapping_mul(0x0000_0100_0000_01b3);
+    let mut any = false;
+    for (t, track) in p.tracks.iter().enumerate() {
+        let mut uses = false;
+        for (r, region) in track.regions.iter().enumerate() {
+            let Some(a) = region.audio.as_ref() else {
+                continue;
+            };
+            let strength = groove_strength(p, t, r);
+            let hits = a.flex.as_ref().and_then(|f| f.groove_onsets.as_ref());
+            if strength == 0 && hits.is_none() {
+                continue;
+            }
+            uses = true;
+            mix(t as u64);
+            mix(r as u64);
+            mix(u64::from(strength));
+            mix(hits.map_or(u64::MAX, |x| x.len() as u64));
+            mix(u64::from(region.start_bar.to_bits()));
+            mix(u64::from(region.len_bars.to_bits()));
+            mix(region.params.offset_secs.to_bits());
+            mix(u64::from(region.params.quantize.unwrap_or(0.0).to_bits()));
+            for b in a.file.path.to_string_lossy().bytes() {
+                mix(u64::from(b));
+            }
+        }
+        if uses {
+            any = true;
+            let target = crate::rack_follow::groove_target(p, t);
+            let lock =
+                target.and_then(|(rack, c)| crate::rack_follow::Lock::new(p, rack, c, false));
+            for b in format!("{target:?}{lock:?}").bytes() {
+                mix(u64::from(b));
+            }
+        }
+    }
+    if !any {
+        return 0;
+    }
+    for pt in p.tempo_points() {
+        mix(pt.beat.to_bits());
+        mix(u64::from(pt.bpm.to_bits()));
+        mix(u64::from(pt.ramp));
+    }
+    mix(u64::from(p.sig.0) << 8 | u64::from(p.sig.1));
+    for c in &p.sig_changes {
+        mix(u64::from(c.bar) << 16 | u64::from(c.num) << 8 | u64::from(c.den));
+    }
+    h.max(1)
+}
+
+/// Makes the markers of region `r` of track `t` for its Groove Flex: the hits pulled to the
+/// groove (or none at 0 %, which also forgets the hits, so Flex markers set by hand afterwards
+/// stay). Returns whether anything changed.
+pub fn groove(p: &mut Project, t: usize, r: usize) -> bool {
+    let strength = groove_strength(p, t, r);
+    let Some(region) = p.tracks.get(t).and_then(|x| x.regions.get(r)) else {
+        return false;
+    };
+    let Some(f) = region.audio.as_ref().and_then(|a| a.flex.as_ref()) else {
+        return false;
+    };
+    let Some(hits) = f.groove_onsets.as_ref() else {
+        return false;
+    };
+    let map = p.tempo_map();
+    let src_at_start = source_through(f.played_markers(), region.params.offset_secs.max(0.0));
+    let markers = if strength == 0 {
+        Vec::new()
+    } else {
+        let gq = crate::rack_follow::groove_target(p, t)
+            .and_then(|(rack, c)| crate::rack_follow::Lock::new(p, rack, c, false))
+            .map(|lock| crate::rack_follow::GrooveQ {
+                lock,
+                straight: false,
+            });
+        match gq {
+            Some(gq) => groove_markers(
+                hits,
+                f.original.duration_secs(),
+                recording_start_secs(p, region, f, &map),
+                &map,
+                &gq,
+                strength,
+                crate::rack_follow::grid_of(region),
+                |b| p.bar_start(b),
+            ),
+            // No rack to follow: the recording as it is.
+            None => Vec::new(),
+        }
+    };
+    let probe = FlexEdit {
+        markers: markers.clone(),
+        ..FlexEdit::new(f.original.clone(), f.mode)
+    };
+    let offset = if src_at_start <= 0.0 {
+        0.0
+    } else {
+        probe.place_of(src_at_start)
+    };
+    let same = f.markers.len() == markers.len()
+        && f.markers
+            .iter()
+            .zip(&markers)
+            .all(|(a, b)| (a.src - b.src).abs() < 1e-7 && (a.dst - b.dst).abs() < 1e-7);
+    let forget = strength == 0;
+    if same && !forget {
+        return false;
+    }
+    let region = &mut p.tracks[t].regions[r];
+    if let Some(f) = region.audio.as_mut().and_then(|a| a.flex.as_mut()) {
+        if forget {
+            f.groove_onsets = None;
+        }
+        if !same {
+            f.follow = None;
+            f.set_markers(markers);
+            if f.played.is_none() {
+                region.params.offset_secs = offset;
+            }
+        }
+    }
+    p.song_rev += 1;
+    true
+}
+
+/// Makes the markers of every Groove Flex region again when what they depend on changed and has
+/// rested for [`FOLLOW_REST`]; starts looking for the hits of the regions that need them.
+fn groove_all(p: &mut Project, s: &mut UiState) {
+    if s.flex.groove_rev == Some(p.song_rev) && s.flex.groove_waiting.is_none() {
+        return;
+    }
+    let key = if s.flex.groove_rev == Some(p.song_rev) {
+        s.flex.groove_seen
+    } else {
+        let k = groove_key(p);
+        s.flex.groove_rev = Some(p.song_rev);
+        s.flex.groove_seen = k;
+        k
+    };
+    if key == s.flex.grooved {
+        s.flex.groove_waiting = None;
+        return;
+    }
+    match s.flex.groove_waiting {
+        Some((k, since)) if k == key => {
+            if since.elapsed() < FOLLOW_REST {
+                return;
+            }
+        }
+        _ => {
+            s.flex.groove_waiting = Some((key, Instant::now()));
+            return;
+        }
+    }
+    groove_now(p, &mut s.flex);
+    find_hits(p, s);
+}
+
+/// Makes the markers of every Groove Flex region now whose hits are known, if anything they
+/// depend on changed (no waiting: an Undo step is about to be kept). Returns whether any changed.
+pub fn groove_now(p: &mut Project, st: &mut FlexState) -> bool {
+    st.groove_waiting = None;
+    let key = groove_key(p);
+    if key == st.grooved {
+        return false;
+    }
+    let mut changed = false;
+    for t in 0..p.tracks.len() {
+        for r in 0..p.tracks[t].regions.len() {
+            changed |= groove(p, t, r);
+        }
+    }
+    // The markers' own changes do not change the key (the offset may: take it as it is now).
+    st.grooved = groove_key(p);
+    st.groove_rev = Some(p.song_rev);
+    st.groove_seen = st.grooved;
+    changed
+}
+
+/// Starts looking for the hits of the audio regions with a Groove Flex strength whose hits are
+/// not known.
+fn find_hits(p: &Project, s: &mut UiState) {
+    for t in 0..p.tracks.len() {
+        for r in 0..p.tracks[t].regions.len() {
+            let known = audio_of(p, t, r)
+                .and_then(|a| a.flex.as_ref())
+                .is_some_and(|f| f.groove_onsets.is_some());
+            if !known && groove_strength(p, t, r) > 0 && !s.flex.finding_hits(t, r) {
+                start(p, s, t, r, Command::GrooveHits);
+            }
+        }
+    }
+}
+
 /// A number that changes with anything a Follow Tempo region's markers depend on: the tempo
 /// and signature tracks and each such region's place. 0 when there are none.
 fn follow_key(p: &Project) -> u64 {
@@ -802,6 +1138,7 @@ fn work(
             let (markers, length) = follow_tempo(&found.beats, file.duration_secs(), map, origin);
             Ok(Outcome::Markers { markers, length })
         }
+        Command::GrooveHits => Ok(Outcome::Hits(found.onsets)),
         Command::CorrectPitch | Command::MidiFromPitch => {
             let stereo = file.read_stereo().map_err(|e| e.to_string())?;
             let mono: Vec<f32> = stereo.chunks(2).map(|c| (c[0] + c[1]) * 0.5).collect();
@@ -846,6 +1183,7 @@ pub fn poll(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
     }
     poll_tasks(p, s);
     follow_all(p, &mut s.flex);
+    groove_all(p, s);
     start_renders(ctx, p, s);
     poll_renders(ctx, p, s);
     if s.flex.busy() {
@@ -912,6 +1250,22 @@ fn poll_tasks(p: &mut Project, s: &mut UiState) {
             Outcome::Notes(notes) => {
                 let made = midi_track_from(p, t, r, &notes);
                 s.status = Some(trf("Flex Pitch: {} notes on a new track", &[&made]));
+            }
+            Outcome::Hits(hits) => {
+                if hits.is_empty() {
+                    s.status = Some(trf("Flex: {}", &[&tr("no hits found to quantize")]));
+                }
+                let mode = audio_of(p, t, r)
+                    .and_then(|a| a.flex.as_ref())
+                    .map_or(FlexMode::Rhythmic, |f| f.mode);
+                set_mode(p, t, r, mode);
+                if let Some(f) = p.tracks[t].regions[r]
+                    .audio
+                    .as_mut()
+                    .and_then(|a| a.flex.as_mut())
+                {
+                    f.groove_onsets = Some(hits);
+                }
             }
         }
         p.song_rev += 1;
@@ -1890,5 +2244,234 @@ pub(crate) mod tests {
         };
         assert_eq!(fresh, original.peaks(fresh.len()).unwrap());
         assert_ne!(fresh, stale);
+    }
+
+    // ------------------------------------------------ Groove Flex
+
+    /// Hats on every sixteenth of two bars, the "e" and "a" played 0.05 of a beat late (60 %
+    /// swing) and beat 2 of each bar 0.03 early.
+    fn swung_groove() -> crate::rack_follow::GrooveQ {
+        let hits = (0..32)
+            .map(|k| {
+                let b = k as f64 * 0.25;
+                let late = if k % 2 == 1 { 0.05 } else { 0.0 };
+                let early = if k % 16 == 4 { -0.03 } else { 0.0 };
+                crate::rack_follow::Hit {
+                    straight: b,
+                    at: b + late + early,
+                    vel: 100,
+                }
+            })
+            .collect();
+        crate::rack_follow::GrooveQ {
+            lock: crate::rack_follow::Lock {
+                hits,
+                mean_vel: None,
+                cycle: None,
+            },
+            straight: false,
+        }
+    }
+
+    fn bar4(b: f64) -> f64 {
+        (b / 4.0).floor() * 4.0
+    }
+
+    /// Straight sixteenths at 120 BPM (an eighth of a second apart) in a 2.5 second recording
+    /// that starts on beat 0.
+    fn sixteenths() -> (Vec<f64>, f64, TempoMap) {
+        let hits: Vec<f64> = (1..16).map(|k| k as f64 * 0.125).collect();
+        (hits, 2.5, TempoMap::constant(120.0, (4, 4)))
+    }
+
+    #[test]
+    fn groove_flex_at_0_percent_is_the_identity() {
+        let (hits, dur, map) = sixteenths();
+        let m = groove_markers(&hits, dur, 0.0, &map, &swung_groove(), 0, 0.25, bar4);
+        assert!(m.is_empty(), "no markers: the recording plays as it is");
+        let edit = FlexEdit {
+            markers: m,
+            ..FlexEdit::new(
+                AudioFile {
+                    path: "/x.wav".into(),
+                    frames: 0,
+                    sample_rate: 44_100,
+                    channels: 2,
+                },
+                FlexMode::Rhythmic,
+            )
+        };
+        assert!(edit.is_neutral());
+        for x in [0.0, 0.3, 1.234, 2.5] {
+            assert_eq!(edit.place_of(x), x);
+            assert_eq!(edit.source_of(x), x);
+        }
+        // Hits played straight move nothing either, at any strength; nor does a rack with no hit
+        // of the class.
+        let mut flat = swung_groove();
+        for h in &mut flat.lock.hits {
+            h.at = h.straight;
+        }
+        assert!(groove_markers(&hits, dur, 0.0, &map, &flat, 100, 0.25, bar4).is_empty());
+        flat.lock.hits.clear();
+        assert!(groove_markers(&hits, dur, 0.0, &map, &flat, 100, 0.25, bar4).is_empty());
+    }
+
+    #[test]
+    fn groove_flex_moves_each_hit_by_the_strength_and_keeps_the_length() {
+        let (hits, dur, map) = sixteenths();
+        let gq = swung_groove();
+        // A late "e" is 0.05 beat = 25 ms late; beat 2 (half a second in) 0.03 beat = 15 ms early.
+        for (strength, e_shift, beat2_shift) in [(50u8, 0.0125, -0.0075), (100, 0.025, -0.015)] {
+            let m = groove_markers(&hits, dur, 0.0, &map, &gq, strength, 0.25, bar4);
+            let at = |src: f64| m.iter().find(|x| (x.src - src).abs() < 1e-9).unwrap().dst;
+            assert!(
+                (at(0.125) - (0.125 + e_shift)).abs() < 1e-9,
+                "{strength}: the e"
+            );
+            assert!((at(0.25) - 0.25).abs() < 1e-9, "{strength}: the & stays");
+            assert!(
+                (at(0.5) - (0.5 + beat2_shift)).abs() < 1e-9,
+                "{strength}: beat 2"
+            );
+            // The end of the recording is held: the result is exactly as long.
+            let last = m.last().unwrap();
+            assert_eq!((last.src, last.dst), (dur, dur));
+            let edit = FlexEdit {
+                markers: m.clone(),
+                ..FlexEdit::new(
+                    AudioFile {
+                        path: "/x.wav".into(),
+                        frames: (dur * 44_100.0) as u64,
+                        sample_rate: 44_100,
+                        channels: 2,
+                    },
+                    FlexMode::Rhythmic,
+                )
+            };
+            assert!((edit.place_of(dur) - dur).abs() < 1e-12);
+            // In order, so the sound between two hits is stretched, never turned round.
+            assert!(m
+                .windows(2)
+                .all(|w| w[1].src > w[0].src && w[1].dst > w[0].dst));
+        }
+        // A recording that starts later in the song (s0): its hits are placed by the song.
+        let late = groove_markers(&[0.125], 2.0, 2.0, &map, &gq, 100, 0.25, bar4);
+        assert!((late[0].dst - 0.15).abs() < 1e-9, "the e of beat 5");
+    }
+
+    /// A Channel Rack with a hat groove (60 % swing) and a step region over bar 1, and an audio
+    /// track of straight sixteenth clicks at 120 BPM with Groove Flex.
+    fn groove_flex_project(wav: &std::path::Path) -> (Project, usize, usize) {
+        use crate::kit_classify::DrumClass;
+        let (mut p, t) = project_with(wav);
+        let pads = vec![
+            Some(std::path::PathBuf::from("/lib/k/BD.wav")),
+            Some(std::path::PathBuf::from("/lib/k/hat.wav")),
+        ];
+        let classes = [DrumClass::Kick, DrumClass::ClosedHat];
+        let rack = crate::channel_rack::load_kit(&mut p, None, "K", &pads, &classes);
+        let ri = crate::channel_rack::step_region(&mut p, rack, None);
+        let st = crate::channel_rack::rack_state(&p, rack).unwrap();
+        // Hats on all sixteen steps (channel 1).
+        for k in 0..16 {
+            crate::channel_rack::set_step(&mut p.tracks[rack].regions[ri], &st, 1, k, true);
+        }
+        let mut g = crate::rack_groove::Groove::default();
+        g.set_swing(Some(DrumClass::ClosedHat), 60.0, None);
+        crate::channel_rack::set_groove(&mut p, rack, g).unwrap();
+        p.tracks[t].params.follow_rack.class = Some(DrumClass::ClosedHat);
+        (p, t, rack)
+    }
+
+    #[test]
+    fn groove_flex_finds_the_hits_stretches_them_to_the_rack_and_0_puts_the_recording_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("loop.wav");
+        let clicks: Vec<f64> = (0..16).map(|k| k as f64 * 0.125).collect();
+        write_clicks(&wav, &clicks, 2.5);
+        let (mut p, t, rack) = groove_flex_project(&wav);
+        let original = p.tracks[t].regions[0].audio.as_ref().unwrap().file.clone();
+        let len_bars = p.tracks[t].regions[0].len_bars;
+        let mut s = UiState::new();
+        p.tracks[t].params.follow_rack.groove_q = 100;
+        p.song_rev += 1;
+        assert_eq!(
+            crate::rack_follow::groove_target(&p, t).map(|x| x.0),
+            Some(rack)
+        );
+        settle(&mut p, &mut s);
+        let r = &p.tracks[t].regions[0];
+        let a = r.audio.as_ref().unwrap();
+        let f = a.flex.as_ref().unwrap();
+        let hits = f.groove_onsets.as_ref().expect("the hits are kept");
+        assert!(hits.len() >= 14, "{hits:?}");
+        assert_eq!(f.mode, FlexMode::Rhythmic);
+        assert!(!f.markers.is_empty());
+        assert_eq!(f.rendered, f.fingerprint(), "its sound is made");
+        // The recording is untouched; the region plays a new file of the same length.
+        assert_eq!(f.original.path, original.path);
+        assert_ne!(a.file.path, original.path);
+        let made = a.file.clone();
+        let ratio = made.frames as f64
+            / f64::from(made.sample_rate)
+            / (original.frames as f64 / f64::from(original.sample_rate));
+        assert!((ratio - 1.0).abs() < 0.002, "same length: {ratio}");
+        assert_eq!(r.len_bars, len_bars);
+        // The "e" and "a" clicks now play 25 ms late; the beats and the "&" stay.
+        let found = made.analyze().unwrap().onsets;
+        let near = |x: f64| found.iter().any(|o| (o - x).abs() < 0.008);
+        for k in 1..16 {
+            let want = k as f64 * 0.125 + if k % 2 == 1 { 0.025 } else { 0.0 };
+            assert!(near(want), "click {k} at {want}: {found:?}");
+        }
+        // 0 %: no markers, the recording itself plays again.
+        p.tracks[t].params.follow_rack.groove_q = 0;
+        p.song_rev += 1;
+        settle(&mut p, &mut s);
+        let a = p.tracks[t].regions[0].audio.as_ref().unwrap();
+        let f = a.flex.as_ref().unwrap();
+        assert!(f.markers.is_empty());
+        assert!(f.groove_onsets.is_none(), "the hits are forgotten");
+        assert_eq!(a.file.path, original.path);
+        // The edit is saved with the project and read back.
+        p.tracks[t].params.follow_rack.groove_q = 40;
+        p.song_rev += 1;
+        settle(&mut p, &mut s);
+        let doc = crate::project_io::to_doc(&p).0;
+        let fd = doc.tracks[t].regions[0].flex.as_ref().unwrap();
+        assert!(fd.groove_onsets.as_ref().is_some_and(|h| h.len() >= 14));
+        assert_eq!(doc.tracks[t].follow_rack.as_ref().unwrap().groove_q, 40);
+    }
+
+    #[test]
+    fn auto_follows_an_audio_track_by_its_hits_and_name() {
+        use crate::kit_classify::DrumClass;
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("loop.wav");
+        write_clicks(&wav, &[0.0], 2.5);
+        let (mut p, t, _) = groove_flex_project(&wav);
+        p.tracks[t].params.follow_rack.class = None;
+        let set_hits = |p: &mut Project, hits: Vec<f64>| {
+            set_mode(p, t, 0, FlexMode::Rhythmic);
+            let f = p.tracks[t].regions[0]
+                .audio
+                .as_mut()
+                .unwrap()
+                .flex
+                .as_mut()
+                .unwrap();
+            f.groove_onsets = Some(hits);
+        };
+        // Sixteenths: the hat.
+        set_hits(&mut p, (0..16).map(|k| k as f64 * 0.125).collect());
+        assert_eq!(crate::rack_follow::auto_of(&p, t), DrumClass::ClosedHat);
+        assert_eq!(track_hits(&p, t).len(), 16);
+        // Quarter notes: the snare (no clap feel here).
+        set_hits(&mut p, (0..4).map(|k| k as f64 * 0.5).collect());
+        assert_eq!(crate::rack_follow::auto_of(&p, t), DrumClass::Snare);
+        // An 808 by its name.
+        p.tracks[t].name = "808".into();
+        assert_eq!(crate::rack_follow::auto_of(&p, t), DrumClass::Kick);
     }
 }

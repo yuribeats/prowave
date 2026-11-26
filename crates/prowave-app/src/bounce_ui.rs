@@ -403,11 +403,12 @@ fn show_progress(ctx: &egui::Context, p: &Project, s: &mut crate::UiState) {
     }
 }
 
-/// The progress display of a running bounce. Returns whether Cancel was pressed.
+/// The progress display of a running bounce. Returns whether Cancel or the close key was
+/// pressed (the panel shows as long as the bounce runs, so closing it cancels the bounce).
 fn progress_panel(ctx: &egui::Context, p: &Project, pr: &Progress) -> bool {
     let id = Id::unique("prowave_bounce_progress");
     let mut cancel = false;
-    hw_vocal::window(ctx, id, tr("Bounce"), &p.name, 380.0, None, |ui| {
+    let (open, _) = hw_vocal::window(ctx, id, tr("Bounce"), &p.name, 380.0, None, |ui| {
         let glass = lcd(ui, 62.0);
         let g = ui.painter().clone();
         let what = if pr.preparing {
@@ -421,7 +422,7 @@ fn progress_panel(ctx: &egui::Context, p: &Project, pr: &Progress) -> bool {
             _ => what,
         };
         let text = Rect::from_min_max(glass.min, pos2(glass.right(), glass.center().y + 4.0));
-        hw_vocal::lcd_text(&g, text, &line, 12.0, 2, theme::LCD_INK);
+        hw_vocal::lcd_text(&g, text, &line, 12.0, 2, theme::LCD_INK());
         let bar = Rect::from_min_max(
             pos2(glass.left(), glass.bottom() - 9.0),
             pos2(glass.right(), glass.bottom() - 2.0),
@@ -438,7 +439,7 @@ fn progress_panel(ctx: &egui::Context, p: &Project, pr: &Progress) -> bool {
             &[(tr("Cancel"), Cap::Bone, None, true)],
         )[0];
     });
-    cancel
+    cancel || !open
 }
 
 fn show_result(ctx: &egui::Context, p: &Project, s: &mut crate::UiState) {
@@ -473,7 +474,7 @@ fn result_panel(ctx: &egui::Context, p: &Project, head: &str, lines: &[String]) 
     let mut close = false;
     let (open, _) = hw_vocal::window(ctx, id, tr("Bounce"), &p.name, 460.0, None, |ui| {
         let glass = lcd(ui, 62.0);
-        hw_vocal::lcd_text(ui.painter(), glass, head, 12.0, 3, theme::LCD_INK);
+        hw_vocal::lcd_text(ui.painter(), glass, head, 12.0, 3, theme::LCD_INK());
         if !lines.is_empty() {
             hw_vocal::gap(ui, 6.0);
             hw_vocal::section(ui, tr("Not in the Bounce"));
@@ -482,7 +483,7 @@ fn result_panel(ctx: &egui::Context, p: &Project, head: &str, lines: &[String]) 
                     line.clone(),
                     egui::TextFormat {
                         font_id: theme::font(theme::Face::Body, 12.0),
-                        color: theme::INK,
+                        color: theme::INK(),
                         ..Default::default()
                     },
                 );
@@ -493,7 +494,7 @@ fn result_panel(ctx: &egui::Context, p: &Project, head: &str, lines: &[String]) 
                     Sense::hover(),
                 );
                 ui.painter()
-                    .galley(pos2(r.left(), r.top() + 3.0), galley, theme::INK);
+                    .galley(pos2(r.left(), r.top() + 3.0), galley, theme::INK());
             }
         }
         hw_vocal::gap(ui, 12.0);
@@ -505,6 +506,27 @@ fn result_panel(ctx: &egui::Context, p: &Project, head: &str, lines: &[String]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The progress panel's close key cancels the bounce (the panel stays while it runs).
+    #[test]
+    fn the_progress_panels_close_key_cancels() {
+        let p = Project::demo();
+        let pr = Progress {
+            fraction: 0.5,
+            file: 1,
+            files: 1,
+            track: None,
+            preparing: false,
+        };
+        let mut h = crate::ui_test::Harness::new(1000.0, 700.0);
+        let mut cancel = false;
+        h.settle(|ui| cancel |= progress_panel(ui.ctx(), &p, &pr));
+        assert!(!cancel);
+        let at = hw_vocal::close_key_center(&h.ctx, Id::unique("prowave_bounce_progress"))
+            .expect("the panel is on screen");
+        h.click(at, |ui| cancel |= progress_panel(ui.ctx(), &p, &pr));
+        assert!(cancel, "the close key cancels");
+    }
 
     /// Pictures of the Bounce dialog, its progress display and the panel of a bounce that left
     /// something out: `MANUAL_PNG_DIR=… cargo test -p prowave-app bounce_window_pictures --
@@ -523,7 +545,7 @@ mod tests {
                 520.0,
                 h,
                 2.0,
-                theme::BONE3,
+                theme::BONE3(),
                 |u| {
                     theme::apply(u.ctx());
                     ui(u.ctx())

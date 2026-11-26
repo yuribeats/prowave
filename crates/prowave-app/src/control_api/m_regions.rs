@@ -665,9 +665,14 @@ fn export_midi(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
             path.display()
         )));
     }
-    crate::midi_file::export_path(&cx.app.project, only, &path)
+    let follow = params.bool("apply_follow_groove").unwrap_or(true);
+    crate::midi_file::export_path_with(&cx.app.project, only, &path, follow)
         .map_err(|e| RpcError::failed(format!("cannot write {}: {e}", path.display())))?;
-    ok(json!({"path": path.display().to_string(), "whole_project": only.is_none()}))
+    ok(json!({
+        "path": path.display().to_string(),
+        "whole_project": only.is_none(),
+        "apply_follow_groove": follow,
+    }))
 }
 
 fn region_fit(cx: &mut Cx, params: &P) -> Result<Reply, RpcError> {
@@ -942,8 +947,8 @@ pub fn methods() -> Vec<Method> {
             vec![p("path", Ty::Str, "the .mid file").req(), bar, position, seconds, beat],
             "{tracks_made, tracks}; a place puts the file's start there (default: the start of the song)", import_midi).changes(),
         m("export.midi", "Writes the project's MIDI, or one region's, to a MIDI file.",
-            vec![p("path", Ty::Str, "the .mid file to write").req(), p("region", Ty::Str, "only this region (default: every MIDI region)"), p("overwrite", Ty::Bool, "replace a file that is already there")],
-            "{path, whole_project}", export_midi),
+            vec![p("path", Ty::Str, "the .mid file to write").req(), p("region", Ty::Str, "only this region (default: every MIDI region)"), p("overwrite", Ty::Bool, "replace a file that is already there"), p("apply_follow_groove", Ty::Bool, "write the notes of tracks following a Channel Rack with its feel, as they play (default true); false: as stored, on the straight grid")],
+            "{path, whole_project, apply_follow_groove}", export_midi),
         m("marker.list", "The markers, in song order.", vec![], "{markers: [{number, name, at, color}]}", marker_list),
         m("marker.add", "Adds a marker at a place (default: the playhead).",
             vec![bar, position, seconds, beat, p("name", Ty::Str, "its name (default \"Marker N\")")],

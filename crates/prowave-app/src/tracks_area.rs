@@ -29,6 +29,8 @@ pub(crate) mod hw_tracks;
 pub(crate) const TOOLBAR_H: f32 = 48.0;
 /// The ruler: the cycle band on top, bar numbers and ticks under it.
 pub(crate) const RULER_H: f32 = 38.0;
+/// A track row's height before the track zoom changes it.
+pub(crate) const DEFAULT_ROW_H: f32 = 70.0;
 /// The track list.
 pub(crate) const HEADER_W: f32 = 440.0;
 /// Left margin of a header's contents (the number key starts here).
@@ -492,7 +494,7 @@ impl Default for TracksView {
     fn default() -> Self {
         Self {
             bar_w: 96.0,
-            row_h: 70.0,
+            row_h: DEFAULT_ROW_H,
             scroll_x: 0.0,
             scroll_y: 0.0,
             lanes_w: 1000.0,
@@ -547,16 +549,25 @@ const RULER_SELECTION: Color32 = Color32::from_rgba_premultiplied(4, 4, 4, 30);
 
 /// The playhead is the signal orange with an ink edge; while recording it is the deeper
 /// record red.
-pub(crate) const PLAYHEAD_LINE: Color32 = theme::ORANGE;
-pub(crate) const PLAYHEAD_HEAD: Color32 = theme::ORANGE;
-pub(crate) const PLAYHEAD_EDGE: Color32 = theme::INK;
+#[allow(non_snake_case)]
+pub(crate) fn PLAYHEAD_LINE() -> Color32 {
+    theme::ORANGE()
+}
+#[allow(non_snake_case)]
+pub(crate) fn PLAYHEAD_HEAD() -> Color32 {
+    theme::ORANGE()
+}
+#[allow(non_snake_case)]
+pub(crate) fn PLAYHEAD_EDGE() -> Color32 {
+    theme::ON_ACCENT()
+}
 
 /// The playhead's line, head and outline colours.
 pub(crate) fn playhead_colors(recording: bool) -> (Color32, Color32, Color32) {
     if recording {
-        (theme::DANGER, theme::DANGER, theme::INK)
+        (theme::DANGER(), theme::DANGER(), theme::INK())
     } else {
-        (PLAYHEAD_LINE, PLAYHEAD_HEAD, PLAYHEAD_EDGE)
+        (PLAYHEAD_LINE(), PLAYHEAD_HEAD(), PLAYHEAD_EDGE())
     }
 }
 
@@ -719,7 +730,7 @@ fn zoom_slider(ui: &Ui, g: &Painter, rect: Rect, key: &str, value: f32) -> f32 {
     if let Some(p) = resp.interact_pointer_pos() {
         v = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
     }
-    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 2.0, theme::BONE_HI);
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 2.0, theme::BONE_HI());
     g.rect_filled(rect, 2.0, hw_tracks::GROOVE);
     let thumb = Rect::from_center_size(
         pos2(rect.left() + rect.width() * v, rect.center().y),
@@ -787,7 +798,7 @@ fn glyph_key(
         hw::led_sized(g, pos2(face.left() + 9.0, face.center().y), 3.0, on);
         c.x += 7.0;
     }
-    hw_tracks::glyph(g, c, 18.0, glyph, theme::INK);
+    hw_tracks::glyph(g, c, 18.0, glyph, theme::INK());
     resp
 }
 
@@ -799,11 +810,11 @@ fn shortcut(ui: &Ui, mods: Modifiers, key: Key) -> String {
 
 fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
     let g = ui.painter_at(bar);
-    g.rect_filled(bar, 0.0, hw_tracks::PANEL_MENU);
+    g.rect_filled(bar, 0.0, hw_tracks::PANEL_MENU());
     g.hline(
         bar.x_range(),
         bar.top() + 0.5,
-        Stroke::new(1.0, Color32::WHITE),
+        Stroke::new(1.0, theme::emboss(255)),
     );
     hw_tracks::seam_wide_h(&g, bar.x_range(), bar.bottom());
     // The keys sit on the row's centre, above the seam.
@@ -1028,7 +1039,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         pos2(hz.left() - 19.0, cy),
         18.0,
         Glyph::HZoom,
-        theme::INK2,
+        theme::INK2(),
     );
     // Vertical zoom (track height 36..140).
     let vz = Rect::from_min_size(
@@ -1045,7 +1056,7 @@ fn toolbar(ui: &Ui, p: &mut Project, s: &mut UiState, bar: Rect, lanes_w: f32) {
         pos2(vz.left() - 19.0, cy),
         18.0,
         Glyph::VZoom,
-        theme::INK2,
+        theme::INK2(),
     );
     // What fits between the two sides; the rest is left out rather than drawn on top.
     let mut rx = vz.left() - 44.0;
@@ -1122,7 +1133,7 @@ fn drag_menu(ui: &Ui, g: &Painter, v: &mut TracksView, rx: f32, cy: f32) -> f32 
         Align2::RIGHT_CENTER,
         no_colon(tr("Drag:")),
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     label.left() - 24.0
 }
@@ -1179,7 +1190,7 @@ fn snap_menu(
         Align2::RIGHT_CENTER,
         no_colon(tr("Snap:")),
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     label.left() - 24.0
 }
@@ -1208,12 +1219,12 @@ fn tool_key(ui: &Ui, g: &Painter, r: Rect, key: &str, tool: &mut TrackTool, cmd:
         pos2(face.left() + 20.0, face.center().y),
         16.0,
         tool.glyph(),
-        theme::INK,
+        theme::INK(),
     );
     hw::tri_down(
         g,
         pos2(face.right() - 14.0, face.center().y + 0.5),
-        theme::INK2,
+        theme::INK2(),
     );
     let tip = if cmd {
         tr("Command-click Tool")
@@ -2116,11 +2127,11 @@ fn draw_take_folder(
     );
     let faded = region.params.mute || silenced;
     let head_ink = if selected {
-        theme::INK
+        theme::ON_ACCENT()
     } else if faded {
-        theme::INK2
+        theme::INK2()
     } else {
-        theme::BONE
+        theme::pick(theme::BONE(), theme::ON_DARK())
     };
     let head = Rect::from_min_max(full.min, pos2(full.right(), body.top()));
     // The triangle: pointing right when closed, down when opened.
@@ -2144,7 +2155,7 @@ fn draw_take_folder(
             x,
             body.top()..=body.bottom(),
             1.0,
-            theme::INK.gamma_multiply(0.7),
+            theme::INK().gamma_multiply(0.7),
         );
     }
     // What the comp plays.
@@ -2183,7 +2194,7 @@ fn draw_take_folder(
                     g.rect_stroke(
                         r,
                         0.0,
-                        Stroke::new(1.0, theme::INK.gamma_multiply(0.75)),
+                        Stroke::new(1.0, theme::INK().gamma_multiply(0.75)),
                         StrokeKind::Inside,
                     );
                 }
@@ -2213,20 +2224,20 @@ fn draw_take_folder(
                 take.notes.iter().filter(|n| !used(n.start)),
                 lo,
                 hi,
-                theme::PRINT,
+                theme::PRINT(),
             );
             // The take's number on a small bone plate, readable on either material.
             let label = trf("Take {}", &[&(take_idx + 1)]).to_uppercase();
-            let gal = hw_tracks::galley(&gr, &label, Face::Silk, 10.0, 0.12, theme::INK);
+            let gal = hw_tracks::galley(&gr, &label, Face::Silk, 10.0, 0.12, theme::INK());
             let plate = Rect::from_min_size(
                 row.left_top() + vec2(4.0, 3.0),
                 vec2(gal.size().x + 6.0, row.height() - 6.0),
             );
-            gr.rect_filled(plate, 1.5, theme::BONE);
+            gr.rect_filled(plate, 1.5, theme::BONE());
             gr.galley(
                 pos2(plate.left() + 3.0, plate.center().y - gal.size().y / 2.0),
                 gal,
-                theme::INK,
+                theme::INK(),
             );
         }
     }
@@ -2383,18 +2394,18 @@ fn draw_region(
     );
     let head = Rect::from_min_max(rr.min, pos2(rr.right(), body.top()));
     let head_ink = if selected || recording {
-        theme::INK
+        theme::ON_ACCENT()
     } else if faded {
-        theme::INK2
+        theme::INK2()
     } else {
-        theme::BONE
+        theme::pick(theme::BONE(), theme::ON_DARK())
     };
     let gb = g.with_clip_rect(body.shrink2(vec2(1.0, 0.0)).intersect(g.clip_rect()));
     // Missing audio: a bare bone body with a hatch across it where the waveform would be.
     if region.missing.is_some() {
         let bare = body.shrink(1.0);
-        gb.rect_filled(bare, 0.0, theme::BONE2);
-        hw_tracks::hatch(&gb, bare, 1.5, 7.0, theme::INK.gamma_multiply(0.22));
+        gb.rect_filled(bare, 0.0, theme::BONE2());
+        hw_tracks::hatch(&gb, bare, 1.5, 7.0, theme::INK().gamma_multiply(0.22));
     }
     // View > Colour Spectrogram: the sound's colour spectrogram fills the body inside the
     // outline instead of the waveform, once it is made (the waveform until then). Each
@@ -2476,15 +2487,15 @@ fn draw_region(
                 gb.vline(
                     x,
                     inner.y_range(),
-                    Stroke::new(1.0, theme::ORANGE_DK.gamma_multiply(0.85)),
+                    Stroke::new(1.0, theme::ORANGE_DK().gamma_multiply(0.85)),
                 );
             }
         }
     }
     let ink = if recording {
-        theme::ORANGE_HI
+        theme::ORANGE_HI()
     } else if colour {
-        theme::ON_DARK.gamma_multiply(if faded { 0.5 } else { 0.9 })
+        theme::ON_DARK().gamma_multiply(if faded { 0.5 } else { 0.9 })
     } else if faded {
         material.ink().gamma_multiply(0.45)
     } else {
@@ -2842,7 +2853,7 @@ fn header(
         {
             p.tracks[i].folded = !p.tracks[i].folded;
         }
-        hw_tracks::disclosure(g, arrow.center(), !p.tracks[i].folded, theme::INK2);
+        hw_tracks::disclosure(g, arrow.center(), !p.tracks[i].folded, theme::INK2());
         name_x += 18.0;
     }
     // A short row's keys sit in a line before the slider (and its automation LED).
@@ -2893,7 +2904,7 @@ fn header(
             // 16-point caps; a long name steps down to 14 before it is cut.
             let upper = name_now.to_uppercase();
             let width = |size: f32| {
-                hw_tracks::galley(g, &upper, Face::Silk, size, 0.09, theme::INK)
+                hw_tracks::galley(g, &upper, Face::Silk, size, 0.09, theme::INK())
                     .size()
                     .x
                     - 0.09 * size
@@ -2908,7 +2919,11 @@ fn header(
                 Face::Silk,
                 size,
                 0.09,
-                if dim_name { theme::PRINT } else { theme::INK },
+                if dim_name {
+                    theme::PRINT()
+                } else {
+                    theme::INK()
+                },
             );
         }
     }
@@ -2990,7 +3005,7 @@ fn header(
                 Face::Lcd,
                 10.0,
                 0.1,
-                theme::PRINT,
+                theme::PRINT(),
             );
         }
     }
@@ -3081,7 +3096,7 @@ fn master_strip(ui: &mut Ui, p: &mut Project, rect: Rect, meters: &crate::mixer:
     let g = ui.painter_at(rect);
     let head = Rect::from_min_max(rect.min, pos2(rect.left() + HEADER_W, rect.bottom()));
     let lane = Rect::from_min_max(pos2(head.right(), rect.top()), rect.max);
-    g.rect_filled(lane, 0.0, hw_tracks::FLOOR);
+    g.rect_filled(lane, 0.0, hw_tracks::FLOOR());
     hw_tracks::header_bg(&g, head, false);
     hw_tracks::seam_wide_v(&g, head.right(), head.y_range());
     hw::seam_h(&g, rect.x_range(), rect.top());
@@ -3108,13 +3123,13 @@ fn master_strip(ui: &mut Ui, p: &mut Project, rect: Rect, meters: &crate::mixer:
             sw: 3,
             se: 3,
         },
-        theme::ORANGE,
+        theme::ORANGE(),
     );
     let chip = Rect::from_min_size(
         pos2(plate.left() + 6.0, plate.center().y - 7.5),
         vec2(20.0, 13.0),
     );
-    g.rect_filled(chip, 2.0, theme::ORANGE);
+    g.rect_filled(chip, 2.0, theme::ORANGE());
     hw_tracks::label(
         &g,
         chip.center(),
@@ -3123,7 +3138,7 @@ fn master_strip(ui: &mut Ui, p: &mut Project, rect: Rect, meters: &crate::mixer:
         Face::Lcd,
         9.5,
         0.06,
-        theme::INK,
+        theme::ON_ACCENT(),
     );
     hw_tracks::label(
         &g,
@@ -3133,7 +3148,7 @@ fn master_strip(ui: &mut Ui, p: &mut Project, rect: Rect, meters: &crate::mixer:
         Face::Silk,
         14.0,
         0.08,
-        theme::BONE,
+        theme::pick(theme::BONE(), theme::ON_DARK()),
     );
     // VOL and PEAK at the right of the track list, the level control between.
     let ro = Rect::from_min_size(
@@ -3344,7 +3359,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
 
     // ---- lanes background + grid
     let g = ui.painter_at(lanes);
-    g.rect_filled(lanes, 0.0, hw_tracks::FLOOR);
+    g.rect_filled(lanes, 0.0, hw_tracks::FLOOR());
     let bars = p.bars_in(beat_of(lanes.left()), beat_of(lanes.right()));
     for (i, &(top, row_h)) in rows.iter().enumerate() {
         if row_h <= 0.0 {
@@ -3353,7 +3368,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         let y = row_y(top);
         let row = Rect::from_min_size(pos2(lanes.left(), y), vec2(lanes.width(), row_h));
         if crate::track_selection::is_selected(p, v, i) {
-            g.rect_filled(row, 0.0, hw_tracks::FLOOR_SEL);
+            g.rect_filled(row, 0.0, hw_tracks::FLOOR_SEL());
         }
         if p.tracks[i].kind == TrackKind::Folder {
             g.rect_filled(row, 0.0, Color32::from_white_alpha(18));
@@ -3361,17 +3376,17 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         g.hline(
             row.x_range(),
             row.bottom() - 0.5,
-            Stroke::new(1.0, hw_tracks::LANE_LINE),
+            Stroke::new(1.0, hw_tracks::LANE_LINE()),
         );
     }
     // Bar lines at 22 % ink, beats at 7 %: each fills the pixel column where its time begins.
     for bar in &bars {
         let x = x_of(bar.start);
-        hw_tracks::time_line(&g, x, lanes.y_range(), 1.0, hw_tracks::BAR_LINE);
+        hw_tracks::time_line(&g, x, lanes.y_range(), 1.0, hw_tracks::BAR_LINE());
         if beat_px * bar.unit as f32 >= 14.0 {
             for k in 1..bar.num {
                 let xb = x_of(bar.start + k as f64 * bar.unit);
-                hw_tracks::time_line(&g, xb, lanes.y_range(), 1.0, hw_tracks::BEAT_LINE);
+                hw_tracks::time_line(&g, xb, lanes.y_range(), 1.0, hw_tracks::BEAT_LINE());
             }
         }
     }
@@ -3382,7 +3397,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             pos2(x_of(p.cycle_end).min(lanes.right()), lanes.bottom()),
         );
         if band.width() > 0.0 {
-            g.rect_filled(band, 0.0, hw_tracks::CYCLE_TINT);
+            g.rect_filled(band, 0.0, hw_tracks::CYCLE_TINT());
         }
     }
     let bar_xs: Vec<f32> = bars.iter().map(|b| x_of(b.start)).collect();
@@ -3669,7 +3684,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                     let x = x_of(end);
                     ui.painter_at(lanes).line_segment(
                         [pos2(x, full.top()), pos2(x, full.bottom())],
-                        Stroke::new(2.0, theme::ORANGE),
+                        Stroke::new(2.0, theme::ORANGE()),
                     );
                 }
                 if er.drag_stopped() {
@@ -3695,7 +3710,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                     let x = x_of(at);
                     ui.painter_at(lanes).line_segment(
                         [pos2(x, full.top()), pos2(x, full.bottom())],
-                        Stroke::new(2.0, theme::ORANGE),
+                        Stroke::new(2.0, theme::ORANGE()),
                     );
                 }
                 if sr.drag_stopped() {
@@ -4122,7 +4137,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         }
     }
     if let Some((x, region)) = cut_preview {
-        hw_tracks::time_line(&g, x, region.y_range(), 1.0, theme::ORANGE);
+        hw_tracks::time_line(&g, x, region.y_range(), 1.0, theme::ORANGE());
     }
     if let Some((t, r, at)) = solo_press {
         v.solo_hold = crate::region_solo::begin(p, (t, r), at);
@@ -4173,11 +4188,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         });
     }
     if let Some(band) = band {
-        g.rect_filled(band, 0.0, theme::ORANGE.gamma_multiply(0.12));
+        g.rect_filled(band, 0.0, theme::ORANGE().gamma_multiply(0.12));
         g.rect_stroke(
             band,
             0.0,
-            Stroke::new(1.0, theme::ORANGE),
+            Stroke::new(1.0, theme::ORANGE()),
             StrokeKind::Inside,
         );
     }
@@ -4384,7 +4399,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
 
     // ---- headers
     let gh = ui.painter_at(headers);
-    gh.rect_filled(headers, 0.0, hw_tracks::PANEL_INSPECTOR);
+    gh.rect_filled(headers, 0.0, hw_tracks::PANEL_INSPECTOR());
     for (i, &(top, row_h)) in rows.iter().enumerate() {
         if row_h <= 0.0 {
             continue;
@@ -4439,7 +4454,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                 gh.hline(
                     headers.left() + NUM_W..=headers.left() + HEADER_W,
                     lr.top() + 0.5,
-                    Stroke::new(1.0, theme::SEAM),
+                    Stroke::new(1.0, theme::SEAM()),
                 );
                 crate::automation_ui::choosers(ui, &gh, p, &mut s.auto, strip, lr, Some(k));
             }
@@ -4513,11 +4528,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
 
     // ---- corner above the headers: "+" (new track), duplicate track, the column labels
     let gc = ui.painter_at(corner);
-    gc.rect_filled(corner, 0.0, hw_tracks::PANEL_INSPECTOR);
+    gc.rect_filled(corner, 0.0, hw_tracks::PANEL_INSPECTOR());
     gc.hline(
         corner.x_range(),
         corner.bottom() - 0.5,
-        Stroke::new(1.0, theme::INK2),
+        Stroke::new(1.0, theme::INK2()),
     );
     hw_tracks::seam_wide_v(&gc, corner.right(), corner.y_range());
     let key_h = (corner.height() - 13.0).max(18.0);
@@ -4555,7 +4570,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         Align2::LEFT_CENTER,
         &format!("{:02} {}", p.tracks.len(), tr("Tracks")),
         11.0,
-        theme::PRINT,
+        theme::PRINT(),
     );
     hw::silk(
         &gc,
@@ -4563,7 +4578,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         Align2::LEFT_CENTER,
         "VOL",
         11.0,
-        theme::PRINT,
+        theme::PRINT(),
     );
     hw::silk(
         &gc,
@@ -4571,7 +4586,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         Align2::CENTER_CENTER,
         tr("Pan"),
         11.0,
-        theme::PRINT,
+        theme::PRINT(),
     );
 
     // ---- ruler: the cycle band on top, bar lines with zero-padded numbers, beat ticks
@@ -4580,8 +4595,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         &gr,
         ruler,
         0.0,
-        Color32::from_rgb(0xee, 0xea, 0xe1),
-        Color32::from_rgb(0xe2, 0xdd, 0xd2),
+        theme::pick(
+            Color32::from_rgb(0xee, 0xea, 0xe1),
+            Color32::from_rgb(0x28, 0x28, 0x2c),
+        ),
+        theme::pick(
+            Color32::from_rgb(0xe2, 0xdd, 0xd2),
+            Color32::from_rgb(0x21, 0x21, 0x24),
+        ),
     );
     let numbers_top = ruler.top() + CYCLE_ZONE_H;
     // The stretch of the ruler over the selected region is shaded.
@@ -4614,7 +4635,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
             gr.rect_filled(
                 Rect::from_min_size(pos2(band.left(), ruler.top()), vec2(2.0, RULER_H)),
                 0.0,
-                theme::INK,
+                theme::INK(),
             );
         }
     }
@@ -4626,7 +4647,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
         let b = bar.bar0 as i64;
         let x = x_of(bar.start);
         if b % label_every == 0 {
-            hw_tracks::time_line(&gr, x, numbers_top..=ruler.bottom(), 1.0, theme::INK);
+            hw_tracks::time_line(&gr, x, numbers_top..=ruler.bottom(), 1.0, theme::INK());
             hw_tracks::label(
                 &gr,
                 pos2(x + 5.0, numbers_top + 4.0),
@@ -4635,7 +4656,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                 Face::Lcd,
                 12.0,
                 0.0,
-                theme::INK,
+                theme::INK(),
             );
         } else {
             hw_tracks::time_line(
@@ -4643,7 +4664,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                 x,
                 ruler.bottom() - 7.0..=ruler.bottom(),
                 1.0,
-                theme::INK,
+                theme::INK(),
             );
         }
         if beat_px * bar.unit as f32 >= 10.0 {
@@ -4654,7 +4675,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
                     xb,
                     ruler.bottom() - 7.0..=ruler.bottom(),
                     1.0,
-                    theme::INK2.gamma_multiply(0.6),
+                    theme::INK2().gamma_multiply(0.6),
                 );
             }
         }
@@ -4662,7 +4683,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState, meters: &crate::mixer
     gr.hline(
         ruler.x_range(),
         ruler.bottom() - 0.5,
-        Stroke::new(1.0, theme::INK2),
+        Stroke::new(1.0, theme::INK2()),
     );
     // The cycle strip on top (`cycle_area`): click toggles the cycle, a drag moves the band,
     // moves one locator or draws a new cycle, snapped as the Snap menu says. Under it: locate.
@@ -4780,14 +4801,14 @@ fn draw_marquee(
         }
         let y = row_y(top);
         let band = Rect::from_min_max(pos2(x0, y), pos2(x1.max(x0 + 1.0 / ppp), y + base_h(t)));
-        g.rect_filled(band, 0.0, theme::BONE_HI.gamma_multiply(0.38));
-        hw_tracks::time_line(g, x0, band.y_range(), 1.0, theme::ORANGE);
+        g.rect_filled(band, 0.0, theme::BONE_HI().gamma_multiply(0.38));
+        hw_tracks::time_line(g, x0, band.y_range(), 1.0, theme::ORANGE());
         hw_tracks::time_line(
             g,
             band.right() - 1.0 / ppp,
             band.y_range(),
             1.0,
-            theme::ORANGE,
+            theme::ORANGE(),
         );
     }
 }
@@ -5511,7 +5532,7 @@ mod pictures {
             w,
             h,
             1.0,
-            theme::BONE,
+            theme::BONE(),
             |ui| {
                 theme::apply(ui.ctx());
                 show(ui, p, s, &meters)
@@ -5572,7 +5593,7 @@ mod pictures {
             1670.0,
             560.0,
             1.0,
-            theme::BONE,
+            theme::BONE(),
             |ui| {
                 theme::apply(ui.ctx());
                 show(ui, &mut p, &mut s, &meters);
@@ -5688,6 +5709,8 @@ mod grid_fill_tests {
             (77.7, 33.33, 1.5),
             (600.0, 1010.9, 1.0),
         ];
+        // Measured on the Bone look's light floor.
+        theme::set_for_thread(Some(theme::Theme::Bone));
         let dark = 140.0;
         let light = 150.0;
         let mut checked = (0, 0, 0);
@@ -5696,11 +5719,12 @@ mod grid_fill_tests {
             s.tracks.bar_w = bar_w;
             s.tracks.scroll_x = scroll;
             let meters = crate::mixer::Meters::default();
-            let (img, ctx) = crate::ui_test::render_image(1400.0, 420.0, ppp, theme::BONE, |ui| {
-                theme::apply(ui.ctx());
-                show(ui, &mut p, &mut s, &meters)
-            })
-            .unwrap();
+            let (img, ctx) =
+                crate::ui_test::render_image(1400.0, 420.0, ppp, theme::BONE(), |ui| {
+                    theme::apply(ui.ctx());
+                    show(ui, &mut p, &mut s, &meters)
+                })
+                .unwrap();
             if let Some(dir) = std::env::var_os("PROWAVE_PNG_DIR") {
                 let _ = std::fs::create_dir_all(&dir);
                 img.save(std::path::Path::new(&dir).join(format!("grid-fill-{n}.png")))

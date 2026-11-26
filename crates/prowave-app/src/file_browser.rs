@@ -216,7 +216,7 @@ fn path_tail(g: &egui::Painter, path: &Path, size: f32, room: f32) -> String {
     use crate::theme::Face;
     let full = path.display().to_string();
     let w = |s: &str| {
-        hw::galley(g, s, Face::Lcd, size, crate::theme::INK)
+        hw::galley(g, s, Face::Lcd, size, crate::theme::INK())
             .size()
             .x
     };
@@ -259,7 +259,7 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
 
     // Title strip.
     let (head, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
-    hw::gradient(&g, head, 0.0, theme::BONE_TOP, theme::BONE);
+    hw::gradient(&g, head, 0.0, theme::BONE_TOP(), theme::BONE());
     let title = match tab {
         Tab::Loops => tr("Loops"),
         Tab::Files => tr("All Files"),
@@ -271,12 +271,12 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
         &title.to_uppercase(),
         Face::SilkX,
         14.0,
-        theme::INK,
+        theme::INK(),
     );
     g.rect_filled(
         Rect::from_center_size(pos2(t.right() + 16.0, head.center().y), vec2(9.0, 9.0)),
         1.0,
-        theme::ORANGE,
+        theme::ORANGE(),
     );
     let count = v
         .entries
@@ -302,7 +302,7 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
         pos2(lr.right() - 7.0 - dw, lr.top() + 5.5),
         &digits,
         13.0,
-        theme::LCD_INK,
+        theme::LCD_INK(),
         true,
     );
     hw::seam_h(&g, head.x_range(), head.bottom() - 2.0);
@@ -317,7 +317,7 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
         if !can_up {
             p.set_opacity(0.42);
         }
-        hu::icon_up(&p, pos2(up.left() + 15.0, up.center().y), theme::INK);
+        hu::icon_up(&p, pos2(up.left() + 15.0, up.center().y), theme::INK());
         hw::text(
             &p,
             pos2(up.left() + 27.0, up.center().y),
@@ -325,7 +325,7 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
             &tr("Up").to_uppercase(),
             Face::Bold,
             11.0,
-            theme::INK,
+            theme::INK(),
         );
     }
     if resp.clicked() {
@@ -373,7 +373,7 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
         Align2::LEFT_CENTER,
         label,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     let field = Rect::from_min_max(
         pos2(row.left() + PAD + lw + 10.0, row.top() + 2.0),
@@ -386,7 +386,7 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
             egui::TextEdit::singleline(&mut v.search)
                 .frame(egui::Frame::NONE)
                 .font(theme::font(Face::Bold, 11.0))
-                .text_color(theme::ON_DARK)
+                .text_color(theme::ON_DARK())
                 .desired_width(field.width() - 8.0),
         );
     });
@@ -407,7 +407,7 @@ fn pane(ui: &mut egui::Ui, tab: Tab, dir: &Path, v: &mut BrowserView) {
         &tail,
         Face::Lcd,
         10.5,
-        theme::LCD_INK,
+        theme::LCD_INK(),
     );
     let (sep, _) = ui.allocate_exact_size(vec2(w, 2.0), Sense::hover());
     hw::seam_h(&g, sep.x_range(), sep.top());
@@ -422,7 +422,7 @@ fn rows(ui: &mut egui::Ui, tab: Tab, v: &BrowserView) -> (Option<PathBuf>, Optio
     use egui::{pos2, vec2, Align2, Rect, Sense};
     let g = ui.painter().clone();
     let floor = Rect::from_min_max(ui.cursor().min, ui.max_rect().max);
-    g.rect_filled(floor, 0.0, theme::BONE2);
+    g.rect_filled(floor, 0.0, theme::BONE2());
     hw::inner_shadow(&g, floor, 0.0, 0.18);
     let mut enter = None;
     let mut add = None;
@@ -443,7 +443,7 @@ fn rows(ui: &mut egui::Ui, tab: Tab, v: &BrowserView) -> (Option<PathBuf>, Optio
                     ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
                 let g = ui.painter();
                 if resp.hovered() {
-                    g.rect_filled(r.shrink2(vec2(4.0, 1.0)), 3.0, theme::BONE_HI);
+                    g.rect_filled(r.shrink2(vec2(4.0, 1.0)), 3.0, theme::BONE_HI());
                 }
                 let top = Rect::from_min_size(r.min, vec2(r.width(), ROW_H));
                 let well = Rect::from_center_size(
@@ -454,11 +454,11 @@ fn rows(ui: &mut egui::Ui, tab: Tab, v: &BrowserView) -> (Option<PathBuf>, Optio
                 let icon = well.shrink(5.0);
                 let midi = crate::midi_file::is_midi_path(&e.path);
                 if e.folder {
-                    hu::icon_folder(g, icon, theme::INK);
+                    hu::icon_folder(g, icon, theme::INK());
                 } else if midi {
-                    hu::icon_midi(g, icon, theme::INK);
+                    hu::icon_midi(g, icon, theme::INK());
                 } else {
-                    hu::icon_wave(g, icon, theme::INK);
+                    hu::icon_wave(g, icon, theme::INK());
                 }
                 let name_x = well.right() + 9.0;
                 let right = r.right() - PAD - if e.folder { 14.0 } else { 0.0 };
@@ -470,7 +470,7 @@ fn rows(ui: &mut egui::Ui, tab: Tab, v: &BrowserView) -> (Option<PathBuf>, Optio
                     &shown,
                     Face::Bold,
                     11.0,
-                    theme::INK,
+                    theme::INK(),
                 );
                 if e.folder {
                     hu::arrow(
@@ -478,7 +478,7 @@ fn rows(ui: &mut egui::Ui, tab: Tab, v: &BrowserView) -> (Option<PathBuf>, Optio
                         pos2(r.right() - PAD - 4.0, top.center().y),
                         8.0,
                         true,
-                        theme::PRINT,
+                        theme::PRINT(),
                     );
                 }
                 let mut x = name_x;
@@ -684,7 +684,7 @@ mod tests {
                 WIDTH,
                 700.0,
                 2.0,
-                crate::theme::BONE,
+                crate::theme::BONE(),
                 |ui| {
                     crate::theme::apply(ui.ctx());
                     show(ui, &mut s);

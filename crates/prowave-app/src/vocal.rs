@@ -1833,7 +1833,7 @@ pub(crate) fn status_lcd(ui: &mut egui::Ui, st: &Status<'_>) {
     let g = ui.painter().clone();
     let glass = hw::lcd(&g, rect);
     let (top, bottom) = (glass.top() + 8.0, glass.bottom() - 8.0);
-    let label_ink = theme::LCD_INK.gamma_multiply(0.72);
+    let label_ink = theme::LCD_INK().gamma_multiply(0.72);
     // Zone edges.
     let z1 = Rect::from_min_max(
         pos2(glass.left() + 12.0, top),
@@ -1854,7 +1854,7 @@ pub(crate) fn status_lcd(ui: &mut egui::Ui, st: &Status<'_>) {
     let size = [17.0, 15.0, 13.0]
         .into_iter()
         .find(|size| {
-            hw::galley(&g, &label, Face::Lcd, *size, theme::LCD_INK)
+            hw::galley(&g, &label, Face::Lcd, *size, theme::LCD_INK())
                 .size()
                 .x
                 <= z1.width()
@@ -1868,7 +1868,7 @@ pub(crate) fn status_lcd(ui: &mut egui::Ui, st: &Status<'_>) {
         &name,
         Face::Lcd,
         size,
-        theme::LCD_INK,
+        theme::LCD_INK(),
     );
     if !st.voice.is_empty() {
         let voice = hw_vocal::printable(&g, &st.voice.to_uppercase(), Face::Lcd, 9.0);
@@ -1922,11 +1922,11 @@ pub(crate) fn status_lcd(ui: &mut egui::Ui, st: &Status<'_>) {
         pos2(z2.right(), text_bottom),
     );
     match (st.line.is_empty(), st.note.is_empty()) {
-        (false, true) => hw_vocal::lcd_text(&g, body, &st.line, 9.5, 3, theme::LCD_INK),
+        (false, true) => hw_vocal::lcd_text(&g, body, &st.line, 9.5, 3, theme::LCD_INK()),
         (true, false) => hw_vocal::lcd_text(&g, body, &st.note, 9.0, 3, label_ink),
         (false, false) => {
             let (a, b) = body.split_top_bottom_at_fraction(0.5);
-            hw_vocal::lcd_text(&g, a, &st.line, 9.5, 2, theme::LCD_INK);
+            hw_vocal::lcd_text(&g, a, &st.line, 9.5, 2, theme::LCD_INK());
             hw_vocal::lcd_text(&g, b, &st.note, 8.5, 2, label_ink);
         }
         (true, true) => {}
@@ -1936,7 +1936,14 @@ pub(crate) fn status_lcd(ui: &mut egui::Ui, st: &Status<'_>) {
         let h = 11.0;
         let w = hw::seg_width(&count, h);
         let y = z2.bottom() - h;
-        hw::seg(&g, pos2(z2.right() - w, y), &count, h, theme::LCD_INK, true);
+        hw::seg(
+            &g,
+            pos2(z2.right() - w, y),
+            &count,
+            h,
+            theme::LCD_INK(),
+            true,
+        );
         let frac = if total == 0 {
             0.0
         } else {
@@ -1988,7 +1995,7 @@ pub(crate) fn status_lcd(ui: &mut egui::Ui, st: &Status<'_>) {
                 pos2(unit.left() - 3.0 - w, base - h),
                 &value,
                 h,
-                theme::LCD_INK,
+                theme::LCD_INK(),
                 true,
             );
         }
@@ -2034,7 +2041,7 @@ pub(crate) fn status_lcd(ui: &mut egui::Ui, st: &Status<'_>) {
                 pos2(x0 + col - 4.0 - w, z3.top() + 22.0),
                 &value,
                 h,
-                theme::LCD_INK,
+                theme::LCD_INK(),
                 true,
             );
             hw::text(

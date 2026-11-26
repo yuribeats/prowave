@@ -168,7 +168,7 @@ pub(crate) fn new_tracks_body(
             Align2::LEFT_CENTER,
             text,
             11.0,
-            theme::PRINT,
+            theme::PRINT(),
         );
     };
     label_row(ui, tr("Track Type"));
@@ -246,7 +246,7 @@ pub(crate) fn new_tracks_body(
         ),
         &digits,
         h,
-        theme::LCD_INK,
+        theme::LCD_INK(),
         false,
     );
     ui.add_space(10.0);

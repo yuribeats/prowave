@@ -71,12 +71,12 @@ pub fn loop_glyph(g: &Painter, at: Pos2) {
         tip + egui::vec2(1.5, 1.0),
         tip + egui::vec2(-3.0, 3.0),
     ];
-    for (width, colour) in [(4.0, theme::BONE), (1.8, theme::INK)] {
+    for (width, colour) in [(4.0, theme::BONE()), (1.8, theme::INK())] {
         g.add(egui::Shape::line(ring(5.5), Stroke::new(width, colour)));
         g.add(egui::Shape::convex_polygon(
             head.to_vec(),
             colour,
-            Stroke::new(width - 1.8, theme::BONE),
+            Stroke::new(width - 1.8, theme::BONE()),
         ));
     }
 }
@@ -86,11 +86,11 @@ pub fn loop_glyph(g: &Painter, at: Pos2) {
 pub fn repeat_mark(g: &Painter, x: f32, top: f32, bottom: f32) {
     g.line_segment(
         [pos2(x, top), pos2(x, bottom)],
-        Stroke::new(1.5, theme::INK2),
+        Stroke::new(1.5, theme::INK2()),
     );
     g.add(egui::Shape::convex_polygon(
         vec![pos2(x, top), pos2(x + 5.0, top), pos2(x, top + 5.0)],
-        theme::INK2,
+        theme::INK2(),
         Stroke::NONE,
     ));
 }

@@ -671,7 +671,7 @@ mod tests {
             560.0,
             700.0,
             2.0,
-            crate::theme::BONE3,
+            crate::theme::BONE3(),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 show(ui.ctx(), &mut p, &mut s)
@@ -686,7 +686,7 @@ mod tests {
             560.0,
             700.0,
             2.0,
-            crate::theme::BONE3,
+            crate::theme::BONE3(),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 show(ui.ctx(), &mut p, &mut s)
@@ -705,7 +705,7 @@ mod tests {
             560.0,
             700.0,
             2.0,
-            crate::theme::BONE3,
+            crate::theme::BONE3(),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 show(ui.ctx(), &mut p, &mut s)

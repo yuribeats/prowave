@@ -74,7 +74,7 @@ pub fn show(
             Face::Bold,
             11.0,
             0.05,
-            theme::INK2,
+            theme::INK2(),
         );
     }
 
@@ -182,7 +182,7 @@ pub fn show(
         let is_selected = *selected == Some(i);
         let cap = block.intersect(lane.expand2(vec2(4.0, 0.0)));
         if is_selected {
-            hw_tracks::plate(&g, cap, theme::ORANGE, true);
+            hw_tracks::plate(&g, cap, theme::ORANGE(), true);
         } else if current {
             hw_tracks::plate(&g, cap, m.color, true);
         } else {
@@ -195,7 +195,7 @@ pub fn show(
                 m.color,
             );
         }
-        hw_tracks::time_line(&g, x0, lane.top()..=lane.bottom(), 2.0, theme::INK);
+        hw_tracks::time_line(&g, x0, lane.top()..=lane.bottom(), 2.0, theme::INK());
         let text_x = x0.max(lane.left()) + 11.0;
         if text_x + 10.0 < x1 {
             let clip = g.with_clip_rect(block.shrink(1.0).intersect(lane));
@@ -208,9 +208,13 @@ pub fn show(
                 12.0,
                 0.1,
                 if is_selected || current {
-                    theme::text_on(if is_selected { theme::ORANGE } else { m.color })
+                    theme::text_on(if is_selected {
+                        theme::ORANGE()
+                    } else {
+                        m.color
+                    })
                 } else {
-                    theme::BONE_HI
+                    theme::pick(theme::BONE_HI(), theme::ON_DARK())
                 },
             );
         }

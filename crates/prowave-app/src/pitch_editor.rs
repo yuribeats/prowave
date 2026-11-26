@@ -1082,12 +1082,30 @@ impl Clock {
 
 // The Hardware look: the notes on the arrange floor (rows of bone, the key's notes lighter),
 // black note blobs with a bone pitch curve, selected ones in signal orange.
-const ROW_IN: Color32 = theme::GRID_BG;
-const ROW_OUT: Color32 = theme::BONE3;
-const TEXT: Color32 = theme::INK;
-const BLOB: Color32 = theme::REGION;
-const CURVE: Color32 = theme::ON_DARK;
-const CURVE_SEL: Color32 = theme::ORANGE;
+#[allow(non_snake_case)]
+fn ROW_IN() -> Color32 {
+    theme::GRID_BG()
+}
+#[allow(non_snake_case)]
+fn ROW_OUT() -> Color32 {
+    theme::BONE3()
+}
+#[allow(non_snake_case)]
+fn TEXT() -> Color32 {
+    theme::INK()
+}
+#[allow(non_snake_case)]
+fn BLOB() -> Color32 {
+    theme::REGION()
+}
+#[allow(non_snake_case)]
+fn CURVE() -> Color32 {
+    theme::ON_DARK()
+}
+#[allow(non_snake_case)]
+fn CURVE_SEL() -> Color32 {
+    theme::ORANGE()
+}
 /// The key column at the left, the bar ruler on top, the LCD status bar at the bottom.
 const RULER_W: f32 = 46.0;
 const TIME_H: f32 = 30.0;
@@ -1118,7 +1136,7 @@ fn tab_key(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
         egui::Align2::CENTER_CENTER,
         label,
         12.0,
-        theme::INK,
+        theme::INK(),
     );
     resp
 }
@@ -1158,7 +1176,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             egui::Align2::CENTER_CENTER,
             tr("Double-click an audio region to edit its notes"),
             14.0,
-            theme::PRINT,
+            theme::PRINT(),
         );
         return;
     };
@@ -1229,7 +1247,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             "PITCH EDITOR",
             Face::SilkX,
             14.0,
-            TEXT,
+            TEXT(),
         );
         let name = p.tracks[t].regions[r].name.to_uppercase();
         let name = hw::fit(&g, &name, Face::Lcd, 9.0, w.width() - 8.0);
@@ -1294,11 +1312,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         let mut row = row_ui(ui, rr);
         let ui = &mut row;
         group(ui, by, tr("Correct Pitch"), |ui| {
-            hk::silk(ui, tr("Centre"), 11.0, theme::INK2);
+            hk::silk(ui, tr("Centre"), 11.0, theme::INK2());
             hk::slider(ui, "pitch-centre", 96.0, &mut v.centre, 0.0, 1.0, false);
             hk::readout(ui, &pct(v.centre), 56.0);
             ui.add_space(6.0);
-            hk::silk(ui, tr("Drift"), 11.0, theme::INK2);
+            hk::silk(ui, tr("Drift"), 11.0, theme::INK2());
             hk::slider(ui, "pitch-drift", 96.0, &mut v.drift, 0.0, 1.0, false);
             hk::readout(ui, &pct(v.drift), 56.0);
             correct = hk::row_key(ui, tr("Apply"), Cap::Dark, false, None).clicked();
@@ -1322,7 +1340,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             });
             v.grid = grid;
             ui.add_space(6.0);
-            hk::silk(ui, tr("Strength"), 11.0, theme::INK2);
+            hk::silk(ui, tr("Strength"), 11.0, theme::INK2());
             hk::slider(ui, "pitch-strength", 96.0, &mut v.strength, 0.0, 1.0, false);
             hk::readout(ui, &pct(v.strength), 56.0);
             quantize = hk::row_key(ui, tr("Apply"), Cap::Dark, false, None).clicked();
@@ -1378,7 +1396,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             egui::Align2::CENTER_CENTER,
             &msg,
             14.0,
-            theme::INK2,
+            theme::INK2(),
         );
         return;
     };
@@ -1398,7 +1416,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     v.plot = plot;
     // The floor, the key column at the left (a recessed strip of piano keys) and the bar ruler
     // on top.
-    g.rect_filled(plot, 0.0, ROW_OUT);
+    g.rect_filled(plot, 0.0, ROW_OUT());
     let keys = Rect::from_min_max(
         pos2(canvas.left(), plot.top()),
         pos2(plot.left() - 3.0, plot.bottom()),
@@ -1407,10 +1425,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     g.rect_filled(
         Rect::from_min_max(canvas.min, pos2(plot.left(), plot.bottom())),
         0.0,
-        theme::BONE,
+        theme::BONE(),
     );
     hw::recess(&g, keys, 0.0);
-    hw::gradient(&g, bars, 0.0, theme::BONE_HI, theme::BONE);
+    hw::gradient(&g, bars, 0.0, theme::BONE_HI(), theme::BONE());
     hw::seam_v(&g, plot.left() - 3.0, plot.y_range());
     // Fit the view to the region the first time it is shown.
     let key = (t, r, file.path.clone());
@@ -1483,13 +1501,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         g.rect_filled(
             row.intersect(plot),
             0.0,
-            if in_key { ROW_IN } else { ROW_OUT },
+            if in_key { ROW_IN() } else { ROW_OUT() },
         );
         if pc == 0 && pitched {
             g.hline(
                 plot.x_range(),
                 (y0 + row_h).round() - 0.5,
-                Stroke::new(1.0, theme::INK.gamma_multiply(0.25)),
+                Stroke::new(1.0, theme::INK().gamma_multiply(0.25)),
             );
         }
         // The key: bone for a white key, ink for a black one, a seam between.
@@ -1507,15 +1525,15 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                         nw: 0,
                         sw: 0,
                     },
-                    theme::INK,
+                    theme::INK(),
                 );
             } else {
-                gk.rect_filled(key, 0.0, theme::BONE_HI);
+                gk.rect_filled(key, 0.0, theme::BONE_HI());
             }
             gk.hline(
                 key.x_range(),
                 (y0 + row_h).round() - 0.5,
-                Stroke::new(1.0, theme::SEAM),
+                Stroke::new(1.0, theme::SEAM()),
             );
         }
         let label = if pitched {
@@ -1530,13 +1548,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             && (pitched || (m - line as i32) % 2 == 0)
         {
             let (color, x) = if black && pitched {
-                (theme::ON_DARK_DIM, key.right() - 15.0)
+                (theme::ON_DARK_DIM(), key.right() - 15.0)
             } else {
                 (
                     if pc == 0 || !pitched {
-                        theme::INK
+                        theme::INK()
                     } else {
-                        theme::INK2
+                        theme::INK2()
                     },
                     key.right() - 4.0,
                 )
@@ -1566,14 +1584,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 plot.y_range(),
                 Stroke::new(
                     1.0,
-                    theme::INK.gamma_multiply(if bar { 0.32 } else { 0.10 }),
+                    theme::INK().gamma_multiply(if bar { 0.32 } else { 0.10 }),
                 ),
             );
             if bar {
                 g.vline(
                     x,
                     canvas.top() + 16.0..=plot.top(),
-                    Stroke::new(1.0, theme::INK2),
+                    Stroke::new(1.0, theme::INK2()),
                 );
                 hw::text(
                     &g,
@@ -1582,13 +1600,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                     &format!("{:03}", bar_no.round() as i64 + 1),
                     Face::Bold,
                     12.0,
-                    TEXT,
+                    TEXT(),
                 );
             } else {
                 g.vline(
                     x,
                     plot.top() - 7.0..=plot.top(),
-                    Stroke::new(1.0, theme::INK2.gamma_multiply(0.7)),
+                    Stroke::new(1.0, theme::INK2().gamma_multiply(0.7)),
                 );
             }
             b += 1.0;
@@ -1604,7 +1622,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             g.rect_filled(
                 Rect::from_x_y_ranges(xa..=xb, canvas.top()..=canvas.top() + 5.0),
                 0.0,
-                theme::ORANGE,
+                theme::ORANGE(),
             );
         }
     }
@@ -1618,12 +1636,12 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             Rect::from_x_y_ranges(x.max(plot.left())..=plot.right(), plot.y_range())
         };
         if shade.width() > 0.0 {
-            g.rect_filled(shade, 0.0, theme::INK.gamma_multiply(0.10));
+            g.rect_filled(shade, 0.0, theme::INK().gamma_multiply(0.10));
         }
         if x > plot.left() + 1.0 && x < plot.right() {
             g.extend(Shape::dashed_line(
                 &[pos2(x, plot.top()), pos2(x, plot.bottom())],
-                Stroke::new(1.0, theme::INK2),
+                Stroke::new(1.0, theme::INK2()),
                 4.0,
                 3.0,
             ));
@@ -1885,13 +1903,13 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             pos2(x0 + 0.5, yc - body_h / 2.0),
             pos2(x1.max(x0 + 3.0) - 0.5, yc + body_h / 2.0),
         );
-        g.rect_filled(body, 3.0, BLOB);
+        g.rect_filled(body, 3.0, BLOB());
         if pts.len() >= 2 {
             let gb = g.with_clip_rect(body.shrink(1.0).intersect(g.clip_rect()));
             let shade = if sel {
                 Color32::from_rgb(0x4a, 0x2a, 0x1a)
             } else {
-                theme::CAP_TOP
+                theme::CAP_TOP()
             };
             let mut mesh = egui::epaint::Mesh::default();
             for (x, h) in &pts {
@@ -1910,28 +1928,28 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             g.hline(
                 body.x_range().shrink(2.0),
                 body.top() + 1.5,
-                Stroke::new(2.0, theme::ORANGE),
+                Stroke::new(2.0, theme::ORANGE()),
             );
         }
         g.rect_stroke(
             body,
             3.0,
             if sel {
-                Stroke::new(1.5, theme::ORANGE)
+                Stroke::new(1.5, theme::ORANGE())
             } else {
-                Stroke::new(1.0, theme::INK)
+                Stroke::new(1.0, theme::INK())
             },
             egui::StrokeKind::Inside,
         );
         // A note split from the one before it: a bone cut at the join.
         if i > 0 && connected(&shown[i - 1], n) {
-            g.vline(x0, body.y_range(), Stroke::new(2.0, theme::BONE_HI));
+            g.vline(x0, body.y_range(), Stroke::new(2.0, theme::BONE_HI()));
             g.line_segment(
                 [
                     pos2(x0 - 3.0, body.top() - 3.0),
                     pos2(x0 + 3.0, body.top() + 2.0),
                 ],
-                Stroke::new(1.0, theme::INK2),
+                Stroke::new(1.0, theme::INK2()),
             );
         }
         // The pitch curve, as it will sound: solid inside the note, faint and dotted where it
@@ -1946,7 +1964,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 })
                 .collect();
             let inside = body.shrink2(egui::vec2(0.0, 1.5));
-            let color = if sel { CURVE_SEL } else { CURVE };
+            let color = if sel { CURVE_SEL() } else { CURVE() };
             for w in line.windows(2) {
                 if (w[1].x - w[0].x).abs() >= 12.0 {
                     continue;
@@ -1959,7 +1977,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 } else {
                     g.extend(Shape::dotted_line(
                         &[w[0], w[1]],
-                        theme::TEXT_DIM.gamma_multiply(0.4),
+                        theme::TEXT_DIM().gamma_multiply(0.4),
                         2.0,
                         0.6,
                     ));
@@ -1969,7 +1987,10 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         // The formant beam (Formant Tool) and the level (Amplitude Tool).
         if v.tool == Tool::Formant || n.formant.abs() > 0.01 {
             let yb = yc - row_h.max(6.0) * 0.9 - n.formant * row_h * 0.25;
-            g.line_segment([pos2(x0, yb), pos2(x1, yb)], Stroke::new(2.0, theme::INK2));
+            g.line_segment(
+                [pos2(x0, yb), pos2(x1, yb)],
+                Stroke::new(2.0, theme::INK2()),
+            );
         }
         if v.tool == Tool::Amplitude && sel {
             hw::text(
@@ -1979,7 +2000,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 &format!("{:+.1} dB", n.gain_db),
                 Face::Bold,
                 10.5,
-                TEXT,
+                TEXT(),
             );
         }
     }
@@ -1988,8 +2009,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     if ph >= scroll {
         let x = x_of(ph);
         if x >= plot.left() && x <= plot.right() {
-            g.vline(x, plot.y_range(), Stroke::new(4.0, theme::INK));
-            g.vline(x, plot.y_range(), Stroke::new(2.0, theme::ORANGE));
+            g.vline(x, plot.y_range(), Stroke::new(4.0, theme::INK()));
+            g.vline(x, plot.y_range(), Stroke::new(2.0, theme::ORANGE()));
             // The head on the ruler.
             let y = plot.top() - 1.0;
             g.add(Shape::convex_polygon(
@@ -2000,14 +2021,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                     pos2(x, y),
                     pos2(x - 7.0, y - 6.0),
                 ],
-                theme::ORANGE,
-                Stroke::new(1.0, theme::INK),
+                theme::ORANGE(),
+                Stroke::new(1.0, theme::INK()),
             ));
         }
     }
     // The status bar: an LCD with a cell per value of the selected note.
     let status = Rect::from_min_max(pos2(canvas.left(), plot.bottom()), canvas.max);
-    g.rect_filled(status, 0.0, theme::BONE);
+    g.rect_filled(status, 0.0, theme::BONE());
     let glass = hw::lcd(&g, status.shrink2(egui::vec2(2.0, 2.0)));
     let cells: Vec<(&str, String)> = match v.selected.as_slice() {
         [i] => match shown.get(*i) {
@@ -2046,7 +2067,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             label,
             Face::Lcd,
             8.0,
-            theme::LCD_INK.gamma_multiply(0.7),
+            theme::LCD_INK().gamma_multiply(0.7),
         );
         let h = (glass.height() - 10.0).clamp(8.0, 15.0);
         hw::seg(
@@ -2057,14 +2078,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             ),
             value,
             h,
-            theme::LCD_INK,
+            theme::LCD_INK(),
             true,
         );
         if i > 0 {
             g.vline(
                 x,
                 glass.y_range().shrink(5.0),
-                Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.25)),
+                Stroke::new(1.0, theme::LCD_INK().gamma_multiply(0.25)),
             );
         }
     }
@@ -2115,7 +2136,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             &busy.to_uppercase(),
             Face::Lcd,
             10.0,
-            theme::LCD_INK,
+            theme::LCD_INK(),
         );
     }
     if let Some(list) = commit_notes {
@@ -2305,7 +2326,7 @@ mod tests {
             1400.0,
             460.0,
             2.0,
-            theme::BG,
+            theme::BG(),
             |ui| {
                 theme::apply(ui.ctx());
                 show(ui, &mut p, &mut s)
@@ -2334,7 +2355,7 @@ mod tests {
                 1400.0,
                 520.0,
                 1.0,
-                theme::BG,
+                theme::BG(),
                 |ui| {
                     theme::apply(ui.ctx());
                     show(ui, &mut p, &mut s)

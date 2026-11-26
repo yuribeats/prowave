@@ -23,7 +23,7 @@ fn row_label(ui: &mut Ui, text: &str) {
         Align2::RIGHT_CENTER,
         caption(text),
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
 }
 
@@ -340,7 +340,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                     &tr("MIDI Transform").to_uppercase(),
                     Face::SilkX,
                     14.0,
-                    theme::INK,
+                    theme::INK(),
                 );
                 for c in [
                     r.left_top() + vec2(13.0, 19.0),
@@ -362,7 +362,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                     Legend::Custom,
                 );
                 let c = face.center();
-                let st = egui::Stroke::new(1.6, theme::INK);
+                let st = egui::Stroke::new(1.6, theme::INK());
                 g.line_segment([c + vec2(-4.0, -4.0), c + vec2(4.0, 4.0)], st);
                 g.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], st);
                 if resp.clicked() {
@@ -433,7 +433,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                 &label,
                 Face::Lcd,
                 9.5,
-                theme::LCD_INK.gamma_multiply(0.75),
+                theme::LCD_INK().gamma_multiply(0.75),
             );
             let digits = count.min(9999).to_string();
             let h = 17.0;
@@ -445,7 +445,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                 ),
                 &digits,
                 h,
-                theme::LCD_INK,
+                theme::LCD_INK(),
                 true,
             );
             let apply_r =

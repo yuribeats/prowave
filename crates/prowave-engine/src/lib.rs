@@ -30,6 +30,7 @@ pub mod duplex;
 mod flex;
 mod fx;
 mod gain_smoothing;
+pub mod live_groove;
 #[cfg(not(target_arch = "wasm32"))]
 mod mapped;
 pub mod melody;
@@ -117,6 +118,7 @@ pub use crate::fx::{
     eq_response_db, response_db, Chain, Fx, FxKind, ParamInfo, Pdc, AMP_CABS, AMP_MODELS,
     MAX_FX_PARAMS, MAX_INSERTS,
 };
+pub use crate::live_groove::LiveGroove;
 pub use crate::melody::{Algorithm, Blob, NoteAnalysis};
 pub use crate::monitor::{InputFeed, MonitorTrack, MAX_MONITORS};
 pub use crate::mtc::{

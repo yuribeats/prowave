@@ -440,9 +440,12 @@ static UPDATED: AtomicBool = AtomicBool::new(false);
 static STATUS: Mutex<Option<String>> = Mutex::new(None);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
+/// The classes of the bundles in `scans` that are still on disk: a bundle moved to the
+/// Trash since the cache was written is not offered while the next scan runs.
 fn classes_of(scans: &[BundleScan]) -> Vec<Vst3Entry> {
     scans
         .iter()
+        .filter(|s| Path::new(&s.path).exists())
         .flat_map(|s| s.classes.iter().cloned())
         .collect()
 }
@@ -916,6 +919,27 @@ pub fn run_check_all(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cached bundle that is gone from disk gives no classes.
+    #[test]
+    fn cached_bundles_gone_from_disk_are_left_out() {
+        let dir = std::env::temp_dir().join(format!("pw-vst3-gone-{}", std::process::id()));
+        let here = dir.join("Here.vst3");
+        std::fs::create_dir_all(&here).unwrap();
+        let gone = dir.join("Gone.vst3");
+        let scan = |p: &Path, id: &str| BundleScan {
+            path: p.to_string_lossy().to_string(),
+            mtime: 1,
+            classes: vec![entry(id, &p.to_string_lossy())],
+            error: None,
+        };
+        let ids: Vec<String> = classes_of(&[scan(&here, "vst3:AA"), scan(&gone, "vst3:BB")])
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, ["vst3:AA"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn entry(id: &str, path: &str) -> Vst3Entry {
         Vst3Entry {

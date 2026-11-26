@@ -47,7 +47,10 @@ pub(crate) fn tabs(ui: &Ui, g: &Painter, bar: Rect, s: &mut UiState) -> Rect {
     let mut used = Rect::from_min_size(pos2(x, cy - 14.0), vec2(0.0, 28.0));
     for (markers, label) in [(false, tr("Event")), (true, tr("Marker"))] {
         let text = label.to_uppercase();
-        let w = hw::galley(g, &text, Face::Bold, 12.0, theme::INK).size().x + 30.0;
+        let w = hw::galley(g, &text, Face::Bold, 12.0, theme::INK())
+            .size()
+            .x
+            + 30.0;
         let rect = Rect::from_min_size(pos2(x, cy - 14.0), vec2(w, 28.0));
         let on = s.lists.markers == markers;
         let (resp, _) = hw::key(
@@ -111,7 +114,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             &shown,
             Face::Silk,
             10.0,
-            theme::INK2,
+            theme::INK2(),
         );
     };
     head(COL_POS, Align2::RIGHT_CENTER, tr("Position"), 90.0);
@@ -161,14 +164,14 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         }
         let selected = s.tracks.selected_marker == Some(i);
         if selected {
-            gl.rect_filled(row, 0.0, theme::ORANGE.gamma_multiply(0.25));
+            gl.rect_filled(row, 0.0, theme::ORANGE().gamma_multiply(0.25));
             gl.rect_filled(
                 Rect::from_min_size(row.min, vec2(4.0, ROW_H)),
                 0.0,
-                theme::ORANGE,
+                theme::ORANGE(),
             );
         } else if i % 2 == 1 {
-            gl.rect_filled(row, 0.0, theme::ON_DARK.gamma_multiply(0.035));
+            gl.rect_filled(row, 0.0, theme::ON_DARK().gamma_multiply(0.035));
         }
         let m = &p.markers[i];
         let cy = row.center().y;
@@ -181,7 +184,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 &shown,
                 Face::Bold,
                 10.5,
-                theme::ON_DARK,
+                theme::ON_DARK(),
             );
         };
         // The marker's colour, as a chip before its name.

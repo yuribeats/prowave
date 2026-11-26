@@ -80,11 +80,16 @@ pub struct EngineSync {
     externals: Vec<bool>,
     /// The Arpeggiator the engine has for the keys played live on each track, by track.
     arps: Vec<Option<prowave_engine::ArpSettings>>,
+    /// What each track's Groove Live table was made for (song revision, cycle, setting), or
+    /// `None`: the track has none.
+    live_grooves: Vec<Option<LiveGrooveKey>>,
     /// The controller changes the engine has.
     controls: Vec<ControlEvent>,
     /// MIDI Time Code as the engine was last told: on, frame rate, project start in frames.
     mtc: Option<(bool, prowave_engine::SmpteRate, i64)>,
     song_rev: Option<u64>,
+    /// The cycle the notes were made for, while a track follows a rack ([`follow_key`]).
+    follow: Option<(bool, u64, u64)>,
     /// Audio layout of the song last sent with `SetSong`.
     layout: Option<AudioLayout>,
     /// The effects, routes and automation the engine has, by track.
@@ -771,6 +776,9 @@ fn song_notes(p: &Project) -> Vec<NoteEvent> {
             let live_arp = p.recording && crate::midi_fx::live_arp(&t.midi_fx).is_some();
             // Where the track's regions end: a latched Arpeggiator plays on until there.
             let mut end = 0.0f64;
+            // Groove Q pulls each region's notes toward the rack's groove.
+            let gq = crate::rack_follow::groove_q(p, ti);
+            let gq = gq.as_ref();
             let mut notes: Vec<NoteEvent> = t
                 .regions
                 .iter()
@@ -782,25 +790,52 @@ fn song_notes(p: &Project) -> Vec<NoteEvent> {
                     for (origin, span) in &plays {
                         end = end.max(p.region_end_beats(r).max(origin + span.unwrap_or(0.0)));
                     }
-                    plays
-                        .into_iter()
-                        .flat_map(move |(origin, span)| played_notes(t, r, origin, span, track))
+                    plays.into_iter().flat_map(move |(origin, span)| {
+                        let mut n = played_notes(t, r, origin, span, track);
+                        if let Some(g) = gq {
+                            let strength = crate::rack_follow::groove_q_of(t, r);
+                            g.apply(&mut n, strength, crate::rack_follow::grid_of(r), |b| {
+                                p.bar_start(b)
+                            });
+                        }
+                        n
+                    })
                 })
                 .collect();
+            // Following a Channel Rack takes the place of following the Groove Track.
+            let rack = t.params.follow_rack.on;
             if let Some(g) = groove
                 .as_ref()
-                .filter(|_| t.params.follow_groove && !t.params.groove)
+                .filter(|_| t.params.follow_groove && !t.params.groove && !rack)
             {
                 crate::groove::apply(&mut notes, g);
             }
             // The track's MIDI FX change what it plays.
-            if t.midi_fx.iter().any(|s| s.on) {
+            let mut notes = if t.midi_fx.iter().any(|s| s.on) {
                 crate::midi_fx::apply_until(&t.midi_fx, notes, end)
             } else {
                 notes
+            };
+            // What it plays takes the feel of the rack it follows (an Arpeggiator's notes too).
+            if rack {
+                crate::rack_follow::apply(p, ti, &mut notes);
             }
+            notes
         })
         .collect()
+}
+
+/// What a Groove Live table is made for: the song revision, the cycle and the setting.
+type LiveGrooveKey = (
+    u64,
+    Option<(bool, u64, u64)>,
+    crate::rack_follow::FollowRack,
+);
+
+/// What the song's notes depend on besides `song_rev`: while a track follows a Channel Rack,
+/// the cycle (a note is never moved before the cycle's start).
+fn follow_key(p: &Project) -> Option<(bool, u64, u64)> {
+    crate::rack_follow::any(p).then(|| (p.cycle, p.cycle_start.to_bits(), p.cycle_end.to_bits()))
 }
 
 /// What the engine's streamed audio depends on: the track count and each playing audio
@@ -970,9 +1005,11 @@ impl EngineSync {
             soundfonts: Vec::new(),
             externals: Vec::new(),
             arps: Vec::new(),
+            live_grooves: Vec::new(),
             controls: Vec::new(),
             mtc: None,
             song_rev: None,
+            follow: None,
             layout: None,
             fx: Vec::new(),
             master_fx: Vec::new(),
@@ -1029,10 +1066,13 @@ impl EngineSync {
         // lengths). Re-streaming audio reopens every file and briefly drops it out, so swap
         // only the notes unless the audio layout itself changed, and while playing wait for
         // a tempo being dragged to rest.
-        if self.song_rev != Some(p.song_rev) || retempo {
+        let follow = follow_key(p);
+        let refollow = follow != self.follow;
+        if self.song_rev != Some(p.song_rev) || retempo || refollow {
             let layout = audio_layout(p);
             let sent = if self.layout.as_ref() == Some(&layout) {
-                self.song_rev == Some(p.song_rev) || self.send(Command::set_notes(song_notes(p)))
+                (self.song_rev == Some(p.song_rev) && !refollow)
+                    || self.send(Command::set_notes(song_notes(p)))
             } else if !self.ready() {
                 // The files are not opened for a song the engine would refuse.
                 false
@@ -1050,6 +1090,7 @@ impl EngineSync {
             if sent {
                 self.song_rev = Some(p.song_rev);
                 self.layout_tempo = Some(key.clone());
+                self.follow = follow;
             }
         }
         let controls = song_controls(p);
@@ -1228,6 +1269,31 @@ impl EngineSync {
             }
             self.arps.resize(self.arps.len().max(i + 1), None);
             self.arps[i] = arp;
+        }
+        // Groove Live of each track (keys played live wait for a late groove step), made again
+        // when the song or the cycle changes.
+        let cycle = follow_key(p);
+        for i in 0..p.tracks.len().max(self.live_grooves.len()).min(MAX_TRACKS) {
+            let want = p.tracks.get(i).and_then(|t| {
+                let f = t.params.follow_rack;
+                (f.live && f.groove_q > 0 && t.kind != TrackKind::Audio)
+                    .then_some((p.song_rev, cycle, f))
+            });
+            if self.live_grooves.get(i).copied().flatten() == want {
+                continue;
+            }
+            let groove = want
+                .and_then(|_| crate::rack_follow::live_groove(p, i))
+                .map(Box::new);
+            if !self.send(Command::SetTrackLiveGroove {
+                track: i as u16,
+                groove,
+            }) {
+                break;
+            }
+            self.live_grooves
+                .resize(self.live_grooves.len().max(i + 1), None);
+            self.live_grooves[i] = want;
         }
         self.sync_strips(p);
         // Mixer moves. Until a song is accepted, its `SetSong` carries the mix instead.

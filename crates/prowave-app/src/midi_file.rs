@@ -473,8 +473,9 @@ fn ticks(beats: f64, ppq: u16) -> u64 {
 }
 
 /// What the project's MIDI plays, as a file (see the module description). When `only` names a
-/// track and region, just that region.
-pub fn export(p: &Project, only: Option<(usize, usize)>) -> MidiFile {
+/// track and region, just that region. The notes of tracks following a Channel Rack are moved
+/// to its feel (`follow`, as they play) or where they are stored (on the straight grid).
+pub fn export_with(p: &Project, only: Option<(usize, usize)>, follow: bool) -> MidiFile {
     let ppq = EXPORT_PPQ;
     let mut file = MidiFile {
         ppq,
@@ -523,6 +524,7 @@ pub fn export(p: &Project, only: Option<(usize, usize)>) -> MidiFile {
             ..FileTrack::default()
         };
         let mut played = Vec::new();
+        let groove_q = crate::rack_follow::groove_q(p, ti);
         // Where the regions written end (a latched Arpeggiator plays on until there).
         let mut end = 0.0f64;
         for (ri, r) in t.regions.iter().enumerate() {
@@ -532,9 +534,15 @@ pub fn export(p: &Project, only: Option<(usize, usize)>) -> MidiFile {
             // A looped region is written out with its repeats.
             for (origin, span) in crate::engine_sync::plays_of(p, r) {
                 end = end.max(p.region_end_beats(r).max(origin + span.unwrap_or(0.0)));
-                played.extend(crate::engine_sync::played_notes(
-                    t, r, origin, span, ti as u16,
-                ));
+                let mut notes = crate::engine_sync::played_notes(t, r, origin, span, ti as u16);
+                // Groove Q, as it plays (with the option on).
+                if let Some(g) = groove_q.as_ref().filter(|_| follow) {
+                    let strength = crate::rack_follow::groove_q_of(t, r);
+                    g.apply(&mut notes, strength, crate::rack_follow::grid_of(r), |b| {
+                        p.bar_start(b)
+                    });
+                }
+                played.extend(notes);
                 for c in r
                     .controls
                     .iter()
@@ -548,8 +556,12 @@ pub fn export(p: &Project, only: Option<(usize, usize)>) -> MidiFile {
                 }
             }
         }
-        // What the track's MIDI FX make of them.
-        for n in crate::midi_fx::apply_until(&t.midi_fx, played, end) {
+        // What the track's MIDI FX make of them, with the feel of the rack it follows.
+        let mut played = crate::midi_fx::apply_until(&t.midi_fx, played, end);
+        if follow {
+            crate::rack_follow::apply(p, ti, &mut played);
+        }
+        for n in played {
             track.notes.push(FileNote {
                 start: ticks(n.start_beat, ppq),
                 len: ticks(n.end_beat, ppq)
@@ -697,13 +709,15 @@ pub fn import_path_at(p: &mut Project, path: &std::path::Path, at: f64) -> Resul
     }
 }
 
-/// Writes the project's MIDI (or one region's) to `path`.
-pub fn export_path(
+/// Writes the project's MIDI (or one region's) to `path`, the tracks following a Channel Rack
+/// with its feel (`follow`, as they play) or as stored.
+pub fn export_path_with(
     p: &Project,
     only: Option<(usize, usize)>,
     path: &std::path::Path,
+    follow: bool,
 ) -> Result<(), String> {
-    let file = export(p, only);
+    let file = export_with(p, only, follow);
     if file.tracks.is_empty() {
         return Err("there are no notes to write".into());
     }
@@ -994,7 +1008,7 @@ mod tests {
         p.set_tempo_ramp(1, false);
         p.set_signature_from(5, (3, 4));
         p.tracks[0].regions[0].params.transpose = 12;
-        let all = export(&p, None);
+        let all = export_with(&p, None, true);
         let bytes = write(&all);
         let back = parse(&bytes).unwrap();
         assert_eq!(back.tempos[0], (0, 100.0));
@@ -1012,7 +1026,7 @@ mod tests {
         let first = &back.tracks[0];
         assert!(first.notes.iter().any(|n| n.pitch == low + 12));
         // Only a region.
-        let one = export(&p, Some((0, 0)));
+        let one = export_with(&p, Some((0, 0)), true);
         assert_eq!(one.tracks.len(), 1);
         // A drum track is on channel 10.
         let d = p
@@ -1020,11 +1034,11 @@ mod tests {
             .iter()
             .position(|t| t.kind == TrackKind::Drummer)
             .unwrap();
-        let drums = export(&p, Some((d, 0)));
+        let drums = export_with(&p, Some((d, 0)), true);
         assert_eq!(drums.tracks[0].channel, DRUM_CHANNEL);
         // A curve is written as steps.
         p.set_tempo_ramp(0, true);
-        let curved = export(&p, None);
+        let curved = export_with(&p, None, true);
         assert!(curved.tempos.len() > all.tempos.len() + 10);
     }
 
@@ -1033,7 +1047,7 @@ mod tests {
         let mut p = Project::empty();
         p.tracks.clear();
         import(&mut p, &song());
-        let out = export(&p, None);
+        let out = export_with(&p, None, true);
         let mut a: Vec<FileNote> = song().tracks[0].notes.clone();
         let mut b: Vec<FileNote> = out.tracks[0].notes.clone();
         a.sort_by_key(|n| (n.start, n.pitch));
@@ -1150,7 +1164,7 @@ mod tests {
         assert!((p.tempo_at(8.5) - 96.0).abs() < 1e-3);
         assert_eq!(p.tracks[0].regions[0].notes.len(), 2);
         // And back out as a file that reads the same.
-        let out = parse(&write(&export(&p, None))).unwrap();
+        let out = parse(&write(&export_with(&p, None, true))).unwrap();
         assert_eq!(out.tracks[0].notes, t.notes);
         assert_eq!(out.signatures, m.signatures);
     }
@@ -1189,7 +1203,7 @@ mod tests {
         p.tracks.clear();
         assert_eq!(import_path(&mut p, &path), Ok(1));
         let out = dir.path().join("out.mid");
-        export_path(&p, None, &out).unwrap();
+        export_path_with(&p, None, &out, true).unwrap();
         assert!(parse(&std::fs::read(&out).unwrap()).is_ok());
         // Things that go wrong say so instead of doing nothing.
         let missing = dir.path().join("nope.mid");
@@ -1200,10 +1214,12 @@ mod tests {
         let mut none = empty.clone();
         none.tracks.clear();
         assert!(
-            export_path(&none, None, &dir.path().join("x.mid")).is_err(),
+            export_path_with(&none, None, &dir.path().join("x.mid"), true).is_err(),
             "no notes to write"
         );
-        assert!(export_path(&p, None, &dir.path().join("no/such/folder/x.mid")).is_err());
+        assert!(
+            export_path_with(&p, None, &dir.path().join("no/such/folder/x.mid"), true).is_err()
+        );
     }
 
     fn one_track_file(ppq: u16, body: &[u8]) -> Vec<u8> {
@@ -1254,7 +1270,7 @@ mod tests {
                 );
             }
         }
-        let _ = write(&export(&p, None));
+        let _ = write(&export_with(&p, None, true));
 
         // A hundred thousand tempo and signature changes: a few thousand are taken, quickly.
         let mut t: Vec<u8> = Vec::new();

@@ -826,7 +826,6 @@ impl<'a> Lookup<'a> {
 }
 
 /// Reads the kit in `root`.
-#[cfg(test)]
 pub fn read_kit(root: &Path) -> Kit {
     list_kit_until(root, &AtomicBool::new(false)).kit(root)
 }

@@ -1,5 +1,5 @@
 //! PW-1 hardware parts for the effect and plug-in windows: a bone chassis, black and one
-//! signal orange. Keycaps with LEDs, knurled knobs with printed tick scales, LCD glass with
+//! signal orange. Keycaps with LEDs, knurled knobs with printed tick scales, LCD() glass with
 //! drawn seven-segment digits, black meter wells and LED ladders, all painted here so every
 //! effect window reads as a piece of gear. Values follow DIRECTIONS.md (direction A).
 use crate::hw;
@@ -43,7 +43,7 @@ pub fn silk_heavy(size: f32) -> FontId {
 pub fn mono_font(size: f32) -> FontId {
     theme::font(Face::Bold, size)
 }
-/// LCD text.
+/// LCD() text.
 pub fn mono_heavy(size: f32) -> FontId {
     theme::font(Face::Lcd, size)
 }
@@ -146,7 +146,7 @@ pub fn legend(
 
 /// Width `text` takes as a legend.
 pub fn legend_width(p: &Painter, text: &str, size: f32) -> f32 {
-    galley(p, &legend_case(text), mono_font(size), INK, 0.04)
+    galley(p, &legend_case(text), mono_font(size), INK(), 0.04)
         .size()
         .x
 }
@@ -352,7 +352,7 @@ pub fn well(p: &Painter, rect: Rect, r: f32) {
             pos2(rect.left() + r, rect.bottom() + 0.5),
             pos2(rect.right() - r, rect.bottom() + 0.5),
         ],
-        Stroke::new(1.0, BONE_HI),
+        Stroke::new(1.0, BONE_HI()),
     );
     grad_rect(
         p,
@@ -387,8 +387,15 @@ pub fn name_plate(p: &Painter, rect: Rect, badge: &str, name: &str, orange: bool
     if !badge.is_empty() {
         let bw = legend_width(p, badge, 10.0) + 8.0;
         let b = Rect::from_min_size(pos2(x, rect.center().y - 7.0), vec2(bw, 14.0));
-        p.rect_filled(b, 2.0, if orange { ORANGE } else { BONE });
-        legend(p, b.center(), Align2::CENTER_CENTER, badge, 10.0, INK);
+        p.rect_filled(b, 2.0, if orange { ORANGE() } else { theme::ON_DARK() });
+        legend(
+            p,
+            b.center(),
+            Align2::CENTER_CENTER,
+            badge,
+            10.0,
+            theme::ON_ACCENT(),
+        );
         x = b.right() + 7.0;
     }
     let shown = fit(p, name, 11.0, rect.right() - x - 6.0);
@@ -398,7 +405,7 @@ pub fn name_plate(p: &Painter, rect: Rect, badge: &str, name: &str, orange: bool
         Align2::LEFT_CENTER,
         &shown,
         11.0,
-        BONE,
+        theme::ON_DARK(),
     );
     if orange {
         p.line_segment(
@@ -406,7 +413,7 @@ pub fn name_plate(p: &Painter, rect: Rect, badge: &str, name: &str, orange: bool
                 pos2(rect.left(), rect.bottom() + 1.5),
                 pos2(rect.right(), rect.bottom() + 1.5),
             ],
-            Stroke::new(2.0, ORANGE),
+            Stroke::new(2.0, ORANGE()),
         );
     }
 }
@@ -634,7 +641,7 @@ pub fn paint_knob(p: &Painter, c: Pos2, d: f32, norm: f32, scale: bool, dim: boo
                     c + dir * (r + 4.0),
                     c + dir * (r + if major { 9.5 } else { 7.0 }),
                 ],
-                Stroke::new(if major { 1.8 } else { 1.1 }, INK2),
+                Stroke::new(if major { 1.8 } else { 1.1 }, INK2()),
             );
         }
     }
@@ -694,8 +701,8 @@ pub fn paint_knob(p: &Painter, c: Pos2, d: f32, norm: f32, scale: bool, dim: boo
     let ind = (d * 0.07).max(2.0);
     let tip = c + dir * (r - ind);
     let tail = c + dir * (r - ind - d * 0.38);
-    let col = if dim { alpha(ORANGE, 0.45) } else { ORANGE };
-    p.line_segment([tail, tip], Stroke::new(5.0, alpha(ORANGE, 0.18)));
+    let col = if dim { alpha(ORANGE(), 0.45) } else { ORANGE() };
+    p.line_segment([tail, tip], Stroke::new(5.0, alpha(ORANGE(), 0.18)));
     p.line_segment([tail, tip], Stroke::new(3.0, col));
 }
 
@@ -750,7 +757,7 @@ pub fn knob(
     KnobOut { resp, value, ended }
 }
 
-// ---------------------------------------------------------------- LCD and digits
+// ---------------------------------------------------------------- LCD() and digits
 
 /// The width `text` takes as seven-segment digits `h` high.
 pub fn seg7_width(text: &str, h: f32) -> f32 {
@@ -763,22 +770,22 @@ pub fn seg7(p: &Painter, pos: Pos2, text: &str, h: f32, on: Color32, ghost: bool
     hw::seg(p, pos, text, h, on, ghost)
 }
 
-/// The black bezel around LCD glass (with the glass).
+/// The black bezel around LCD() glass (with the glass).
 pub fn bezel(p: &Painter, rect: Rect) {
     hw::lcd(p, rect);
 }
 
-/// Green-grey LCD glass with faint scanlines.
+/// Green-grey LCD() glass with faint scanlines.
 pub fn glass(p: &Painter, rect: Rect) {
     hw::lcd_glass(p, rect);
 }
 
-/// A bezelled LCD; returns the glass.
+/// A bezelled LCD(); returns the glass.
 pub fn lcd(p: &Painter, rect: Rect) -> Rect {
     hw::lcd(p, rect)
 }
 
-/// A small label printed on LCD glass.
+/// A small label printed on LCD() glass.
 pub fn lcd_label(p: &Painter, pos: Pos2, align: Align2, text: &str) -> Rect {
     text_at(
         p,
@@ -786,12 +793,12 @@ pub fn lcd_label(p: &Painter, pos: Pos2, align: Align2, text: &str) -> Rect {
         align,
         &text.to_uppercase(),
         mono_font(9.0),
-        alpha(LCD_INK, 0.72),
+        alpha(LCD_INK(), 0.72),
         0.12,
     )
 }
 
-/// Heavy LCD text.
+/// Heavy LCD() text.
 pub fn lcd_text(p: &Painter, pos: Pos2, align: Align2, text: &str, size: f32) -> Rect {
     text_at(
         p,
@@ -799,7 +806,7 @@ pub fn lcd_text(p: &Painter, pos: Pos2, align: Align2, text: &str, size: f32) ->
         align,
         &text.to_uppercase(),
         mono_heavy(size),
-        LCD_INK,
+        LCD_INK(),
         0.02,
     )
 }
@@ -827,7 +834,7 @@ pub fn split_value(text: &str) -> (String, String) {
     }
 }
 
-/// A small LCD chip (VOL / PEAK style): `label` top left, the value in segments (or LCD
+/// A small LCD() chip (VOL / PEAK style): `label` top left, the value in segments (or LCD()
 /// text when it has letters) on the right, its unit after it.
 pub fn lcd_chip(p: &Painter, rect: Rect, label: &str, value: &str) {
     p.line_segment(
@@ -835,7 +842,7 @@ pub fn lcd_chip(p: &Painter, rect: Rect, label: &str, value: &str) {
             pos2(rect.left() + 3.0, rect.bottom() + 0.5),
             pos2(rect.right() - 3.0, rect.bottom() + 0.5),
         ],
-        Stroke::new(1.0, BONE_HI),
+        Stroke::new(1.0, BONE_HI()),
     );
     glass(p, rect);
     p.rect_stroke(
@@ -866,7 +873,7 @@ pub fn lcd_chip(p: &Painter, rect: Rect, label: &str, value: &str) {
     if !num.is_empty() {
         let w = seg7_width(&num, h);
         let left = (x - w).max(rect.left() + 3.0);
-        seg7(p, pos2(left, base - h), &num, h, LCD_INK, true);
+        seg7(p, pos2(left, base - h), &num, h, LCD_INK(), true);
     }
 }
 
@@ -889,7 +896,7 @@ pub fn ladder_h(p: &Painter, rect: Rect, level: f32, hot: f32, peak: Option<f32>
         let r = Rect::from_min_size(pos2(x, inner.top()), vec2(seg_w, inner.height()));
         let frac = i as f32 / n as f32;
         let on_col = if frac >= hot {
-            ORANGE
+            ORANGE()
         } else {
             rgb(0xF3, 0xE9, 0xDA)
         };
@@ -897,7 +904,7 @@ pub fn ladder_h(p: &Painter, rect: Rect, level: f32, hot: f32, peak: Option<f32>
         let col = if on { on_col } else { rgb(0x2B, 0x29, 0x26) };
         p.rect_filled(r, 0.5, col);
         if on && frac >= hot {
-            p.rect_filled(r.expand(1.0), 1.0, alpha(ORANGE, 0.15));
+            p.rect_filled(r.expand(1.0), 1.0, alpha(ORANGE(), 0.15));
         }
     }
 }
@@ -915,7 +922,7 @@ pub fn field(ui: &mut Ui, rect: Rect, id: Id, text: &str, enabled: bool) -> Resp
     );
     hw::paint_field(ui.painter(), rect, text, true, enabled && resp.hovered());
     if !enabled {
-        ui.painter().rect_filled(rect, 2.0, alpha(BONE, 0.35));
+        ui.painter().rect_filled(rect, 2.0, alpha(BONE(), 0.35));
     }
     if enabled {
         resp.on_hover_cursor(CursorIcon::PointingHand)
@@ -1000,11 +1007,11 @@ pub fn slide_h(ui: &mut Ui, rect: Rect, id: Id, norm: f32, default: f32, enabled
                 pos2(x, rect.top() + 1.0),
                 pos2(x, rect.top() + if major { 6.0 } else { 4.0 }),
             ],
-            Stroke::new(if major { 1.4 } else { 1.0 }, INK2),
+            Stroke::new(if major { 1.4 } else { 1.0 }, INK2()),
         );
     }
     let slot = Rect::from_min_max(pos2(x0 - 3.0, cy - 3.0), pos2(x1 + 3.0, cy + 3.0));
-    p.rect_filled(slot, 3.0, INK);
+    p.rect_filled(slot, 3.0, INK());
     inner_shadow(p, slot, 3.0, 1.0);
     fader_cap(p, pos2(x0 + (x1 - x0) * n, cy + 2.0), 14.0, 26.0, true);
     KnobOut {
@@ -1063,7 +1070,7 @@ pub fn header(
         Align2::LEFT_CENTER,
         "Pro Wave",
         9.5,
-        PRINT,
+        PRINT(),
     );
     let m = text_at(
         &p,
@@ -1071,11 +1078,11 @@ pub fn header(
         Align2::LEFT_CENTER,
         &plate.model.to_uppercase(),
         silk_heavy(28.0),
-        INK,
+        INK(),
         0.04,
     );
     let sq = Rect::from_center_size(pos2(m.right() + 13.0, cy + 5.0), vec2(9.0, 9.0));
-    p.rect_filled(sq, 1.0, ORANGE);
+    p.rect_filled(sq, 1.0, ORANGE());
     let name_x = sq.right() + 9.0;
     let k = 28.0;
     let close = Rect::from_min_size(
@@ -1119,7 +1126,7 @@ pub fn header(
         Align2::LEFT_CENTER,
         &nm,
         silk_font(14.5),
-        INK2,
+        INK2(),
         0.15,
     );
     seam_h(
@@ -1167,8 +1174,8 @@ pub fn foot(ui: &mut Ui, rect: Rect, id: Id, plate: &Plate) -> (bool, f32) {
 /// The chassis frame of a unit window.
 pub fn frame() -> egui::Frame {
     egui::Frame::NONE
-        .fill(BONE)
-        .stroke(Stroke::new(1.0, SEAM_DK))
+        .fill(BONE())
+        .stroke(Stroke::new(1.0, SEAM_DK()))
         .corner_radius(CornerRadius::same(9))
         .shadow(Shadow {
             offset: [0, 10],
@@ -1233,7 +1240,7 @@ pub struct Control {
     pub norm: f32,
     /// Where a double-click goes.
     pub default: f32,
-    /// The value as text, for the LCD under it.
+    /// The value as text, for the LCD() under it.
     pub text: String,
     /// Named values: shown as keys (few) or a menu (many) instead of a knob.
     pub choices: Vec<String>,
@@ -1259,7 +1266,7 @@ pub const CELL_W: f32 = 92.0;
 /// Height of one knob row.
 pub const CELL_H: f32 = 132.0;
 
-/// Draws one control in the cell at `rect` (label, knob or keys, LCD readout).
+/// Draws one control in the cell at `rect` (label, knob or keys, LCD() readout).
 pub fn control_cell(
     ui: &mut Ui,
     rect: Rect,
@@ -1276,7 +1283,7 @@ pub fn control_cell(
         Align2::CENTER_CENTER,
         &label,
         silk_font(11.5),
-        INK2,
+        INK2(),
         0.12,
     );
     if let Some(on) = c.automated {
@@ -1361,7 +1368,7 @@ pub fn control_cell(
                     Align2::CENTER_CENTER,
                     &t,
                     11.0,
-                    alpha(INK, 0.35),
+                    alpha(INK(), 0.35),
                 );
                 ui.interact(r, id.with(("key", k, i)), Sense::hover())
             };

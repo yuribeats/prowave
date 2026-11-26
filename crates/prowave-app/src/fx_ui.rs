@@ -311,14 +311,14 @@ fn band_columns(
         let x = top_left.x + b as f32 * BAND_W;
         let badge =
             Rect::from_center_size(pos2(x + BAND_W / 2.0, top_left.y + 14.0), vec2(20.0, 16.0));
-        p.rect_filled(badge, 2.0, gear::INK);
+        p.rect_filled(badge, 2.0, gear::INK());
         gear::legend(
             p,
             badge.center(),
             Align2::CENTER_CENTER,
             &format!("{}", b + 1),
             10.0,
-            gear::BONE,
+            crate::theme::pick(gear::BONE(), crate::theme::ON_DARK()),
         );
         if b > 0 {
             gear::seam_v(p, x, top_left.y + 8.0, top_left.y + 30.0 + 3.0 * BAND_H);
@@ -383,7 +383,7 @@ fn display(
 
 /// Faint grid lines on LCD glass.
 fn lcd_grid(p: &egui::Painter, xs: &[f32], ys: &[f32], glass: Rect) {
-    let st = Stroke::new(1.0, gear::alpha(gear::LCD_INK, 0.12));
+    let st = Stroke::new(1.0, gear::alpha(gear::LCD_INK(), 0.12));
     for x in xs {
         p.line_segment([pos2(*x, glass.top()), pos2(*x, glass.bottom())], st);
     }
@@ -399,7 +399,7 @@ fn ink_curve(p: &egui::Painter, glass: Rect, pts: Vec<Pos2>, base_y: f32) {
         let (a, b) = (w[0], w[1]);
         let poly = vec![a, b, pos2(b.x, base_y), pos2(a.x, base_y)];
         let mut mesh = egui::epaint::Mesh::default();
-        let col = gear::alpha(gear::LCD_INK, 0.10);
+        let col = gear::alpha(gear::LCD_INK(), 0.10);
         for q in &poly {
             mesh.colored_vertex(*q, col);
         }
@@ -407,7 +407,7 @@ fn ink_curve(p: &egui::Painter, glass: Rect, pts: Vec<Pos2>, base_y: f32) {
         mesh.add_triangle(0, 2, 3);
         clip.add(Shape::mesh(mesh));
     }
-    clip.add(Shape::line(pts, Stroke::new(2.4, gear::LCD_INK)));
+    clip.add(Shape::line(pts, Stroke::new(2.4, gear::LCD_INK())));
 }
 
 /// The EQ's gain over 20 Hz to 20 kHz, ±18 dB, with each band's handle.
@@ -472,14 +472,14 @@ fn eq_curve(p: &egui::Painter, glass: Rect, kind: FxKind, v: &[f32]) {
     for (i, (hz, db)) in bands.iter().enumerate() {
         let c = pos2(x_of(*hz), y_of(db.clamp(-18.0, 18.0)));
         let r = Rect::from_center_size(c, vec2(13.0, 13.0));
-        p.rect_filled(r, 1.0, gear::LCD_INK);
+        p.rect_filled(r, 1.0, gear::LCD_INK());
         gear::text_at(
             p,
             r.center(),
             Align2::CENTER_CENTER,
             &format!("{}", i + 1),
             gear::mono_heavy(9.0),
-            gear::LCD,
+            gear::LCD(),
             0.0,
         );
     }
@@ -501,7 +501,7 @@ fn transfer_curve(p: &egui::Painter, glass: Rect, kind: FxKind, v: &[f32]) {
     let clip = p.with_clip_rect(plot);
     clip.add(Shape::dashed_line(
         &[pos2(x_of(-60.0), y_of(-60.0)), pos2(x_of(0.0), y_of(0.0))],
-        Stroke::new(1.0, gear::alpha(gear::LCD_INK, 0.35)),
+        Stroke::new(1.0, gear::alpha(gear::LCD_INK(), 0.35)),
         3.0,
         3.0,
     ));
@@ -541,7 +541,7 @@ fn transfer_curve(p: &egui::Painter, glass: Rect, kind: FxKind, v: &[f32]) {
     let tx = x_of(thr.clamp(-60.0, 0.0));
     clip.add(Shape::dashed_line(
         &[pos2(tx, plot.top()), pos2(tx, plot.bottom())],
-        Stroke::new(1.0, gear::LCD_INK),
+        Stroke::new(1.0, gear::LCD_INK()),
         2.0,
         3.0,
     ));
@@ -588,7 +588,7 @@ fn reduction_meter(ui: &mut Ui, p: &egui::Painter, rect: Rect, reduction: f32, b
                 pos2(x, ladder.bottom() + 3.0),
                 pos2(x, ladder.bottom() + 7.0),
             ],
-            Stroke::new(1.0, gear::INK2),
+            Stroke::new(1.0, gear::INK2()),
         );
         gear::silk(
             p,
@@ -596,7 +596,7 @@ fn reduction_meter(ui: &mut Ui, p: &egui::Painter, rect: Rect, reduction: f32, b
             Align2::CENTER_CENTER,
             t,
             10.0,
-            gear::PRINT,
+            gear::PRINT(),
         );
     }
     let chip = Rect::from_min_max(
@@ -613,7 +613,7 @@ fn reduction_meter(ui: &mut Ui, p: &egui::Painter, rect: Rect, reduction: f32, b
         pos2(chip.right() - 40.0 - w, chip.top() + 7.0),
         &t,
         32.0,
-        gear::LCD_INK,
+        gear::LCD_INK(),
         true,
     );
     gear::lcd_text(
@@ -642,7 +642,7 @@ fn echoes(p: &egui::Painter, glass: Rect, v: &[f32]) {
         } else {
             Rect::from_min_max(pos2(x - 3.0, mid), pos2(x + 3.0, mid + h))
         };
-        p.rect_filled(r, 0.0, gear::LCD_INK);
+        p.rect_filled(r, 0.0, gear::LCD_INK());
     };
     let half = plot.height() / 2.0 - 4.0;
     // The dry hit full height, then the repeats at the wet level, each one quieter by the
@@ -662,7 +662,7 @@ fn echoes(p: &egui::Painter, glass: Rect, v: &[f32]) {
     }
     let w = gear::seg7_width(&format!("{time:.0}"), 26.0);
     let at = pos2(glass.right() - 40.0 - w, glass.top() + 10.0);
-    gear::seg7(p, at, &format!("{time:.0}"), 26.0, gear::LCD_INK, true);
+    gear::seg7(p, at, &format!("{time:.0}"), 26.0, gear::LCD_INK(), true);
     gear::lcd_text(
         p,
         pos2(glass.right() - 10.0, glass.top() + 36.0),
@@ -706,7 +706,7 @@ fn sweep(p: &egui::Painter, glass: Rect, kind: FxKind, v: &[f32]) {
         pos2(glass.right() - 40.0 - w, glass.top() + 10.0),
         &t,
         26.0,
-        gear::LCD_INK,
+        gear::LCD_INK(),
         true,
     );
     gear::lcd_text(
@@ -742,7 +742,7 @@ fn drive_curve(p: &egui::Painter, glass: Rect, v: &[f32]) {
         pos2(glass.right() - 40.0 - w, glass.top() + 10.0),
         &t,
         26.0,
-        gear::LCD_INK,
+        gear::LCD_INK(),
         true,
     );
     gear::lcd_text(
@@ -818,7 +818,7 @@ fn filter_curve(p: &egui::Painter, glass: Rect, v: &[f32]) {
         pos2(glass.right() - 46.0 - w, glass.top() + 10.0),
         &t,
         26.0,
-        gear::LCD_INK,
+        gear::LCD_INK(),
         true,
     );
     gear::lcd_text(
@@ -896,7 +896,7 @@ fn amp_body(
         Align2::LEFT_CENTER,
         tr("Amp"),
         11.0,
-        gear::INK2,
+        gear::INK2(),
     );
     let r = Rect::from_min_size(pos2(mx, lcd.top() + 16.0), vec2(mw, 26.0));
     if let Some(i) =
@@ -915,7 +915,7 @@ fn amp_body(
         Align2::LEFT_CENTER,
         tr("Cabinet"),
         11.0,
-        gear::INK2,
+        gear::INK2(),
     );
     let r = Rect::from_min_size(pos2(mx, lcd.top() + 68.0), vec2(mw, 26.0));
     if let Some(i) = gear::choice_field(ui, r, id.with("amp_cab"), &AMP_CABS, cab, editable(7)) {
@@ -955,7 +955,7 @@ fn amp_body(
         Align2::LEFT_CENTER,
         tr("Mic"),
         12.0,
-        gear::INK2,
+        gear::INK2(),
     );
     if let Some(on) = mic.automated {
         gear::led(&p, pos2(lr.right() + 8.0, lr.center().y), 2.5, on);
@@ -987,9 +987,9 @@ fn amp_body(
     // The speaker cone on the LCD, with the microphone's spot on it.
     let c = pos2(glass.right() - 50.0, glass.center().y);
     for (r, a) in [(40.0f32, 0.55f32), (29.0, 0.4), (16.0, 0.6)] {
-        p.circle_stroke(c, r, Stroke::new(1.6, gear::alpha(gear::LCD_INK, a)));
+        p.circle_stroke(c, r, Stroke::new(1.6, gear::alpha(gear::LCD_INK(), a)));
     }
-    p.circle_filled(c, 7.0, gear::LCD_INK);
+    p.circle_filled(c, 7.0, gear::LCD_INK());
     let mic_r = 40.0 * (1.0 - mic.norm);
     p.circle_filled(
         c + vec2(mic_r * 0.7, -mic_r * 0.7),

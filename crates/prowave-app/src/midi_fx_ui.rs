@@ -164,9 +164,9 @@ fn arrow_key(ui: &mut Ui, rect: Rect, id: Id, up: bool, enabled: bool) -> bool {
     );
     let c = face.center();
     let col = if enabled {
-        gear::INK
+        gear::INK()
     } else {
-        gear::alpha(gear::INK, 0.3)
+        gear::alpha(gear::INK(), 0.3)
     };
     let pts = if up {
         vec![c + vec2(-5.0, 3.0), c + vec2(0.0, -4.0), c + vec2(5.0, 3.0)]
@@ -183,7 +183,7 @@ fn arrow_key(ui: &mut Ui, rect: Rect, id: Id, up: bool, enabled: bool) -> bool {
 
 /// LCD ink.
 fn ink(a: f32) -> Color32 {
-    gear::alpha(gear::LCD_INK, a)
+    gear::alpha(gear::LCD_INK(), a)
 }
 
 /// The unit's LCD: what the effect does, drawn small.
@@ -317,7 +317,7 @@ fn display(p: &Painter, rect: Rect, fx: &MidiFx, on: bool) {
             for k in (1..8).step_by(2) {
                 let x = plot.left() + (k as f32 + late) * w;
                 let r = Rect::from_min_size(pos2(x, plot.top()), vec2(w * 0.4, plot.height()));
-                p.rect_filled(r.intersect(plot), 1.0, gear::alpha(gear::LCD_INK, a));
+                p.rect_filled(r.intersect(plot), 1.0, gear::alpha(gear::LCD_INK(), a));
             }
         }
         MidiFx::Euclid {
@@ -398,7 +398,7 @@ fn note_strip(p: &Painter, plot: Rect, lit: impl Fn(i32) -> bool, root: Option<i
             pos2(kb.left() + at * w - bw / 2.0, kb.top()),
             vec2(bw, (kb.height() - 6.0) * 0.58),
         );
-        p.rect_filled(r, 0.0, gear::LCD);
+        p.rect_filled(r, 0.0, gear::LCD());
         p.rect_stroke(r, 0.0, line, egui::StrokeKind::Inside);
         if lit(n) {
             p.rect_filled(r.shrink(2.0), 0.0, ink(a));
@@ -456,7 +456,7 @@ fn settings(
             let edit = egui::TextEdit::multiline(source)
                 .code_editor()
                 .frame(egui::Frame::NONE)
-                .text_color(crate::theme::ON_DARK)
+                .text_color(crate::theme::ON_DARK())
                 .desired_rows(9)
                 .desired_width(editor.width() - 16.0)
                 .char_limit(crate::scripter::MAX_SCRIPT_CHARS);
@@ -616,7 +616,7 @@ fn settings(
                     Align2::LEFT_CENTER,
                     &t,
                     10.0,
-                    gear::PRINT,
+                    gear::PRINT(),
                 );
             }
         }
@@ -910,7 +910,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
         let mut y = rect.top() + 16.0;
         if chain.is_empty() {
             let r = Rect::from_min_max(pos2(left, y), pos2(right, y + 58.0));
-            painter.rect_filled(r, 4.0, gear::BONE2);
+            painter.rect_filled(r, 4.0, gear::BONE2());
             gear::inner_shadow(&painter, r, 4.0, 0.45);
             gear::silk(
                 &painter,
@@ -918,7 +918,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                 Align2::CENTER_CENTER,
                 tr("No MIDI FX on this track"),
                 12.0,
-                gear::PRINT,
+                gear::PRINT(),
             );
             y += empty_h;
         }
@@ -1048,7 +1048,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                 Align2::CENTER_CENTER,
                 tr("Add MIDI FX"),
                 11.0,
-                gear::alpha(gear::INK, 0.35),
+                gear::alpha(gear::INK(), 0.35),
             );
             ui.interact(r, id.with("add"), Sense::hover())
         };

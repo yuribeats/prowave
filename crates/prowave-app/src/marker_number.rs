@@ -55,7 +55,7 @@ pub(crate) fn body(ui: &mut egui::Ui, p: &mut Project, text: &mut String, done: 
         egui::TextEdit::singleline(text)
             .char_limit(6)
             .font(theme::font(Face::Bold, 13.0))
-            .text_color(theme::ON_DARK)
+            .text_color(theme::ON_DARK())
             .frame(egui::Frame::NONE)
             .margin(vec2(6.0, 6.0))
             .desired_width(r.width() - 8.0)

@@ -79,7 +79,7 @@ pub fn show(
         ),
         &value,
         h,
-        theme::LCD_INK,
+        theme::LCD_INK(),
         true,
     );
 
@@ -167,7 +167,7 @@ pub fn show(
             x0,
             lane.top() + 2.0..=lane.bottom() - 2.0,
             2.0,
-            theme::INK,
+            theme::INK(),
         );
         let text_x = x0.max(lane.left()) + 7.0;
         if text_x + 10.0 < x1 {
@@ -179,7 +179,7 @@ pub fn show(
                 pos2(text_x, lane.center().y - h / 2.0),
                 &value,
                 h,
-                theme::INK,
+                theme::INK(),
                 false,
             );
         }

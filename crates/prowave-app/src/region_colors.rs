@@ -123,7 +123,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                     g.rect_stroke(
                         r.expand(2.0),
                         4.0,
-                        Stroke::new(2.0, theme::INK),
+                        Stroke::new(2.0, theme::INK()),
                         egui::StrokeKind::Outside,
                     );
                 }

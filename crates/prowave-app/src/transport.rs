@@ -509,7 +509,7 @@ fn legend(g: &Painter, rows: &Rows, cx: f32, room: f32, label: &str) {
         Align2::CENTER_CENTER,
         label,
         size,
-        theme::PRINT,
+        theme::PRINT(),
     );
 }
 
@@ -546,8 +546,8 @@ fn tempo_field(
                 .id(id.with("field"))
                 .desired_width(rect.width())
                 .font(theme::font(Face::Lcd, size))
-                .text_color(theme::LCD_INK)
-                .background_color(theme::LCD)
+                .text_color(theme::LCD_INK())
+                .background_color(theme::LCD())
                 .align(egui::Align2::LEFT_CENTER);
             let mut out = edit.show(ui);
             if opened {
@@ -643,7 +643,7 @@ struct LcdPlan {
 
 /// Width of a label on the glass.
 fn lab_w(g: &Painter, s: &str, face: Face, size: f32) -> f32 {
-    hw::galley(g, s, face, size, theme::LCD_INK).size().x - theme::tracking(face) * size
+    hw::galley(g, s, face, size, theme::LCD_INK()).size().x - theme::tracking(face) * size
 }
 
 /// Width of the status column: the PLAY row (a triangle and the word) or the CPU row (the word
@@ -1006,7 +1006,7 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, bezel: Rect, meters: &Meters) {
     let glass = hw::lcd(g, bezel);
     let plan = LcdPlan::new(g, glass);
     let g = &g.with_clip_rect(glass);
-    let ink = theme::LCD_INK;
+    let ink = theme::LCD_INK();
     let ghost = ink.gamma_multiply(0.2);
     for (at, anchor, label, letter) in &plan.labels {
         let (size, face, strength) = if *letter {
@@ -1168,7 +1168,7 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, bezel: Rect, meters: &Meters) {
             label,
             Face::Lcd,
             fs * 0.92,
-            if on { theme::LCD } else { ghost },
+            if on { theme::LCD() } else { ghost },
         );
         r
     };
@@ -1209,7 +1209,7 @@ fn lcd(ui: &Ui, g: &Painter, p: &mut Project, bezel: Rect, meters: &Meters) {
         let h = ((2.0 + 1.6 * i as f32) * bk * 1.2).min(lab_r.height() + 2.0);
         let x = start + i as f32 * pitch;
         let r = Rect::from_min_max(pos2(x, base - h), pos2(x + bw, base));
-        g.rect_filled(r, 0.0, if i < lit { ink } else { theme::LCD_GHOST });
+        g.rect_filled(r, 0.0, if i < lit { ink } else { theme::LCD_GHOST() });
     }
     let mut text = format!(
         "{}\n{}",
@@ -1266,7 +1266,7 @@ fn latency_chip(ui: &Ui, g: &Painter, bezel: Rect, s: &crate::UiState) -> bool {
         ));
     let glass = hw::lcd(g, bezel);
     let g = &g.with_clip_rect(glass);
-    let ink = theme::LCD_INK;
+    let ink = theme::LCD_INK();
     let lab = (glass.height() * 0.2).clamp(8.0, 10.0);
     hw::text(
         g,
@@ -1373,7 +1373,7 @@ fn thumb(g: &Painter, r: Rect) {
     g.rect_stroke(
         r,
         2.0,
-        Stroke::new(1.0, theme::CAP_EDGE),
+        Stroke::new(1.0, theme::CAP_EDGE()),
         egui::StrokeKind::Inside,
     );
     g.vline(
@@ -1385,7 +1385,7 @@ fn thumb(g: &Painter, r: Rect) {
     g.rect_filled(
         Rect::from_center_size(r.center(), vec2(3.0, r.height() - 2.0 * inset)),
         0.0,
-        theme::BONE_HI,
+        theme::pick(theme::BONE_HI(), theme::ON_DARK()),
     );
 }
 
@@ -1421,9 +1421,9 @@ pub(crate) fn master_volume(
     g.hline(
         ladder.x_range(),
         ladder.bottom() + 0.5,
-        Stroke::new(1.0, theme::BONE_HI),
+        Stroke::new(1.0, theme::BONE_HI()),
     );
-    g.rect_filled(ladder, 2.0, theme::METER_WELL);
+    g.rect_filled(ladder, 2.0, theme::METER_WELL());
     hw::inner_shadow(g, ladder, 2.0, 0.5);
     // Fine segments with hairline gaps, about 40 of them along a full-size ladder.
     let pitch = if full {
@@ -1446,15 +1446,15 @@ pub(crate) fn master_volume(
             let f = (seg.center().x - rect.left()) / rect.width();
             let c = if f <= lvl && lvl > 0.0 {
                 if f > hot_at {
-                    g.rect_filled(seg.expand(1.0), 1.0, theme::ORANGE.gamma_multiply(0.35));
-                    theme::ORANGE
+                    g.rect_filled(seg.expand(1.0), 1.0, theme::METER_HOT.gamma_multiply(0.35));
+                    theme::METER_HOT
                 } else if f > warm_at {
-                    Color32::from_rgb(0xff, 0xe6, 0xcf)
+                    theme::METER_MID
                 } else {
-                    Color32::from_rgb(0xee, 0xea, 0xdf)
+                    theme::METER_LO
                 }
             } else {
-                Color32::from_rgb(0x2b, 0x29, 0x26)
+                theme::METER_OFF
             };
             g.rect_filled(seg, 0.0, c);
         }
@@ -1482,11 +1482,11 @@ pub(crate) fn master_volume(
     g.hline(
         track.x_range(),
         track.bottom() + 0.5,
-        Stroke::new(1.0, theme::BONE_HI),
+        Stroke::new(1.0, theme::BONE_HI()),
     );
     g.rect_filled(track, track_h / 2.0, Color32::from_rgb(0x0f, 0x0f, 0x0e));
     if full {
-        let tick = Stroke::new(1.0, theme::INK2.gamma_multiply(0.6));
+        let tick = Stroke::new(1.0, theme::INK2().gamma_multiply(0.6));
         for db in [
             -60.0f32, -50.0, -40.0, -30.0, -20.0, -10.0, -6.0, -3.0, 0.0, 3.0, 6.0,
         ] {
@@ -1605,7 +1605,7 @@ pub fn control_bar(
     g.vline(
         sep_x.round() + 0.5,
         rows.key_top + 8.0..=rows.key_top + rows.key_h - 8.0,
-        Stroke::new(1.0, theme::SEAM),
+        Stroke::new(1.0, theme::SEAM()),
     );
     let mut hit = None;
     for (i, (ic, on, label, tip)) in view.iter().take(view_n).enumerate() {
@@ -1739,7 +1739,7 @@ pub fn control_bar(
         Some(p.playing),
         Icon::Play,
         1.15,
-        p.playing.then_some(theme::ORANGE),
+        p.playing.then_some(theme::ORANGE()),
         None,
     )
     .clicked()
@@ -1747,7 +1747,7 @@ pub fn control_bar(
         p.playing = !p.playing;
     }
     if p.recording {
-        theme::glow(&g, tk(4).translate(vec2(0.0, 1.0)), 5.0, theme::ORANGE);
+        theme::glow(&g, tk(4).translate(vec2(0.0, 1.0)), 5.0, theme::ORANGE());
     }
     if icon_key(
         ui,
@@ -1777,7 +1777,7 @@ pub fn control_bar(
         None,
         Icon::Capture,
         1.1,
-        Some(theme::ORANGE),
+        Some(theme::ORANGE()),
         None,
     )
     .on_hover_text(tr("Capture Recording"))
@@ -1873,7 +1873,7 @@ pub fn control_bar(
         "1234",
         Face::Bold,
         fs,
-        theme::INK,
+        theme::INK(),
     );
     let count_in = count_in.on_hover_text(tr("Count-in"));
     if count_in.clicked() {
@@ -1932,11 +1932,11 @@ pub fn control_bar(
         // The scale's legends sit under their ticks: -∞ at the left end, 0 dB, +6 at the
         // right end.
         let y = rows.legend_y;
-        let c = theme::PRINT;
+        let c = theme::PRINT();
         let size = rows.legend_size;
         let tick = |f: f32| (r.left() + f * lw).round() + 0.5;
         if !rows.full {
-            let st = Stroke::new(1.0, theme::INK2.gamma_multiply(0.6));
+            let st = Stroke::new(1.0, theme::INK2().gamma_multiply(0.6));
             for f in [0.0, ZERO_AT, 1.0] {
                 g.vline(tick(f), r.bottom() + 1.0..=r.bottom() + 4.0, st);
             }
@@ -1985,7 +1985,7 @@ pub fn control_bar(
             ),
             vec2(lay.win_key, wh),
         );
-        let tint = on.then_some(theme::ORANGE_DK);
+        let tint = on.then_some(theme::ORANGE_DK());
         if icon_key(
             ui,
             &g,
@@ -2230,7 +2230,7 @@ mod tests {
                 w,
                 h,
                 2.0,
-                theme::BONE,
+                theme::BONE(),
                 |ui| {
                     theme::apply(ui.ctx());
                     control_bar(ui, &mut p, &mut s, Some((0.55, 0.4)))

@@ -79,7 +79,7 @@ pub(crate) fn rows_well(g: &egui::Painter, area: Rect, y: f32) -> Rect {
     let well = Rect::from_min_max(pos2(area.left() + 4.0, y + 2.0), area.max - vec2(4.0, 4.0));
     let rows_fit = ((well.height() - 6.0) / ROW_H).floor().max(0.0);
     let well = Rect::from_min_size(well.min, vec2(well.width(), rows_fit * ROW_H + 6.0));
-    g.rect_filled(well.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI);
+    g.rect_filled(well.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI());
     hw::gradient(
         g,
         well,
@@ -91,7 +91,7 @@ pub(crate) fn rows_well(g: &egui::Painter, area: Rect, y: f32) -> Rect {
     g.rect_stroke(
         well,
         3.0,
-        Stroke::new(1.0, theme::CAP_EDGE),
+        Stroke::new(1.0, theme::CAP_EDGE()),
         egui::StrokeKind::Inside,
     );
     well.shrink2(vec2(0.0, 3.0))
@@ -290,7 +290,7 @@ fn sysex_window(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
             let parsed = crate::sysex::parse(&text);
             if parsed.is_err() && !text.trim().is_empty() {
                 ui.colored_label(
-                    theme::DANGER,
+                    theme::DANGER(),
                     tr("The message must start with F0 and end with F7, in hex"),
                 );
             }
@@ -359,7 +359,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     // Add a System Exclusive message at the playhead (see `sysex.rs`).
     // The key's legend without the dots the menu entry has.
     let label = tr("SysEx…").trim_end_matches(['…', '.']);
-    let w = hw::galley(&g, &label.to_uppercase(), Face::Bold, 12.0, theme::INK)
+    let w = hw::galley(&g, &label.to_uppercase(), Face::Bold, 12.0, theme::INK())
         .size()
         .x
         + 26.0;
@@ -407,7 +407,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             &shown,
             Face::Silk,
             10.0,
-            theme::INK2,
+            theme::INK2(),
         );
     };
     head(COL_POS, Align2::RIGHT_CENTER, tr("Position"), 90.0);
@@ -458,22 +458,22 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         let cy = row.center().y;
         let selected = e.note.is_some_and(|n| s.piano.selected.contains(&n));
         if selected {
-            gl.rect_filled(row, 0.0, theme::ORANGE.gamma_multiply(0.25));
+            gl.rect_filled(row, 0.0, theme::ORANGE().gamma_multiply(0.25));
             gl.rect_filled(
                 Rect::from_min_size(row.min, vec2(4.0, ROW_H)),
                 0.0,
-                theme::ORANGE,
+                theme::ORANGE(),
             );
         } else if i % 2 == 1 {
-            gl.rect_filled(row, 0.0, theme::ON_DARK.gamma_multiply(0.035));
+            gl.rect_filled(row, 0.0, theme::ON_DARK().gamma_multiply(0.035));
         }
         let ([bar, beat, div], tick) = position_in(p, e.beats);
         let l = length_parts(e.len, p.bar_len_at(e.beats));
         // The other regions' events print faintly.
         let color = if e.dim {
-            theme::ON_DARK_DIM.gamma_multiply(0.7)
+            theme::ON_DARK_DIM().gamma_multiply(0.7)
         } else {
-            theme::ON_DARK
+            theme::ON_DARK()
         };
         let at = |x: f32, align: Align2, text: &str, room: f32| {
             let shown = hw::fit(&gl, &text.to_uppercase(), Face::Bold, size, room);
@@ -531,7 +531,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     // The playhead line, between the notes that have sounded and those still to come.
     let ly = list.top() + line_y - scroll;
     if ly >= list.top() && ly <= list.bottom() && !events.is_empty() {
-        gl.hline(list.x_range(), ly, Stroke::new(2.0, theme::ORANGE));
+        gl.hline(list.x_range(), ly, Stroke::new(2.0, theme::ORANGE()));
     }
     // The seam towards the tracks.
     hw::seam_v(&g, area.left(), area.y_range());

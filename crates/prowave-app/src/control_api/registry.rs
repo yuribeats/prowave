@@ -181,6 +181,8 @@ pub fn all() -> &'static [Method] {
         v.extend(super::m_tracks::methods());
         v.extend(super::m_midi_fx::methods());
         v.extend(super::m_kits::methods());
+        v.extend(super::m_rack::methods());
+        v.extend(super::m_rack_follow::methods());
         v.extend(super::m_regions::methods());
         v.extend(super::m_ui::methods());
         v.extend(super::render::methods());

@@ -237,7 +237,7 @@ fn draw(
     if pw == 0 || ph == 0 {
         return Err("the picture would have no pixels".into());
     }
-    let bg = crate::theme::BG.to_array().map(|c| f32::from(c) / 255.0);
+    let bg = crate::theme::BG().to_array().map(|c| f32::from(c) / 255.0);
     let mut img = vec![bg; pw * ph];
     for cp in prims {
         let Primitive::Mesh(mesh) = cp.primitive else {

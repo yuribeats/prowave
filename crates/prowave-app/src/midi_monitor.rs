@@ -461,7 +461,7 @@ fn panel(
                 Align2::LEFT_CENTER,
                 label,
                 10.0,
-                theme::PRINT,
+                theme::PRINT(),
             );
         }
     }
@@ -493,7 +493,7 @@ fn panel(
         );
         let mut name_room = clock_x - 10.0 - (c.right() + 7.0);
         let off_label = tr("offline").to_uppercase();
-        let off_w = hw::galley(&g, &off_label, Face::Bold, 8.5, theme::INK)
+        let off_w = hw::galley(&g, &off_label, Face::Bold, 8.5, theme::INK())
             .size()
             .x
             + 14.0;
@@ -508,7 +508,7 @@ fn panel(
             &shown,
             Face::Bold,
             11.0,
-            if online { theme::INK } else { theme::PRINT },
+            if online { theme::INK() } else { theme::PRINT() },
         );
         if !online {
             hu::tag(&g, pos2(nr.right() + 6.0, r.center().y), &off_label, 8.5);
@@ -553,7 +553,7 @@ fn panel(
                 &shown,
                 Face::Body,
                 10.5,
-                theme::INK2,
+                theme::INK2(),
             );
             // The clock's tempo on a small LCD: its jitter at the left, the bpm at the right.
             let lr = Rect::from_min_size(pos2(tempo_x, r.center().y - 12.0), vec2(tempo_w, 24.0));
@@ -567,7 +567,7 @@ fn panel(
                         pos2(lr.right() - 8.0 - vw, lr.top() + 5.5),
                         &v,
                         13.0,
-                        theme::LCD_INK,
+                        theme::LCD_INK(),
                         true,
                     );
                     hw::text(
@@ -577,7 +577,7 @@ fn panel(
                         &format!("±{sd:.3}MS"),
                         Face::Lcd,
                         8.5,
-                        theme::LCD_INK.gamma_multiply(0.75),
+                        theme::LCD_INK().gamma_multiply(0.75),
                     );
                 }
                 _ => {
@@ -588,7 +588,7 @@ fn panel(
                         pos2(lr.right() - 8.0 - vw, lr.top() + 5.5),
                         v,
                         13.0,
-                        theme::LCD_GHOST,
+                        theme::LCD_GHOST(),
                         true,
                     );
                 }
@@ -604,7 +604,7 @@ fn panel(
             Align2::LEFT_CENTER,
             tr("No Port"),
             11.0,
-            theme::PRINT,
+            theme::PRINT(),
         );
         hw::seam_h(&g, r.x_range(), r.bottom() - 1.0);
     } else if rows.len() <= max_rows {
@@ -711,12 +711,12 @@ fn panel(
         &ahead,
         Face::Lcd,
         8.5,
-        theme::LCD_INK.gamma_multiply(0.72),
+        theme::LCD_INK().gamma_multiply(0.72),
     );
     g.hline(
         glass.left() + 6.0..=glass.right() - 6.0,
         glass.top() + 20.5,
-        egui::Stroke::new(1.0, theme::LCD_INK.gamma_multiply(0.25)),
+        egui::Stroke::new(1.0, theme::LCD_INK().gamma_multiply(0.25)),
     );
     let body = Rect::from_min_max(
         pos2(glass.left(), glass.top() + 23.0),
@@ -733,7 +733,7 @@ fn panel(
                 let (r, _) = ui.allocate_exact_size(vec2(body.width(), 18.0), Sense::hover());
                 let g = ui.painter();
                 let cy = r.center().y;
-                let ink = theme::LCD_INK;
+                let ink = theme::LCD_INK();
                 let age = now.saturating_sub(e.at_ns) as f64 / 1e9;
                 let put = |x: f32, s: &str, room: f32| {
                     let shown = hw::fit(g, &s.to_uppercase(), Face::Lcd, size, room);
@@ -757,7 +757,7 @@ fn panel(
                     let txt = format!("{:+.2}MS", e.lead_ms);
                     if e.lead_ms < 0.0 {
                         // Late: printed inverted, as the LCD's CYC flag.
-                        let gal = hw::galley(g, &txt, Face::Lcd, size, theme::LCD);
+                        let gal = hw::galley(g, &txt, Face::Lcd, size, theme::LCD());
                         let br = Rect::from_min_max(
                             pos2(c_ahead - gal.size().x - 8.0, cy - 7.5),
                             pos2(c_ahead, cy + 7.5),
@@ -770,7 +770,7 @@ fn panel(
                             &txt,
                             Face::Lcd,
                             size,
-                            theme::LCD,
+                            theme::LCD(),
                         );
                     } else {
                         hw::text(
@@ -852,7 +852,7 @@ mod tests {
             900.0,
             680.0,
             2.0,
-            crate::theme::BONE3,
+            crate::theme::BONE3(),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 show(ui.ctx(), &p, &mut s, &mut test_note);

@@ -476,7 +476,7 @@ pub const PAD_LAYOUT: [DrumClass; 15] = [
 ];
 
 /// What a channel takes when the kit has nothing of its own class.
-fn stand_ins(c: DrumClass) -> &'static [DrumClass] {
+pub fn stand_ins(c: DrumClass) -> &'static [DrumClass] {
     use DrumClass::*;
     match c {
         Clap => &[Snare, Rim],

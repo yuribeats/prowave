@@ -32,7 +32,7 @@ pub fn toolbar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) {
     use crate::theme::{self, Face};
     let row = ui.available_rect_before_wrap();
     let g = ui.painter_at(row);
-    g.rect_filled(row, 0.0, crate::tracks_area::hw_tracks::PANEL_MENU);
+    g.rect_filled(row, 0.0, crate::tracks_area::hw_tracks::PANEL_MENU());
     crate::tracks_area::hw_tracks::seam_wide_h(&g, row.x_range(), row.bottom());
     let key_h = (row.height() - 10.0).clamp(18.0, 24.0);
     let cy = row.center().y - 1.0;
@@ -44,7 +44,10 @@ pub fn toolbar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) {
             continue;
         }
         let text = tr(label).to_uppercase();
-        let w = hw::galley(&g, &text, Face::Bold, 10.5, theme::INK).size().x + 22.0;
+        let w = hw::galley(&g, &text, Face::Bold, 10.5, theme::INK())
+            .size()
+            .x
+            + 22.0;
         let rect = egui::Rect::from_min_size(egui::pos2(x, cy - key_h / 2.0), egui::vec2(w, key_h));
         x += w + 6.0;
         if rect.right() > row.right() {
@@ -77,7 +80,7 @@ pub fn toolbar(ui: &mut egui::Ui, p: &mut Project, s: &mut crate::UiState) {
                 &text,
                 Face::Bold,
                 10.5,
-                theme::INK,
+                theme::INK(),
             );
         }
     }

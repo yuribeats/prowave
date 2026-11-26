@@ -70,14 +70,20 @@ pub fn chassis(g: &Painter, rect: Rect) {
         g,
         rect,
         0.0,
-        Color32::from_rgb(0xef, 0xec, 0xe4),
-        Color32::from_rgb(0xe7, 0xe3, 0xd9),
+        theme::pick(
+            Color32::from_rgb(0xef, 0xec, 0xe4),
+            Color32::from_rgb(0x26, 0x26, 0x29),
+        ),
+        theme::pick(
+            Color32::from_rgb(0xe7, 0xe3, 0xd9),
+            Color32::from_rgb(0x1f, 0x1f, 0x22),
+        ),
     );
 }
 
 /// A recessed bone panel (empty slots, wells): darker bone with an inner shadow at the top.
 pub fn recess(g: &Painter, rect: Rect, radius: f32) {
-    g.rect_filled(rect, radius, theme::BONE2);
+    g.rect_filled(rect, radius, theme::BONE2());
     inner_shadow(g, rect, radius, 0.20);
     g.rect_stroke(
         rect,
@@ -113,32 +119,48 @@ pub fn inner_shadow(g: &Painter, rect: Rect, radius: f32, strength: f32) {
 /// A horizontal panel seam at `y` (a dark line over a light one).
 pub fn seam_h(g: &Painter, x: impl Into<egui::Rangef>, y: f32) {
     let x = x.into();
-    g.hline(x, y + 0.5, Stroke::new(1.0, theme::SEAM));
-    g.hline(x, y + 1.5, Stroke::new(1.0, theme::BONE_HI));
+    g.hline(x, y + 0.5, Stroke::new(1.0, theme::SEAM()));
+    g.hline(x, y + 1.5, Stroke::new(1.0, theme::BONE_HI()));
 }
 
 /// A vertical panel seam at `x`.
 pub fn seam_v(g: &Painter, x: f32, y: impl Into<egui::Rangef>) {
     let y = y.into();
-    g.vline(x + 0.5, y, Stroke::new(1.0, theme::SEAM));
-    g.vline(x + 1.5, y, Stroke::new(1.0, theme::BONE_HI));
+    g.vline(x + 0.5, y, Stroke::new(1.0, theme::SEAM()));
+    g.vline(x + 1.5, y, Stroke::new(1.0, theme::BONE_HI()));
 }
 
 /// A slotted screw head, its slot at `angle` degrees.
 pub fn screw(g: &Painter, c: Pos2, r: f32, angle: f32) {
-    g.circle_filled(c + vec2(0.0, 1.0), r, Color32::WHITE);
-    g.circle_filled(c, r, Color32::from_rgb(0xb9, 0xb2, 0xa4));
+    g.circle_filled(c + vec2(0.0, 1.0), r, theme::emboss(255));
+    g.circle_filled(
+        c,
+        r,
+        theme::pick(
+            Color32::from_rgb(0xb9, 0xb2, 0xa4),
+            Color32::from_rgb(0x5c, 0x5c, 0x62),
+        ),
+    );
     g.circle_filled(
         c + vec2(-r * 0.2, -r * 0.25),
         r * 0.7,
-        Color32::from_rgb(0xdd, 0xd8, 0xcd),
+        theme::pick(
+            Color32::from_rgb(0xdd, 0xd8, 0xcd),
+            Color32::from_rgb(0x8a, 0x8a, 0x90),
+        ),
     );
     g.circle_stroke(c, r, Stroke::new(1.0, Color32::from_black_alpha(40)));
     let a = angle.to_radians();
     let d = vec2(a.cos(), a.sin()) * (r * 0.75);
     g.line_segment(
         [c - d, c + d],
-        Stroke::new(1.6, Color32::from_rgb(0x7b, 0x74, 0x67)),
+        Stroke::new(
+            1.6,
+            theme::pick(
+                Color32::from_rgb(0x7b, 0x74, 0x67),
+                Color32::from_rgb(0x22, 0x22, 0x25),
+            ),
+        ),
     );
 }
 
@@ -208,7 +230,7 @@ pub fn silk(
 
 /// Width of `label` as [`silk`] sets it.
 pub fn silk_width(g: &Painter, label: &str, size: f32) -> f32 {
-    galley(g, &label.to_uppercase(), Face::Silk, size, theme::INK)
+    galley(g, &label.to_uppercase(), Face::Silk, size, theme::INK())
         .size()
         .x
         - theme::tracking(Face::Silk) * size
@@ -216,7 +238,7 @@ pub fn silk_width(g: &Painter, label: &str, size: f32) -> f32 {
 
 /// `text` cut to fit `width` in `face` (with "…").
 pub fn fit(g: &Painter, text: &str, face: Face, size: f32, width: f32) -> String {
-    let w = |s: &str| galley(g, s, face, size, theme::INK).size().x;
+    let w = |s: &str| galley(g, s, face, size, theme::INK()).size().x;
     if w(text) <= width {
         return text.to_string();
     }
@@ -234,7 +256,7 @@ pub fn fit(g: &Painter, text: &str, face: Face, size: f32, width: f32) -> String
 /// A section bracket over a group of controls: a short tick, the label, a line to the right
 /// end, and small drops at both ends (`|— VIEW ———————|`).
 pub fn bracket(g: &Painter, left: f32, right: f32, y: f32, label: &str) {
-    let ink = theme::INK2.gamma_multiply(0.6);
+    let ink = theme::INK2().gamma_multiply(0.6);
     let st = Stroke::new(1.0, ink);
     g.hline(left..=left + 10.0, y, st);
     let r = silk(
@@ -243,7 +265,7 @@ pub fn bracket(g: &Painter, left: f32, right: f32, y: f32, label: &str) {
         Align2::LEFT_CENTER,
         label,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     if r.right() + 6.0 < right {
         g.hline(r.right() + 6.0..=right, y, st);
@@ -270,8 +292,9 @@ impl Cap {
     /// The print colour on this cap.
     pub fn ink(self) -> Color32 {
         match self {
-            Cap::Bone | Cap::Orange => theme::INK,
-            Cap::Dark => theme::ON_DARK,
+            Cap::Bone => theme::INK(),
+            Cap::Orange => theme::ON_ACCENT(),
+            Cap::Dark => theme::ON_DARK(),
         }
     }
 }
@@ -281,25 +304,37 @@ pub fn paint_key(g: &Painter, rect: Rect, cap: Cap, down: bool, hovered: bool) -
     let radius = (rect.height() * 0.12).clamp(3.0, 5.0);
     let (top, mid, bottom, edge, lip) = match cap {
         Cap::Bone => (
-            theme::BONE_TOP,
-            Color32::from_rgb(0xee, 0xea, 0xe1),
-            Color32::from_rgb(0xe3, 0xde, 0xd3),
-            theme::KEY_EDGE,
-            theme::KEY_LIP,
+            theme::BONE_TOP(),
+            theme::pick(
+                Color32::from_rgb(0xee, 0xea, 0xe1),
+                Color32::from_rgb(0x36, 0x36, 0x3b),
+            ),
+            theme::pick(
+                Color32::from_rgb(0xe3, 0xde, 0xd3),
+                Color32::from_rgb(0x2b, 0x2b, 0x30),
+            ),
+            theme::KEY_EDGE(),
+            theme::KEY_LIP(),
         ),
         Cap::Dark => (
-            theme::CAP_TOP,
-            theme::CAP,
+            theme::CAP_TOP(),
+            theme::CAP(),
             Color32::from_rgb(0x15, 0x14, 0x13),
-            theme::CAP_EDGE,
+            theme::CAP_EDGE(),
             Color32::from_rgb(0x05, 0x05, 0x05),
         ),
         Cap::Orange => (
-            theme::ORANGE_HI,
-            theme::ORANGE,
-            Color32::from_rgb(0xee, 0x4e, 0x0c),
-            theme::ORANGE_DK,
-            Color32::from_rgb(0xa8, 0x36, 0x05),
+            theme::ORANGE_HI(),
+            theme::ORANGE(),
+            theme::pick(
+                Color32::from_rgb(0xee, 0x4e, 0x0c),
+                Color32::from_rgb(0xea, 0x9c, 0x00),
+            ),
+            theme::ORANGE_DK(),
+            theme::pick(
+                Color32::from_rgb(0xa8, 0x36, 0x05),
+                Color32::from_rgb(0x8a, 0x5c, 0x00),
+            ),
         ),
     };
     let lift = if down { 1.0 } else { 2.0 };
@@ -312,9 +347,10 @@ pub fn paint_key(g: &Painter, rect: Rect, cap: Cap, down: bool, hovered: bool) -
     );
     g.rect_filled(rect.translate(vec2(0.0, lift)), radius, lip);
     let (top, mid) = if hovered && !down {
+        let k = if theme::is_dark() { 0.35 } else { 1.0 };
         (
-            lerp(top, Color32::WHITE, 0.25),
-            lerp(mid, Color32::WHITE, 0.15),
+            lerp(top, Color32::WHITE, 0.25 * k),
+            lerp(mid, Color32::WHITE, 0.15 * k),
         )
     } else {
         (top, mid)
@@ -324,7 +360,7 @@ pub fn paint_key(g: &Painter, rect: Rect, cap: Cap, down: bool, hovered: bool) -
         inner_shadow(g, face, radius, 0.10);
     } else {
         let hi = match cap {
-            Cap::Bone => Color32::WHITE,
+            Cap::Bone => theme::emboss(255),
             Cap::Dark => Color32::from_white_alpha(36),
             Cap::Orange => Color32::from_white_alpha(110),
         };
@@ -351,29 +387,63 @@ pub fn led(g: &Painter, c: Pos2, on: bool) {
 /// [`led`] with radius `r`.
 pub fn led_sized(g: &Painter, c: Pos2, r: f32, on: bool) {
     if on {
+        let [lr, lg, lb] = led_glow();
         for (grow, a) in [(4.0, 30u8), (2.5, 55), (1.2, 90)] {
-            g.circle_filled(c, r + grow, Color32::from_rgba_unmultiplied(255, 90, 20, a));
+            g.circle_filled(c, r + grow, Color32::from_rgba_unmultiplied(lr, lg, lb, a));
         }
-        g.circle_filled(c, r, Color32::from_rgb(0xe5, 0x4a, 0x08));
         g.circle_filled(
-            c + vec2(-0.3, -0.4),
-            r * 0.75,
-            Color32::from_rgb(0xff, 0x6a, 0x22),
+            c,
+            r,
+            theme::pick(
+                Color32::from_rgb(0xe5, 0x4a, 0x08),
+                Color32::from_rgb(0xe0, 0x96, 0x00),
+            ),
         );
+        g.circle_filled(c + vec2(-0.3, -0.4), r * 0.75, led_lit());
         g.circle_filled(
             c + vec2(-0.6, -0.8),
             r * 0.35,
-            Color32::from_rgb(0xff, 0xd2, 0xb8),
+            theme::pick(
+                Color32::from_rgb(0xff, 0xd2, 0xb8),
+                Color32::from_rgb(0xff, 0xec, 0xb8),
+            ),
         );
     } else {
-        g.circle_filled(c + vec2(0.0, 1.0), r, Color32::from_white_alpha(130));
-        g.circle_filled(c, r, theme::LED_OFF);
+        g.circle_filled(c + vec2(0.0, 1.0), r, theme::emboss(130));
+        g.circle_filled(c, r, theme::LED_OFF());
         g.circle_filled(
             c + vec2(0.0, 0.6),
             r * 0.7,
-            Color32::from_rgb(0x6a, 0x65, 0x5b),
+            theme::pick(
+                Color32::from_rgb(0x6a, 0x65, 0x5b),
+                Color32::from_rgb(0x2c, 0x2c, 0x31),
+            ),
         );
     }
+}
+
+/// The glow around a lit LED (r, g, b): orange on Bone, amber on Graphite.
+pub fn led_glow() -> [u8; 3] {
+    match theme::current() {
+        theme::Theme::Bone => [255, 90, 20],
+        theme::Theme::Graphite => [255, 176, 0],
+    }
+}
+
+/// A lit LED's face.
+pub fn led_lit() -> Color32 {
+    theme::pick(
+        Color32::from_rgb(0xff, 0x6a, 0x22),
+        Color32::from_rgb(0xff, 0xbe, 0x2a),
+    )
+}
+
+/// An unlit LED in a dark slot.
+pub fn led_dark_off() -> Color32 {
+    theme::pick(
+        Color32::from_rgb(0x4a, 0x47, 0x41),
+        Color32::from_rgb(0x3a, 0x3a, 0x40),
+    )
 }
 
 /// What a key shows on its face.
@@ -447,7 +517,7 @@ pub fn toggle(ui: &Ui, g: &Painter, rect: Rect, id: Id, on: bool, label: &str) -
 
 /// The LCD's black bezel and green glass; returns the glass rect.
 pub fn lcd(g: &Painter, rect: Rect) -> Rect {
-    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 7.0, theme::BONE_HI);
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 7.0, theme::BONE_HI());
     gradient(
         g,
         rect,
@@ -466,9 +536,18 @@ pub fn lcd_glass(g: &Painter, glass: Rect) {
         g,
         glass,
         3.0,
-        Color32::from_rgb(0xa7, 0xb2, 0x93),
-        Color32::from_rgb(0xb5, 0xbf, 0xa2),
-        Color32::from_rgb(0xae, 0xb8, 0x9c),
+        theme::pick(
+            Color32::from_rgb(0xa7, 0xb2, 0x93),
+            Color32::from_rgb(0x24, 0x1a, 0x04),
+        ),
+        theme::pick(
+            Color32::from_rgb(0xb5, 0xbf, 0xa2),
+            Color32::from_rgb(0x2f, 0x22, 0x06),
+        ),
+        theme::pick(
+            Color32::from_rgb(0xae, 0xb8, 0x9c),
+            Color32::from_rgb(0x2b, 0x1f, 0x05),
+        ),
     );
     // Faint scan lines.
     let mut y = glass.top() + 2.0;
@@ -499,7 +578,7 @@ pub fn lcd_readout(g: &Painter, rect: Rect, label: &str, value: &str) {
         &label.to_uppercase(),
         Face::Lcd,
         7.5,
-        theme::LCD_INK.gamma_multiply(0.7),
+        theme::LCD_INK().gamma_multiply(0.7),
     );
     let h = (rect.height() * 0.55).min(18.0);
     let w = seg_width(value, h);
@@ -508,7 +587,7 @@ pub fn lcd_readout(g: &Painter, rect: Rect, label: &str, value: &str) {
         pos2(rect.right() - 5.0 - w, rect.bottom() - 4.0 - h),
         value,
         h,
-        theme::LCD_INK,
+        theme::LCD_INK(),
         true,
     );
 }
@@ -577,7 +656,7 @@ pub fn seg(g: &Painter, pos: Pos2, s: &str, h: f32, on: Color32, ghost: bool) ->
     let t = (h * 0.12).max(1.6);
     let gap = (h * 0.035).max(0.6);
     let slant = 0.08;
-    let ghost_c = theme::LCD_GHOST;
+    let ghost_c = theme::LCD_GHOST();
     let skew = |p: Pos2| pos2(p.x + (pos.y + h - p.y) * slant, p.y);
     for ch in s.chars() {
         if ch == ' ' {
@@ -685,11 +764,11 @@ pub fn paint_knob(g: &Painter, c: Pos2, r: f32, value: f32) {
                 c + d * (r + 2.5),
                 c + d * (r + if long { 6.0 } else { 4.5 }),
             ],
-            Stroke::new(1.0, theme::INK2.gamma_multiply(0.75)),
+            Stroke::new(1.0, theme::INK2().gamma_multiply(0.75)),
         );
     }
     g.circle_filled(c + vec2(0.0, 1.5), r + 0.5, Color32::from_black_alpha(60));
-    g.circle_filled(c, r, theme::CAP_EDGE);
+    g.circle_filled(c, r, theme::CAP_EDGE());
     g.circle_filled(
         c + vec2(-r * 0.12, -r * 0.16),
         r * 0.86,
@@ -705,7 +784,7 @@ pub fn paint_knob(g: &Painter, c: Pos2, r: f32, value: f32) {
     let d = vec2(a.cos(), a.sin());
     g.line_segment(
         [c + d * (r * 0.25), c + d * (r * 0.92)],
-        Stroke::new((r * 0.16).clamp(1.6, 2.6), theme::ORANGE),
+        Stroke::new((r * 0.16).clamp(1.6, 2.6), theme::ORANGE()),
     );
 }
 
@@ -714,8 +793,8 @@ pub fn paint_knob(g: &Painter, c: Pos2, r: f32, value: f32) {
 pub fn paint_fader_v(g: &Painter, track: Rect, value: f32, cap: Vec2) -> Rect {
     let cx = track.center().x;
     let slot = Rect::from_center_size(pos2(cx, track.center().y), vec2(4.0, track.height()));
-    g.rect_filled(slot.expand(1.0), 2.0, Color32::from_white_alpha(120));
-    g.rect_filled(slot, 2.0, theme::INK);
+    g.rect_filled(slot.expand(1.0), 2.0, theme::emboss(120));
+    g.rect_filled(slot, 2.0, groove());
     let span = track.height() - cap.y;
     let y = track.bottom() - cap.y / 2.0 - span * value.clamp(0.0, 1.0);
     let r = Rect::from_center_size(pos2(cx, y), cap);
@@ -727,7 +806,7 @@ pub fn paint_fader_v(g: &Painter, track: Rect, value: f32, cap: Vec2) -> Rect {
 pub fn paint_fader_h(g: &Painter, track: Rect, value: f32, cap: Vec2) -> Rect {
     let cy = track.center().y;
     let slot = Rect::from_center_size(pos2(track.center().x, cy), vec2(track.width(), 3.0));
-    g.rect_filled(slot, 1.5, theme::INK);
+    g.rect_filled(slot, 1.5, groove());
     let span = track.width() - cap.x;
     let x = track.left() + cap.x / 2.0 + span * value.clamp(0.0, 1.0);
     let r = Rect::from_center_size(pos2(x, cy), cap);
@@ -741,21 +820,24 @@ pub fn paint_fader_h(g: &Painter, track: Rect, value: f32, cap: Vec2) -> Rect {
         g,
         r,
         2.0,
-        theme::BONE_TOP,
-        Color32::from_rgb(0xd9, 0xd4, 0xc8),
+        theme::pick(theme::BONE_TOP(), Color32::from_rgb(0x5e, 0x5e, 0x66)),
+        theme::pick(
+            Color32::from_rgb(0xd9, 0xd4, 0xc8),
+            Color32::from_rgb(0x3a, 0x3a, 0x40),
+        ),
     );
-    g.rect_stroke(
-        r,
-        2.0,
-        Stroke::new(1.0, theme::INK),
-        egui::StrokeKind::Inside,
-    );
+    g.rect_stroke(r, 2.0, Stroke::new(1.0, groove()), egui::StrokeKind::Inside);
     g.vline(
         r.center().x,
         r.top() + 2.0..=r.bottom() - 2.0,
-        Stroke::new(2.0, theme::INK),
+        Stroke::new(2.0, groove()),
     );
     r
+}
+
+/// The slot of a fader: black print on Bone, a black groove on Graphite.
+pub fn groove() -> Color32 {
+    theme::pick(theme::INK(), Color32::from_rgb(0x06, 0x06, 0x07))
 }
 
 /// A fader's black cap with two white lines across.
@@ -770,13 +852,13 @@ pub fn fader_cap(g: &Painter, r: Rect) {
         r,
         3.0,
         Color32::from_rgb(0x3e, 0x3c, 0x38),
-        theme::CAP,
+        theme::CAP(),
         Color32::from_rgb(0x10, 0x10, 0x0f),
     );
     g.rect_stroke(
         r,
         3.0,
-        Stroke::new(1.0, theme::CAP_EDGE),
+        Stroke::new(1.0, theme::CAP_EDGE()),
         egui::StrokeKind::Inside,
     );
     let w = r.width() * 0.36;
@@ -784,14 +866,14 @@ pub fn fader_cap(g: &Painter, r: Rect) {
         g.hline(
             r.center().x - w..=r.center().x + w,
             r.center().y + dy,
-            Stroke::new(1.2, theme::BONE_HI),
+            Stroke::new(1.2, theme::ON_DARK()),
         );
     }
 }
 
 /// A tick scale beside a vertical fader: `marks` are (0..1 position, label).
 pub fn scale_v(g: &Painter, rect: Rect, marks: &[(f32, &str)], label_right: bool) {
-    let st = Stroke::new(1.0, theme::PRINT);
+    let st = Stroke::new(1.0, theme::PRINT());
     for (v, label) in marks {
         let y = rect.bottom() - rect.height() * v.clamp(0.0, 1.0);
         if label_right {
@@ -803,7 +885,7 @@ pub fn scale_v(g: &Painter, rect: Rect, marks: &[(f32, &str)], label_right: bool
                 label,
                 Face::Bold,
                 8.5,
-                theme::INK2,
+                theme::INK2(),
             );
         } else {
             g.hline(rect.right() - 5.0..=rect.right(), y, st);
@@ -814,17 +896,17 @@ pub fn scale_v(g: &Painter, rect: Rect, marks: &[(f32, &str)], label_right: bool
                 label,
                 Face::Bold,
                 8.5,
-                theme::INK2,
+                theme::INK2(),
             );
         }
     }
 }
 
 /// A segmented level meter in a dark window, vertical: `level` and `peak` from 0 to 1 (the
-/// peak hold drawn as a bright bar). Segments near the top light peach.
+/// peak hold drawn as a lit segment). Olive, amber near the top, orange at the top.
 pub fn paint_meter_v(g: &Painter, rect: Rect, level: f32, peak: f32) {
-    g.rect_filled(rect.expand(1.0), 2.0, Color32::from_white_alpha(140));
-    g.rect_filled(rect, 2.0, theme::METER_WELL);
+    g.rect_filled(rect.expand(1.0), 2.0, theme::emboss(140));
+    g.rect_filled(rect, 2.0, theme::METER_WELL());
     let inner = rect.shrink(2.0);
     let pitch = 3.0;
     let n = (inner.height() / pitch).floor().max(1.0) as usize;
@@ -837,26 +919,30 @@ pub fn paint_meter_v(g: &Painter, rect: Rect, level: f32, peak: f32) {
             pos2(inner.right(), y1),
         );
         let frac = i as f32 / n as f32;
-        let c = if i < lit {
-            if frac > 0.86 {
-                theme::ORANGE
-            } else if frac > 0.7 {
-                Color32::from_rgb(0xff, 0xd2, 0xb8)
-            } else {
-                Color32::from_rgb(0xf2, 0xec, 0xe2)
-            }
-        } else if peak_seg > 0 && i + 1 == peak_seg {
-            Color32::from_rgb(0xff, 0xc8, 0xa8)
+        let c = if i < lit || peak_seg > 0 && i + 1 == peak_seg {
+            meter_zone(frac)
         } else {
-            Color32::from_rgb(0x2c, 0x2a, 0x27)
+            theme::METER_OFF
         };
         g.rect_filled(r, 0.0, c);
     }
 }
 
+/// The colour of a lit segment `frac` of the way up a meter: olive to 65 %, amber to 85 %,
+/// orange above.
+pub fn meter_zone(frac: f32) -> Color32 {
+    if frac >= 0.85 {
+        theme::METER_HOT
+    } else if frac >= 0.65 {
+        theme::METER_MID
+    } else {
+        theme::METER_LO
+    }
+}
+
 /// [`paint_meter_v`] laid on its side (levels in headers and the control bar).
 pub fn paint_meter_h(g: &Painter, rect: Rect, level: f32, peak: f32) {
-    g.rect_filled(rect, 2.0, theme::METER_WELL);
+    g.rect_filled(rect, 2.0, theme::METER_WELL());
     let inner = rect.shrink(2.0);
     let pitch = 3.0;
     let n = (inner.width() / pitch).floor().max(1.0) as usize;
@@ -869,16 +955,10 @@ pub fn paint_meter_h(g: &Painter, rect: Rect, level: f32, peak: f32) {
             pos2(x0 + pitch - 1.0, inner.bottom()),
         );
         let frac = i as f32 / n as f32;
-        let c = if i < lit {
-            if frac > 0.86 {
-                theme::ORANGE
-            } else {
-                Color32::from_rgb(0xf2, 0xec, 0xe2)
-            }
-        } else if peak_seg > 0 && i + 1 == peak_seg {
-            Color32::from_rgb(0xff, 0xc8, 0xa8)
+        let c = if i < lit || peak_seg > 0 && i + 1 == peak_seg {
+            meter_zone(frac)
         } else {
-            Color32::from_rgb(0x2c, 0x2a, 0x27)
+            theme::METER_OFF
         };
         g.rect_filled(r, 0.0, c);
     }
@@ -917,18 +997,14 @@ pub fn paint_slot(
                 g.rect_stroke(
                     rect,
                     radius,
-                    Stroke::new(1.0, theme::SEAM_DK),
+                    Stroke::new(1.0, theme::SEAM_DK()),
                     egui::StrokeKind::Inside,
                 );
             }
-            theme::PRINT
+            theme::PRINT()
         }
         SlotKind::Filled => {
-            g.rect_filled(
-                rect.translate(vec2(0.0, 1.0)),
-                radius,
-                Color32::from_white_alpha(150),
-            );
+            g.rect_filled(rect.translate(vec2(0.0, 1.0)), radius, theme::emboss(150));
             let top = if hovered {
                 Color32::from_rgb(0x3c, 0x3a, 0x36)
             } else {
@@ -938,7 +1014,7 @@ pub fn paint_slot(
             g.rect_stroke(
                 rect,
                 radius,
-                Stroke::new(1.0, theme::CAP_EDGE),
+                Stroke::new(1.0, theme::CAP_EDGE()),
                 egui::StrokeKind::Inside,
             );
             g.hline(
@@ -946,33 +1022,38 @@ pub fn paint_slot(
                 rect.top() + 1.5,
                 Stroke::new(1.0, Color32::from_white_alpha(22)),
             );
-            theme::ON_DARK
+            theme::ON_DARK()
         }
         SlotKind::Plain => {
-            g.rect_filled(rect.translate(vec2(0.0, 1.0)), radius, theme::KEY_LIP);
+            g.rect_filled(rect.translate(vec2(0.0, 1.0)), radius, theme::KEY_LIP());
             let top = if hovered {
-                Color32::WHITE
+                theme::pick(Color32::WHITE, Color32::from_rgb(0x48, 0x48, 0x4f))
             } else {
-                theme::BONE_TOP
+                theme::BONE_TOP()
             };
-            gradient(g, rect, radius, top, Color32::from_rgb(0xe8, 0xe4, 0xda));
+            let bottom = theme::pick(
+                Color32::from_rgb(0xe8, 0xe4, 0xda),
+                Color32::from_rgb(0x2c, 0x2c, 0x31),
+            );
+            gradient(g, rect, radius, top, bottom);
             g.rect_stroke(
                 rect,
                 radius,
-                Stroke::new(1.0, theme::KEY_EDGE),
+                Stroke::new(1.0, theme::KEY_EDGE()),
                 egui::StrokeKind::Inside,
             );
-            theme::INK
+            theme::INK()
         }
     };
     let mut x = rect.left() + 7.0;
     if let Some(on) = led_on {
         let c = pos2(x + 2.0, rect.center().y);
         if on {
-            g.circle_filled(c, 4.0, Color32::from_rgba_unmultiplied(255, 90, 20, 60));
-            g.circle_filled(c, 2.5, Color32::from_rgb(0xff, 0x6a, 0x22));
+            let [lr, lg, lb] = led_glow();
+            g.circle_filled(c, 4.0, Color32::from_rgba_unmultiplied(lr, lg, lb, 60));
+            g.circle_filled(c, 2.5, led_lit());
         } else {
-            g.circle_filled(c, 2.5, Color32::from_rgb(0x4a, 0x47, 0x41));
+            g.circle_filled(c, 2.5, led_dark_off());
         }
         x += 10.0;
     }
@@ -1028,11 +1109,7 @@ pub fn slot(
 /// A dark value field (the inspector's values): black face, bone text, and up/down arrows at
 /// the right when `stepper`.
 pub fn paint_field(g: &Painter, rect: Rect, value: &str, stepper: bool, hovered: bool) {
-    g.rect_filled(
-        rect.translate(vec2(0.0, 1.0)),
-        2.0,
-        Color32::from_white_alpha(140),
-    );
+    g.rect_filled(rect.translate(vec2(0.0, 1.0)), 2.0, theme::emboss(140));
     let top = if hovered {
         Color32::from_rgb(0x30, 0x2e, 0x2b)
     } else {
@@ -1042,7 +1119,7 @@ pub fn paint_field(g: &Painter, rect: Rect, value: &str, stepper: bool, hovered:
     g.rect_stroke(
         rect,
         2.0,
-        Stroke::new(1.0, theme::CAP_EDGE),
+        Stroke::new(1.0, theme::CAP_EDGE()),
         egui::StrokeKind::Inside,
     );
     let room = rect.width() - if stepper { 26.0 } else { 12.0 };
@@ -1054,7 +1131,7 @@ pub fn paint_field(g: &Painter, rect: Rect, value: &str, stepper: bool, hovered:
         &shown,
         Face::Bold,
         10.5,
-        theme::ON_DARK,
+        theme::ON_DARK(),
     );
     if stepper {
         let c = pos2(rect.right() - 10.0, rect.center().y);
@@ -1162,7 +1239,7 @@ pub fn paint_region(
         rect,
         radius,
         Stroke::new(
-            if look.outline == theme::ORANGE {
+            if look.outline == theme::ORANGE() {
                 1.5
             } else {
                 1.0
@@ -1186,19 +1263,25 @@ pub fn faceplate(g: &Painter, rect: Rect, radius: f32, lit_top: bool) {
         g,
         rect,
         radius,
-        Color32::from_rgb(0xef, 0xec, 0xe4),
-        Color32::from_rgb(0xe6, 0xe2, 0xd8),
+        theme::pick(
+            Color32::from_rgb(0xef, 0xec, 0xe4),
+            Color32::from_rgb(0x2b, 0x2b, 0x2f),
+        ),
+        theme::pick(
+            Color32::from_rgb(0xe6, 0xe2, 0xd8),
+            Color32::from_rgb(0x25, 0x25, 0x29),
+        ),
     );
     g.rect_stroke(
         rect,
         radius,
-        Stroke::new(1.0, theme::SEAM),
+        Stroke::new(1.0, theme::SEAM()),
         egui::StrokeKind::Inside,
     );
     g.hline(
         rect.left() + radius..=rect.right() - radius,
         rect.top() + 1.5,
-        Stroke::new(1.0, Color32::from_white_alpha(200)),
+        Stroke::new(1.0, theme::emboss(200)),
     );
     if lit_top {
         let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 3.0));
@@ -1210,7 +1293,7 @@ pub fn faceplate(g: &Painter, rect: Rect, radius: f32, lit_top: bool) {
                 sw: 0,
                 se: 0,
             },
-            theme::ORANGE,
+            theme::ORANGE(),
         );
     }
 }

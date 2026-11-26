@@ -715,6 +715,14 @@ pub enum Command {
     },
     /// Every Arpeggiator lets go of its keys (latched ones too) and ends its notes.
     ReleaseArps,
+    /// Groove Live of `track` (`None`: off): keys played live on it while the song plays wait
+    /// for a step the groove plays late (see [`crate::live_groove`]). The old table goes back
+    /// through the garbage queue; keys of the track still waiting sound at once. At most
+    /// [`crate::live_groove::MAX_LIVE_GROOVES`] tracks have one; more are ignored.
+    SetTrackLiveGroove {
+        track: u16,
+        groove: Option<Box<crate::live_groove::LiveGroove>>,
+    },
 }
 
 impl Command {
@@ -765,6 +773,7 @@ pub enum Garbage {
     Input(Box<InputFeed>),
     SoundFont(Box<SfPlayer>),
     Plugins(Box<PluginTrack>),
+    LiveGroove(Box<crate::live_groove::LiveGroove>),
 }
 
 /// What the engine shows the UI after each audio block: the playhead, the transport and the
@@ -1215,6 +1224,15 @@ pub struct EngineCore {
     /// Their clock in beats: the song's while it plays; while it is stopped it runs on from
     /// there at the tempo of the playhead.
     arp_clock: f64,
+    /// Groove Live of the tracks that have it (see [`Command::SetTrackLiveGroove`]).
+    #[allow(clippy::vec_box)] // moved through the queues as one pointer
+    live_grooves: Vec<(u16, Box<crate::live_groove::LiveGroove>)>,
+    /// The keys waiting for their groove step.
+    held: Box<crate::live_groove::Held>,
+    /// While a key's release for every track is handled: the tracks whose release of it waits
+    /// (Groove Live), which it does not end now.
+    off_waits: [u16; crate::live_groove::MAX_LIVE_GROOVES],
+    off_waits_len: usize,
 }
 
 /// Regions of live tracks that can be delayed at once (see [`Command::SetContentDelay`]).
@@ -1436,6 +1454,10 @@ impl EngineCore {
             arps: Vec::with_capacity(MAX_LIVE_ARPS),
             arp_events: Vec::with_capacity(ARP_EVENTS),
             arp_clock: 0.0,
+            live_grooves: Vec::with_capacity(crate::live_groove::MAX_LIVE_GROOVES),
+            held: Box::default(),
+            off_waits: [0; crate::live_groove::MAX_LIVE_GROOVES],
+            off_waits_len: 0,
         }
     }
 
@@ -2667,6 +2689,7 @@ impl EngineCore {
                 self.live_note_on(pitch.min(127), vel.clamp(1, 127), track)
             }
             Command::SetTrackArp { track, arp } => self.set_track_arp(track, arp),
+            Command::SetTrackLiveGroove { track, groove } => self.set_live_groove(track, groove),
             Command::ReleaseArps => {
                 for i in 0..self.arps.len() {
                     self.with_arp(i, |run, _, now, out| run.stop(now, &mut |e| out(e)));
@@ -3078,8 +3101,8 @@ impl EngineCore {
         }
     }
 
-    /// A key played live goes down: held by the track's Arpeggiator when it has one,
-    /// sounded at once otherwise.
+    /// A key played live goes down: held by the track's Arpeggiator when it has one, kept
+    /// until its groove step with Groove Live, sounded at once otherwise.
     fn live_note_on(&mut self, pitch: u8, vel: u8, track: u16) {
         if let Some(i) = self.arps.iter().position(|a| a.track == track) {
             let now = self.arp_now(track);
@@ -3088,11 +3111,104 @@ impl EngineCore {
             a.run.key_down(&a.settings, pitch, vel, now);
             return;
         }
+        if self.hold_key(track, pitch, vel, true) {
+            return;
+        }
         self.sound_live_on(pitch, vel, track);
+    }
+
+    /// Groove Live: keeps a key press (`on`) until its groove step, or its release as long as
+    /// its press waited. Returns whether it is kept (false: sound it now).
+    fn hold_key(&mut self, track: u16, pitch: u8, vel: u8, on: bool) -> bool {
+        if !self.playing {
+            return false;
+        }
+        let beat = self.beat;
+        let Some((_, g)) = self.live_grooves.iter_mut().find(|(t, _)| *t == track) else {
+            return false;
+        };
+        let wait = if on { g.wait_at(beat) } else { g.waited(pitch) };
+        g.set_waited(pitch, if on { wait } else { 0.0 });
+        if wait <= 0.0 {
+            return false;
+        }
+        let kept = self.held.push(crate::live_groove::HeldKey {
+            due: beat + wait,
+            track,
+            pitch,
+            vel,
+            on,
+        });
+        if !kept {
+            if let Some((_, g)) = self.live_grooves.iter_mut().find(|(t, _)| *t == track) {
+                g.set_waited(pitch, 0.0);
+            }
+        }
+        kept
+    }
+
+    /// Sounds the keys whose groove step has come (all of them, or those of `track`, while the
+    /// song is stopped or the track loses Groove Live).
+    fn tick_held(&mut self, all: bool, track: Option<u16>) {
+        use crate::live_groove::{HeldKey, MAX_HELD};
+        let mut out = [HeldKey::default(); MAX_HELD];
+        let mut n = 0;
+        let beat = self.beat;
+        self.held.release(beat, all, track, |k| {
+            out[n] = k;
+            n += 1;
+        });
+        for k in &out[..n] {
+            if k.on {
+                self.sound_live_on(k.pitch, k.vel, k.track);
+            } else {
+                self.sound_live_off(k.pitch, Some(k.track), true);
+            }
+        }
+    }
+
+    fn set_live_groove(&mut self, track: u16, groove: Option<Box<crate::live_groove::LiveGroove>>) {
+        let at = self.live_grooves.iter().position(|(t, _)| *t == track);
+        match (at, groove) {
+            (Some(i), Some(g)) => {
+                let old = std::mem::replace(&mut self.live_grooves[i].1, g);
+                self.give_back(Garbage::LiveGroove(old));
+            }
+            (None, Some(g)) => {
+                if self.live_grooves.len() < crate::live_groove::MAX_LIVE_GROOVES {
+                    self.live_grooves.push((track, g));
+                } else {
+                    self.give_back(Garbage::LiveGroove(g));
+                }
+            }
+            (Some(i), None) => {
+                let (_, old) = self.live_grooves.swap_remove(i);
+                self.give_back(Garbage::LiveGroove(old));
+                if !self.held.is_empty() {
+                    self.tick_held(false, Some(track));
+                }
+            }
+            (None, None) => {}
+        }
     }
 
     /// A key played live goes up. The notes an Arpeggiator made of it end by themselves.
     fn live_note_off(&mut self, pitch: u8, track: Option<u16>) {
+        // Groove Live: a release waits as long as its key did.
+        if let Some(t) = track {
+            if self.hold_key(t, pitch, 0, false) {
+                return;
+            }
+        } else if self.playing {
+            self.off_waits_len = 0;
+            for i in 0..self.live_grooves.len() {
+                let t = self.live_grooves[i].0;
+                if self.hold_key(t, pitch, 0, false) && self.off_waits_len < self.off_waits.len() {
+                    self.off_waits[self.off_waits_len] = t;
+                    self.off_waits_len += 1;
+                }
+            }
+        }
         for a in self
             .arps
             .iter_mut()
@@ -3101,6 +3217,7 @@ impl EngineCore {
             a.run.key_up(&a.settings, pitch);
         }
         self.sound_live_off(pitch, track, true);
+        self.off_waits_len = 0;
     }
 
     fn sound_live_on(&mut self, pitch: u8, vel: u8, track: u16) {
@@ -3143,7 +3260,8 @@ impl EngineCore {
         while i < self.ext_notes.len() {
             let e = self.ext_notes[i];
             let ends = track.is_none_or(|x| x == e.track)
-                && !(keys && self.arps.iter().any(|a| a.track == e.track));
+                && !(keys && self.arps.iter().any(|a| a.track == e.track))
+                && !(keys && self.off_waits[..self.off_waits_len].contains(&e.track));
             if e.live && e.pitch == pitch && ends {
                 self.ext_notes.swap_remove(i);
                 self.send_midi(e.track, false, e.pitch, 0, false);
@@ -3152,8 +3270,11 @@ impl EngineCore {
             }
         }
         let arps = &self.arps;
-        let ends =
-            |t: u16| track.is_none_or(|x| x == t) && !(keys && arps.iter().any(|a| a.track == t));
+        let waits = &self.off_waits[..self.off_waits_len];
+        let ends = |t: u16| {
+            track.is_none_or(|x| x == t)
+                && !(keys && (arps.iter().any(|a| a.track == t) || waits.contains(&t)))
+        };
         for v in self
             .voices
             .iter_mut()
@@ -3493,6 +3614,9 @@ impl EngineCore {
             let (mut l, mut r) = (0f64, 0f64);
             if !self.arps.is_empty() {
                 self.tick_arps();
+            }
+            if !self.held.is_empty() {
+                self.tick_held(!self.playing, None);
             }
             if self.playing {
                 while let Some(n) = self.song.notes.get(self.next_note).copied() {
@@ -4174,6 +4298,82 @@ mod tests {
         let (gtx, grx) = rtrb::RingBuffer::new(8);
         let core = EngineCore::new(48_000, rx, gtx, Arc::new(Shared::new()));
         (core, tx, grx)
+    }
+
+    #[test]
+    fn groove_live_holds_a_key_for_a_late_step_and_its_release_as_long_does_not_allocate() {
+        let (mut e, mut tx, mut garbage) = rig_with_garbage();
+        let song = Song::new(vec![], vec![TrackMix::default()]);
+        assert!(tx.push(Command::SetSong(Box::new(song))).is_ok());
+        assert!(tx
+            .push(Command::SetTempoMap(Box::new(TempoMap::constant(
+                120.0,
+                (4, 4)
+            ))))
+            .is_ok());
+        // The groove plays the downbeat 0.1 of a beat late (50 ms at 120 bpm), the e on time.
+        let g = crate::live_groove::LiveGroove::new(vec![(0.0, 0.1), (0.25, 0.25)], 1.0);
+        assert!(tx
+            .push(Command::SetTrackLiveGroove {
+                track: 0,
+                groove: Some(Box::new(g)),
+            })
+            .is_ok());
+        assert!(tx.push(Command::Play).is_ok());
+        let sounding = |e: &EngineCore| {
+            e.voices
+                .iter()
+                .any(|v| v.active && v.live && v.pitch == 60 && !v.releasing)
+        };
+        let mut buf = vec![0.0f32; 48 * 2];
+        e.process(&mut buf);
+        assert!(tx
+            .push(Command::NoteOn {
+                pitch: 60,
+                vel: 100,
+                track: 0
+            })
+            .is_ok());
+        // 20 ms: still waiting for its step.
+        let mut block = vec![0.0f32; 960 * 2];
+        assert_no_alloc::assert_no_alloc(|| e.process(&mut block));
+        assert!(!sounding(&e), "held back toward the late step");
+        // 60 ms more: it sounds (never earlier than pressed, never later than the step).
+        for _ in 0..3 {
+            assert_no_alloc::assert_no_alloc(|| e.process(&mut block));
+        }
+        assert!(sounding(&e));
+        // Released: the release waits as long as the key did, so the note keeps its length.
+        // (The keyboard's release is for every track.)
+        assert!(tx.push(Command::NoteOff { pitch: 60 }).is_ok());
+        assert_no_alloc::assert_no_alloc(|| e.process(&mut block));
+        assert!(sounding(&e), "the release waits too");
+        for _ in 0..3 {
+            assert_no_alloc::assert_no_alloc(|| e.process(&mut block));
+        }
+        assert!(!sounding(&e));
+        // A key on a step the groove does not play late sounds at once; off: at once too.
+        assert!(tx
+            .push(Command::SetTrackLiveGroove {
+                track: 0,
+                groove: None,
+            })
+            .is_ok());
+        e.process(&mut buf);
+        let mut returned = false;
+        while let Ok(g) = garbage.pop() {
+            returned |= matches!(g, Garbage::LiveGroove(_));
+        }
+        assert!(returned, "the table goes back to the UI thread");
+        assert!(tx
+            .push(Command::NoteOn {
+                pitch: 60,
+                vel: 100,
+                track: 0
+            })
+            .is_ok());
+        e.process(&mut buf);
+        assert!(sounding(&e));
     }
 
     fn sine_player(sr: f32) -> Box<SfPlayer> {

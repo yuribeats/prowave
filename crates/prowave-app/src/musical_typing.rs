@@ -44,6 +44,9 @@ pub struct Typing {
     notes: Vec<LiveNote>,
     /// The key of the keybed held down with the mouse.
     mouse: Option<Key>,
+    /// Caps Lock as last seen: the window follows its changes only, so the close key keeps
+    /// the window shut while Caps Lock stays on.
+    caps: Option<bool>,
 }
 
 impl Default for Typing {
@@ -57,6 +60,7 @@ impl Default for Typing {
             held: Vec::new(),
             notes: Vec::new(),
             mouse: None,
+            caps: None,
         }
     }
 }
@@ -107,7 +111,7 @@ fn caps_lock_on() -> Option<bool> {
 /// while open, its keys become notes and are taken out of the input.
 pub fn poll(ctx: &egui::Context, t: &mut Typing) {
     if let Some(on) = caps_lock_on() {
-        t.set_open(on);
+        follow_caps_lock(t, on);
         // Nothing wakes the window when only Caps Lock changes, so look again shortly.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -122,6 +126,16 @@ pub fn poll(ctx: &egui::Context, t: &mut Typing) {
         }
     }
     poll_events(ctx, t);
+}
+
+/// Caps Lock switched on opens the window, switched off closes it; while it stays as it is the
+/// window stays as it is (closed with its close key, it does not come back until Caps Lock is
+/// pressed again).
+fn follow_caps_lock(t: &mut Typing, on: bool) {
+    if t.caps != Some(on) {
+        t.caps = Some(on);
+        t.set_open(on);
+    }
 }
 
 /// Space was pressed in a plug-in window since the last call (the transport should toggle).
@@ -453,7 +467,7 @@ pub fn show(ctx: &egui::Context, t: &mut Typing) {
             pos2(glass.left() + 12.0, glass.top() + 21.0),
             &oct,
             26.0,
-            theme::LCD_INK,
+            theme::LCD_INK(),
             true,
         );
         hu::lcd_label(&g, pos2(z1 + 9.0, glass.top() + 6.0), tr("Velocity"));
@@ -463,7 +477,7 @@ pub fn show(ctx: &egui::Context, t: &mut Typing) {
             pos2(z1 + 12.0, glass.top() + 21.0),
             &vel,
             26.0,
-            theme::LCD_INK,
+            theme::LCD_INK(),
             true,
         );
         // A ladder of the velocity: ten bars rising.
@@ -479,9 +493,9 @@ pub fn show(ctx: &egui::Context, t: &mut Typing) {
                 r,
                 0.0,
                 if lit {
-                    theme::LCD_INK
+                    theme::LCD_INK()
                 } else {
-                    theme::LCD_GHOST
+                    theme::LCD_GHOST()
                 },
             );
         }
@@ -502,19 +516,19 @@ pub fn show(ctx: &egui::Context, t: &mut Typing) {
             &shown,
             Face::Lcd,
             15.0,
-            theme::LCD_INK,
+            theme::LCD_INK(),
         );
 
         // The keybed in its dark slot.
         ui.add_space(10.0);
         let (slot, resp) =
             ui.allocate_exact_size(vec2(width, WHITE.y + 14.0), Sense::click_and_drag());
-        g.rect_filled(slot.translate(vec2(0.0, 1.0)), 4.0, theme::BONE_HI);
+        g.rect_filled(slot.translate(vec2(0.0, 1.0)), 4.0, theme::BONE_HI());
         hw::gradient(
             &g,
             slot,
             4.0,
-            theme::METER_WELL,
+            theme::METER_WELL(),
             egui::Color32::from_rgb(0x0f, 0x0f, 0x0e),
         );
         hw::inner_shadow(&g, slot, 4.0, 0.6);
@@ -557,11 +571,11 @@ pub fn show(ctx: &egui::Context, t: &mut Typing) {
             let face = hw::paint_key(&g, *r, cap, on, false);
             let ink = cap.ink();
             let print = if cap == Cap::Dark {
-                theme::ON_DARK_DIM
+                theme::ON_DARK_DIM()
             } else if on {
-                theme::INK
+                theme::INK()
             } else {
-                theme::PRINT
+                theme::PRINT()
             };
             // The note over the computer key, below where the black keys reach.
             let note_y = if *black {
@@ -623,11 +637,11 @@ pub fn show(ctx: &egui::Context, t: &mut Typing) {
                     letter,
                     Face::Bold,
                     14.0,
-                    theme::INK,
+                    theme::INK(),
                 );
                 // The sign, drawn (a minus or a plus).
                 let c = pos2(face.right() - 16.0, face.center().y);
-                let st = egui::Stroke::new(2.2, theme::INK);
+                let st = egui::Stroke::new(2.2, theme::INK());
                 g.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], st);
                 if sign == "+" {
                     g.line_segment([c + vec2(0.0, -5.0), c + vec2(0.0, 5.0)], st);
@@ -738,6 +752,39 @@ mod tests {
         );
     }
 
+    /// The close key shuts the window, and it stays shut while Caps Lock stays on; pressing
+    /// Caps Lock again (off, then on) opens it again.
+    #[test]
+    fn the_close_key_closes_the_window_and_caps_lock_does_not_reopen_it() {
+        let mut t = Typing::default();
+        follow_caps_lock(&mut t, true);
+        assert!(t.open);
+        handle(&mut t, Key::A, true, false);
+        t.take();
+        let mut h = crate::ui_test::Harness::new(1200.0, 800.0);
+        h.settle(|ui| show(ui.ctx(), &mut t));
+        let at = crate::spectrogram_view::hw_vocal::close_key_center(
+            &h.ctx,
+            egui::Id::unique("musical_typing"),
+        )
+        .expect("the window is on screen");
+        h.click(at, |ui| show(ui.ctx(), &mut t));
+        assert!(!t.open, "the close key closes it");
+        assert_eq!(
+            t.take(),
+            vec![LiveNote::Off { pitch: 60 }],
+            "held notes let go"
+        );
+        // Caps Lock is still on: the next frames' polls leave it closed.
+        for _ in 0..3 {
+            follow_caps_lock(&mut t, true);
+        }
+        assert!(!t.open);
+        follow_caps_lock(&mut t, false);
+        follow_caps_lock(&mut t, true);
+        assert!(t.open, "Caps Lock pressed again opens it");
+    }
+
     /// `musical-typing.png`: the window with a chord held.
     #[test]
     #[ignore = "pictures"]
@@ -751,7 +798,7 @@ mod tests {
             600.0,
             420.0,
             2.0,
-            crate::theme::BONE3,
+            crate::theme::BONE3(),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 show(ui.ctx(), &mut t);

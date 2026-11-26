@@ -993,14 +993,14 @@
           ]
         },
         {
-          "description": "only those whose name, maker or id contains this text",
+          "description": "only those whose name, maker, id or emulated hardware (emulates) contains this text",
           "name": "search",
           "required": false,
           "type": "string"
         }
       ],
-      "result": "{count, plugins: [{id, name, maker, kind, format: built-in|AU|VST3, vst3_id?, turned_off_after_crash?}]}",
-      "summary": "The instruments and effects that can be loaded: the app's own, and the Audio Units and VST3s on this Mac."
+      "result": "{count, plugins: [{id, name, maker, kind, format: built-in|AU|VST3, vst3_id?, turned_off_after_crash?, rating?, type?, emulates?, master_chain?}]}",
+      "summary": "The instruments and effects that can be loaded: the app's own, and the Audio Units and VST3s on this Mac. Hidden ones (the settings file plugin-hidden; Apple's Audio Units unless plugin-hide-apple holds 0) are left out."
     },
     {
       "changes_project": true,
@@ -1795,7 +1795,7 @@
       "group": "kits",
       "name": "kits.status",
       "params": [],
-      "result": "{folders: [{path, present, kits}], kits, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition}",
+      "result": "{folders: [{path, present, kits}], kits (with the kit list active: the kits it shows), all_kits, kit_list: {path, on, active, file, rows, matched, types, error}, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition, default_kit, copy_kits (remote, always), copying (a kit load waits for its samples to be copied here), local}",
       "summary": "The drum-kit library: its folders (present: the folder is there now), the number of kits (listed: those whose files are read and kept; pools: sources of one-sample folders shown as one) and the sources. The first call reads the folders."
     },
     {
@@ -1810,7 +1810,7 @@
           "type": "boolean"
         }
       ],
-      "result": "{folders: [{path, present, kits}], kits, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition}",
+      "result": "{folders: [{path, present, kits}], kits (with the kit list active: the kits it shows), all_kits, kit_list: {path, on, active, file, rows, matched, types, error}, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition, default_kit, copy_kits (remote, always), copying (a kit load waits for its samples to be copied here), local}",
       "summary": "Reads the library folders again and waits for it (scan_ms is how long it took); then every kit's files are read again in the background (listing in kits.status while they are)."
     },
     {
@@ -1825,7 +1825,7 @@
           "type": "array"
         }
       ],
-      "result": "{folders: [{path, present, kits}], kits, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition}",
+      "result": "{folders: [{path, present, kits}], kits (with the kit list active: the kits it shows), all_kits, kit_list: {path, on, active, file, rows, matched, types, error}, listed, pools, sources: [{name, kits}], scanning, listing: {done, total} or null, indexing, scan_ms, last_listing: {read, ms}, favorites, audition, default_kit, copy_kits (remote, always), copying (a kit load waits for its samples to be copied here), local}",
       "summary": "Sets the library folders (saved), then scans them. A folder that is not there is kept and shows present: false."
     },
     {
@@ -1858,6 +1858,18 @@
           "type": "boolean"
         },
         {
+          "description": "false: every kit, as if the kit list were off (default: the kit list when it is active)",
+          "name": "list",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "description": "with the kit list: only kits of this type of it",
+          "name": "type",
+          "required": false,
+          "type": "string"
+        },
+        {
           "description": "most kits to return (default 50)",
           "max": 1000.0,
           "min": 1.0,
@@ -1874,8 +1886,8 @@
           "type": "integer"
         }
       ],
-      "result": "{total, offset, kits: [{path, source, name, files, license, best, favorite, channels, pool}]}",
-      "summary": "The kits whose source or name holds every word of the query, as the Kit Browser lists them."
+      "result": "{total, offset, kits: [{path, source, name, files, license, best, favorite, channels, pool, rank, type}]}",
+      "summary": "The kits whose source or name holds every word of the query, as the Kit Browser lists them: with the kit list active, only its kits (and the favourites and the kit of new racks) in its order, grouped by type."
     },
     {
       "changes_project": false,
@@ -1926,8 +1938,8 @@
           "type": "any"
         }
       ],
-      "result": "{track, kit, channels: [{channel, name, path}]}",
-      "summary": "Loads a kit into a Channel Rack: its samples go on the channels kits.get lists; levels, pans, mutes and steps stay. A kit of SoundFonts alone goes on a new instrument track as its SoundFont (its drum preset when it has one)."
+      "result": "{track, kit, channels: [{channel, name, path, class}]}",
+      "summary": "Loads a kit into a Channel Rack: its samples go on the channels kits.get lists (copied to this computer first as kits.copy says); levels, pans, mutes and steps stay. A kit of SoundFonts alone goes on a new instrument track as its SoundFont (its drum preset when it has one)."
     },
     {
       "changes_project": true,
@@ -1955,7 +1967,7 @@
           "type": "any"
         }
       ],
-      "result": "{track, kit, channels: [{channel, name, path}]}",
+      "result": "{track, kit, channels: [{channel, name, path, class}]}",
       "summary": "Puts one audio file on one channel of a Channel Rack (empty channels are added up to it)."
     },
     {
@@ -1988,6 +2000,46 @@
     {
       "changes_project": false,
       "group": "kits",
+      "name": "kits.copy",
+      "params": [
+        {
+          "description": "remote or always (saved)",
+          "name": "mode",
+          "required": false,
+          "type": "string",
+          "values": [
+            "remote",
+            "always"
+          ]
+        }
+      ],
+      "result": "{mode, local}",
+      "summary": "When a kit or sample loaded into a rack is copied to this computer (kit-library/local/<source>/<kit>/, the rack then plays the copies): remote copies only from folders on a network share (the default), always from every folder. Left out: tells the setting."
+    },
+    {
+      "changes_project": false,
+      "group": "kits",
+      "name": "kits.list",
+      "params": [
+        {
+          "description": "the TSV (saved; turns the list on); \"\" clears it",
+          "name": "path",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "false: the list is kept but not used (saved), as the Kit Browser's Kit List switch",
+          "name": "on",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "result": "{path, on, active (set, read and on), file (the file read), rows, matched (kits of the list found), types: [{type, kits}], error}",
+      "summary": "The kit list: a TSV (header with path, and rank, type, reason) naming kits by their folder relative to the library folder. Set, the Kit Browser, kits.search and kits.status show only its kits (and the favourites and the kit of new racks), in rank order, grouped by type. A list path not found as written is looked for in the library folders (the same file on another Mac's mount). Left out: tells the setting."
+    },
+    {
+      "changes_project": false,
+      "group": "kits",
       "name": "kits.favorite",
       "params": [
         {
@@ -2005,6 +2057,692 @@
       ],
       "result": "{path, favorite}",
       "summary": "Marks a kit as a favourite, or takes the mark off."
+    },
+    {
+      "changes_project": false,
+      "group": "rack",
+      "name": "rack.get",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        }
+      ],
+      "result": "{track, region (null: none yet), kit, steps, groove: {name, source, straight, default: feel, classes: {class: feel}}, amounts: {groove, offset, velocity (percent)}, velocity (of a hit added by hand), pattern: {name, source, steps, hits}, copying (a kit being copied here), channels: [{channel, note, name, path, class, gain_db, pan, mute, swing, offset (percent of its class's offsets played), steps: [from 1], starts: [quarter notes from the region's start], hits: [{step, sub, div, vel, start}]}]}",
+      "summary": "A Channel Rack: each channel's sample, drum class, swing and steps (in the region the rack's window shows, with where each step's note starts), and the feel: the swing and sixteen offsets of each class that has its own, and of every other class. A feel is {swing, sub, offsets, offset (percent of the offsets the class plays, under the rack's offset amount)}."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.class",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "the channel, from 1",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "channel",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "description": "the class",
+          "name": "class",
+          "required": true,
+          "type": "string",
+          "values": [
+            "kick",
+            "snare",
+            "clap",
+            "closed_hat",
+            "open_hat",
+            "rim",
+            "tom_low",
+            "tom_mid",
+            "tom_high",
+            "perc",
+            "shaker",
+            "crash",
+            "ride",
+            "808",
+            "fx",
+            "other"
+          ]
+        }
+      ],
+      "result": "{track, region (null: none yet), kit, steps, groove: {name, source, straight, default: feel, classes: {class: feel}}, amounts: {groove, offset, velocity (percent)}, velocity (of a hit added by hand), pattern: {name, source, steps, hits}, copying (a kit being copied here), channels: [{channel, note, name, path, class, gain_db, pan, mute, swing, offset (percent of its class's offsets played), steps: [from 1], starts: [quarter notes from the region's start], hits: [{step, sub, div, vel, start}]}]}",
+      "summary": "Gives a channel another drum class; its steps move to that class's feel."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.swing",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "the class, or all",
+          "name": "class",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "the off-beat's place in its pair: 50 straight, 66.7 triplet",
+          "max": 85.0,
+          "min": 35.0,
+          "name": "pct",
+          "required": true,
+          "type": "number",
+          "unit": "%"
+        },
+        {
+          "description": "which off-beats swing: 16th (the e and a) or 8th (the and); left out: as it is",
+          "name": "sub",
+          "required": false,
+          "type": "string",
+          "values": [
+            "16th",
+            "8th"
+          ]
+        }
+      ],
+      "result": "the rack.get answer, with moved (notes moved)",
+      "summary": "Sets the swing of one drum class (or of all) and moves the steps of its channels; the offsets stay."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.offset",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "the class, or all",
+          "name": "class",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "0: on the swung step, 100: the class's offsets as loaded",
+          "max": 100.0,
+          "min": 0.0,
+          "name": "pct",
+          "required": true,
+          "type": "number",
+          "unit": "%"
+        }
+      ],
+      "result": "the rack.get answer, with moved (notes moved)",
+      "summary": "Sets how much of its offsets one drum class (or every class) plays: the drum's own Offset, under the rack's Offset amount (rack.amounts offset), which scales every class. The steps of its channels move."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.steps",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "the channel, from 1",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "channel",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "description": "the step numbers on, from 1 (the others go off)",
+          "name": "steps",
+          "required": true,
+          "type": "array"
+        }
+      ],
+      "result": "{track, region (null: none yet), kit, steps, groove: {name, source, straight, default: feel, classes: {class: feel}}, amounts: {groove, offset, velocity (percent)}, velocity (of a hit added by hand), pattern: {name, source, steps, hits}, copying (a kit being copied here), channels: [{channel, note, name, path, class, gain_db, pan, mute, swing, offset (percent of its class's offsets played), steps: [from 1], starts: [quarter notes from the region's start], hits: [{step, sub, div, vel, start}]}]}",
+      "summary": "Sets which steps of a channel are on, in the region the rack's window shows; each note goes where the channel's feel plays its step."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.groove",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "{name, source, default: feel, classes: {class: feel}}, a feel {swing, sub (16th, 8th), offsets: [16 quarter notes, one a sixteenth of the bar], offset (percent of them played, default 100)}; null or left out: straight",
+          "name": "groove",
+          "required": false,
+          "type": "any"
+        }
+      ],
+      "result": "the rack.get answer, with moved (notes moved)",
+      "summary": "Sets the rack's whole feel (as rack.get gives it), or makes it straight; the steps move."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.mix",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "the channel, from 1",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "channel",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "description": "the volume",
+          "max": 12.0,
+          "min": -48.0,
+          "name": "gain_db",
+          "required": false,
+          "type": "number",
+          "unit": "dB"
+        },
+        {
+          "description": "the pan: -1 left, 0 centre, 1 right",
+          "max": 1.0,
+          "min": -1.0,
+          "name": "pan",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "description": "muted",
+          "name": "mute",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "description": "soloed: while any channel is, only the soloed ones play",
+          "name": "solo",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "result": "{track, region (null: none yet), kit, steps, groove: {name, source, straight, default: feel, classes: {class: feel}}, amounts: {groove, offset, velocity (percent)}, velocity (of a hit added by hand), pattern: {name, source, steps, hits}, copying (a kit being copied here), channels: [{channel, note, name, path, class, gain_db, pan, mute, swing, offset (percent of its class's offsets played), steps: [from 1], starts: [quarter notes from the region's start], hits: [{step, sub, div, vel, start}]}]}",
+      "summary": "Sets a channel's volume, pan, mute or solo (what its knobs and its Mute and Solo keys set)."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.amounts",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "how much of each class's swing plays",
+          "max": 100.0,
+          "min": 0.0,
+          "name": "groove",
+          "required": false,
+          "type": "number",
+          "unit": "%"
+        },
+        {
+          "description": "how much of the offsets plays, over every class's own offset amount (rack.offset)",
+          "max": 100.0,
+          "min": 0.0,
+          "name": "offset",
+          "required": false,
+          "type": "number",
+          "unit": "%"
+        },
+        {
+          "description": "how much of the loaded pattern's or groove's velocities plays",
+          "max": 100.0,
+          "min": 0.0,
+          "name": "velocity",
+          "required": false,
+          "type": "number",
+          "unit": "%"
+        },
+        {
+          "description": "the rack's velocity",
+          "max": 127.0,
+          "min": 1.0,
+          "name": "new_velocity",
+          "required": false,
+          "type": "integer"
+        }
+      ],
+      "result": "the rack.get answer, with moved (notes moved)",
+      "summary": "Sets how much of the rack's groove plays: the swing (0: straight, 100: as loaded or set), the offsets, and the source's velocities (a loaded pattern's or groove's; 0: a pattern's hits at the rack's velocity when it was loaded, a groove's steps at their velocity before); and the rack's velocity (of a hit added by hand). The steps move and take their velocities."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.hit",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "the channel, from 1",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "channel",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "description": "the step, from 1",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "step",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "description": "parts the step is split into (default 1)",
+          "max": 4.0,
+          "min": 1.0,
+          "name": "div",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "the part, from 0 (default 0)",
+          "max": 3.0,
+          "min": 0.0,
+          "name": "sub",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "on (default) or off",
+          "name": "on",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "description": "its velocity (left out: the pattern's there, else the rack's)",
+          "max": 127.0,
+          "min": 1.0,
+          "name": "vel",
+          "required": false,
+          "type": "integer"
+        }
+      ],
+      "result": "{track, region (null: none yet), kit, steps, groove: {name, source, straight, default: feel, classes: {class: feel}}, amounts: {groove, offset, velocity (percent)}, velocity (of a hit added by hand), pattern: {name, source, steps, hits}, copying (a kit being copied here), channels: [{channel, note, name, path, class, gain_db, pan, mute, swing, offset (percent of its class's offsets played), steps: [from 1], starts: [quarter notes from the region's start], hits: [{step, sub, div, vel, start}]}]}",
+      "summary": "Turns one hit of a channel on or off, in the region the rack's window shows: a whole step (div 1) or part sub of a step split in div (2: 32nds, 3: triplets, 4: 64ths), with its velocity. A hit of the loaded pattern keeps the velocity it now stands for."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.divide",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "the channel, from 1",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "channel",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "description": "the step, from 1",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "step",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "description": "how many hits",
+          "max": 4.0,
+          "min": 1.0,
+          "name": "div",
+          "required": true,
+          "type": "integer"
+        }
+      ],
+      "result": "{track, region (null: none yet), kit, steps, groove: {name, source, straight, default: feel, classes: {class: feel}}, amounts: {groove, offset, velocity (percent)}, velocity (of a hit added by hand), pattern: {name, source, steps, hits}, copying (a kit being copied here), channels: [{channel, note, name, path, class, gain_db, pan, mute, swing, offset (percent of its class's offsets played), steps: [from 1], starts: [quarter notes from the region's start], hits: [{step, sub, div, vel, start}]}]}",
+      "summary": "Splits a step of a channel into hits (a ratchet: 1 whole, 2 32nds, 3 triplets, 4 64ths), each at the loudest velocity the step had."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.pattern",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "[{class, step (from 1), div (1-4, default 1), sub (from 0), vel (default 100)}]; instead of step/div/sub a beat (quarter notes from the start) goes to the nearest step or part of one",
+          "name": "hits",
+          "required": true,
+          "type": "array"
+        },
+        {
+          "description": "how many steps long (default 16)",
+          "max": 64.0,
+          "min": 1.0,
+          "name": "steps",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "its name",
+          "name": "name",
+          "required": false,
+          "type": "string"
+        }
+      ],
+      "result": "the rack.get answer, with loaded: {hits, dropped, channels_added}",
+      "summary": "Loads a pattern given as hits by drum class into a Channel Rack, onto the kit there: each hit on the first channel of its class (else of a class that stands in, else a new channel of the class), in the rack's region made as long as the pattern; its velocities are kept for the velocity amount. The groove stays, its amounts at 100 %."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.split_tracks",
+      "params": [
+        {
+          "description": "the rack's track: its id (\"t3\"), its name, or its number in the list (from 1); left out: the selected track when it plays the Channel Rack",
+          "name": "track",
+          "required": false,
+          "type": "any"
+        }
+      ],
+      "result": "{track (the rack's), name, tracks: [{track, name, channel (the rack's, from 1), notes (moved)}]}",
+      "summary": "Split to Tracks: puts each channel of the rack that has a sample on an instrument track of its own named for its drum class (Kick, Snare, a second kick Kick 2; a class without a name: the sample's), right under the rack's track, playing a Channel Rack with that channel alone (its sample, volume, pan, mute and class, the rack's groove and amounts). The channel's notes move there unchanged, on the new rack's channel 1, in regions where the rack's are. The rack's track stays, muted and named \"<name> (split)\". One Undo step."
+    },
+    {
+      "changes_project": false,
+      "group": "rack",
+      "name": "rack.follow_get",
+      "params": [
+        {
+          "description": "the MIDI track: its id (\"t3\"), its name, or its number in the list (from 1)",
+          "name": "track",
+          "required": true,
+          "type": "any"
+        }
+      ],
+      "result": "{track, on, rack (from 1), rack_track (null: no rack), class (the choice: auto or a class), auto (what Auto picks for the track), follows (the class it plays with now; null: off or no rack), velocity, groove_q (Groove Q, 0-100 %), live (Groove Live), racks: [{rack, track, name}]}",
+      "summary": "Follow Rack Groove of a MIDI track: whether its notes play on the hits of one drum class of a Channel Rack where the rack plays them (a loaded pattern's at their played times; a note where the class plays no hit stays), which rack, which class (Auto picks kick for 808s and bass, the closed hat for dense sixteenths, else the snare) and whether the hits' velocities accent the notes. The notes stay where they are stored; playback, the bounce and the MIDI export (unless switched off) take the rack's timing."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.follow",
+      "params": [
+        {
+          "description": "the MIDI track: its id (\"t3\"), its name, or its number in the list (from 1)",
+          "name": "track",
+          "required": true,
+          "type": "any"
+        },
+        {
+          "description": "follow a rack",
+          "name": "on",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "description": "which rack: 1 the first track playing a Channel Rack, 2 the second…",
+          "max": 256.0,
+          "min": 1.0,
+          "name": "rack",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "the class whose hits the notes play on: auto, hat (the closed hat), snare, kick, or another rack class",
+          "name": "class",
+          "required": false,
+          "type": "string",
+          "values": [
+            "auto",
+            "hat",
+            "kick",
+            "snare",
+            "clap",
+            "closed_hat",
+            "open_hat",
+            "rim",
+            "tom_low",
+            "tom_mid",
+            "tom_high",
+            "perc",
+            "shaker",
+            "crash",
+            "ride",
+            "808",
+            "fx",
+            "other"
+          ]
+        },
+        {
+          "description": "the velocity of the rack's hit carrying each note, over the mean of the class's hits, scales the note's",
+          "name": "velocity",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "result": "{track, on, rack (from 1), rack_track (null: no rack), class (the choice: auto or a class), auto (what Auto picks for the track), follows (the class it plays with now; null: off or no rack), velocity, groove_q (Groove Q, 0-100 %), live (Groove Live), racks: [{rack, track, name}]}",
+      "summary": "Sets Follow Rack Groove of a MIDI track (the parameters left out stay as they are)."
+    },
+    {
+      "changes_project": false,
+      "group": "rack",
+      "name": "rack.groove_q_get",
+      "params": [
+        {
+          "description": "the MIDI track: its id (\"t3\"), its name, or its number in the list (from 1)",
+          "name": "track",
+          "required": true,
+          "type": "any"
+        }
+      ],
+      "result": "{track, strength (0-100 %), live, rack (from 1), rack_track (null: no rack), class (the choice), pulls_to (the class it pulls to now; null: no rack), follow_rack (Follow Rack on), regions: [{region, own (null: the track's), strength}]}",
+      "summary": "Groove Q of a MIDI track: a second quantize, toward a Channel Rack's hits instead of the straight grid. Each note is pulled from where it is toward the target Follow Rack gives the nearest step (the region's Quantize grid, sixteenths when off) for the class Follow picks: on a step the class has a hit on, where that one hit plays (a loaded pattern's at its played time, never a mean); between two hits at most a sixteenth apart, its share of the way between them; where the class plays no hit the note stays. By the strength. A region takes its track's strength unless it has its own. The notes stay where they are stored; playback, the bounce and the MIDI export take it."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.groove_q",
+      "params": [
+        {
+          "description": "the MIDI track: its id (\"t3\"), its name, or its number in the list (from 1)",
+          "name": "track",
+          "required": true,
+          "type": "any"
+        },
+        {
+          "description": "how far the notes are pulled to the groove: 0 (off) to 100 (on it); the track's, or the region's with `region`",
+          "max": 100.0,
+          "min": 0.0,
+          "name": "strength",
+          "required": false,
+          "type": "integer",
+          "unit": "%"
+        },
+        {
+          "description": "a region of the track (id \"r12\" or name): `strength` and `track_strength` are its own",
+          "name": "region",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "with `region`: true makes the region take its track's strength again",
+          "name": "track_strength",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "description": "Groove Live: keys played live while the song plays wait for a step the groove plays late, by the strength (never earlier); the take is recorded where the keys were pressed",
+          "name": "live",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "description": "which rack: 1 the first track playing a Channel Rack, 2 the second…",
+          "max": 256.0,
+          "min": 1.0,
+          "name": "rack",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "the class whose hits the notes are pulled to (shared with Follow Rack)",
+          "name": "class",
+          "required": false,
+          "type": "string",
+          "values": [
+            "auto",
+            "hat",
+            "kick",
+            "snare",
+            "clap",
+            "closed_hat",
+            "open_hat",
+            "rim",
+            "tom_low",
+            "tom_mid",
+            "tom_high",
+            "perc",
+            "shaker",
+            "crash",
+            "ride",
+            "808",
+            "fx",
+            "other"
+          ]
+        }
+      ],
+      "result": "{track, strength (0-100 %), live, rack (from 1), rack_track (null: no rack), class (the choice), pulls_to (the class it pulls to now; null: no rack), follow_rack (Follow Rack on), regions: [{region, own (null: the track's), strength}]}",
+      "summary": "Sets Groove Q of a MIDI track, or with `region` of one of its regions (the parameters left out stay as they are)."
+    },
+    {
+      "changes_project": false,
+      "group": "rack",
+      "name": "rack.groove_flex_get",
+      "params": [
+        {
+          "description": "the audio track: its id (\"t3\"), its name, or its number in the list (from 1)",
+          "name": "track",
+          "required": true,
+          "type": "any"
+        }
+      ],
+      "result": "{track, strength (0-100 %), rack (from 1), rack_track (null: no rack), class (the choice), pulls_to (the class it pulls to now; null: no rack), regions: [{region, own (null: the track's), strength, hits (null: not found yet), markers, mode, finding_hits}], busy (the hits being found or the sound being made)}",
+      "summary": "Groove Flex of an audio track: Flex Time toward a Channel Rack's groove. The hits of each audio region are found once (in the background) and each moves toward the target Follow Rack gives the nearest sixteenth (the region's Quantize grid when set) for the class Follow picks (where that step's own hit plays; a hit with no rack hit there stays) (Auto: Kick for 808 and bass by name, the closed hat for dense hits, else the snare), by the strength; the sound between hits is stretched without changing its pitch (WSOLA, the region's Flex mode, Rhythmic when it had none), the region keeps its length and the recording is never changed (0 %: it plays as recorded). Playback and the bounce take it once the sound is made (`busy` false)."
+    },
+    {
+      "changes_project": true,
+      "group": "rack",
+      "name": "rack.groove_flex",
+      "params": [
+        {
+          "description": "the audio track: its id (\"t3\"), its name, or its number in the list (from 1)",
+          "name": "track",
+          "required": true,
+          "type": "any"
+        },
+        {
+          "description": "how far the hits are pulled to the groove: 0 (off) to 100 (on it); the track's, or the region's with `region`",
+          "max": 100.0,
+          "min": 0.0,
+          "name": "strength",
+          "required": false,
+          "type": "integer",
+          "unit": "%"
+        },
+        {
+          "description": "an audio region of the track (id \"r12\" or name): `strength` and `track_strength` are its own",
+          "name": "region",
+          "required": false,
+          "type": "any"
+        },
+        {
+          "description": "with `region`: true makes the region take its track's strength again",
+          "name": "track_strength",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "description": "which rack: 1 the first track playing a Channel Rack, 2 the second…",
+          "max": 256.0,
+          "min": 1.0,
+          "name": "rack",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "description": "the class whose hits the audio hits are pulled to",
+          "name": "class",
+          "required": false,
+          "type": "string",
+          "values": [
+            "auto",
+            "hat",
+            "kick",
+            "snare",
+            "clap",
+            "closed_hat",
+            "open_hat",
+            "rim",
+            "tom_low",
+            "tom_mid",
+            "tom_high",
+            "perc",
+            "shaker",
+            "crash",
+            "ride",
+            "808",
+            "fx",
+            "other"
+          ]
+        }
+      ],
+      "result": "{track, strength (0-100 %), rack (from 1), rack_track (null: no rack), class (the choice), pulls_to (the class it pulls to now; null: no rack), regions: [{region, own (null: the track's), strength, hits (null: not found yet), markers, mode, finding_hits}], busy (the hits being found or the sound being made)}",
+      "summary": "Sets Groove Flex of an audio track, or with `region` of one of its regions (the parameters left out stay as they are). Setting it to 0 removes the Groove Flex markers."
     },
     {
       "changes_project": false,
@@ -2730,9 +3468,15 @@
           "name": "overwrite",
           "required": false,
           "type": "boolean"
+        },
+        {
+          "description": "write the notes of tracks following a Channel Rack with its feel, as they play (default true); false: as stored, on the straight grid",
+          "name": "apply_follow_groove",
+          "required": false,
+          "type": "boolean"
         }
       ],
-      "result": "{path, whole_project}",
+      "result": "{path, whole_project, apply_follow_groove}",
       "summary": "Writes the project's MIDI, or one region's, to a MIDI file."
     },
     {
@@ -3663,5 +4407,5 @@
     }
   ],
   "protocol": 1,
-  "version": "0.3.1"
+  "version": "0.4.0"
 }

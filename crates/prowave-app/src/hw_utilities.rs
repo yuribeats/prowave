@@ -35,9 +35,9 @@ pub fn fold(ui: &mut Ui, id: Id, label: &str, default_open: bool) -> bool {
     let g = ui.painter();
     let c = pos2(r.left() + 5.0, r.center().y);
     let ink = if resp.hovered() {
-        theme::INK
+        theme::INK()
     } else {
-        theme::INK2
+        theme::INK2()
     };
     let tri = if open {
         vec![
@@ -92,7 +92,7 @@ pub fn key(
 
 /// Width a key needs for `label` at `size` (with an LED when `led`).
 pub fn key_width(g: &Painter, label: &str, size: f32, led: bool) -> f32 {
-    let w = hw::galley(g, &label.to_uppercase(), Face::Bold, size, theme::INK)
+    let w = hw::galley(g, &label.to_uppercase(), Face::Bold, size, theme::INK())
         .size()
         .x;
     w + 22.0 + if led { 12.0 } else { 0.0 }
@@ -103,7 +103,7 @@ fn list_frame() -> egui::Frame {
     egui::Frame {
         inner_margin: Margin::same(3),
         fill: Color32::from_rgb(0x1d, 0x1c, 0x1a),
-        stroke: Stroke::new(1.0, theme::CAP_EDGE),
+        stroke: Stroke::new(1.0, theme::CAP_EDGE()),
         corner_radius: CornerRadius::same(3),
         outer_margin: Margin::ZERO,
         shadow: egui::Shadow {
@@ -164,7 +164,11 @@ pub fn dropdown(
                             &text,
                             Face::Bold,
                             11.0,
-                            if on { theme::ORANGE } else { theme::ON_DARK },
+                            if on {
+                                theme::ORANGE()
+                            } else {
+                                theme::ON_DARK()
+                            },
                         );
                         if rr.clicked() {
                             picked = Some(i);
@@ -210,12 +214,12 @@ pub fn chip(g: &Painter, left_center: Pos2, label: &str, size: f32, lit: bool) -
 
 /// A light-bone chip with print (a passive tag: a tempo, a key, a category).
 pub fn tag(g: &Painter, left_center: Pos2, label: &str, size: f32) -> Rect {
-    let gal = hw::galley(g, &label.to_uppercase(), Face::Bold, size, theme::INK2);
+    let gal = hw::galley(g, &label.to_uppercase(), Face::Bold, size, theme::INK2());
     let r = Rect::from_min_size(
         pos2(left_center.x, left_center.y - (size + 5.0) / 2.0),
         vec2(gal.size().x + 8.0, size + 5.0),
     );
-    g.rect_filled(r, 2.0, theme::BONE2);
+    g.rect_filled(r, 2.0, theme::BONE2());
     g.rect_stroke(
         r,
         2.0,
@@ -225,7 +229,7 @@ pub fn tag(g: &Painter, left_center: Pos2, label: &str, size: f32) -> Rect {
     g.galley(
         pos2(r.left() + 4.0, r.center().y - gal.size().y / 2.0),
         gal,
-        theme::INK2,
+        theme::INK2(),
     );
     r
 }
@@ -346,7 +350,7 @@ pub fn lcd_block(ui: &mut Ui, label: &str, lines: &[String], numbered: bool) {
                 l.to_uppercase(),
                 egui::TextFormat {
                     font_id: theme::font(Face::Lcd, size),
-                    color: theme::LCD_INK,
+                    color: theme::LCD_INK(),
                     extra_letter_spacing: theme::tracking(Face::Lcd) * size,
                     line_height: Some(size * 1.4),
                     ..Default::default()
@@ -366,7 +370,7 @@ pub fn lcd_block(ui: &mut Ui, label: &str, lines: &[String], numbered: bool) {
         let x = glass.left() + 12.0;
         if numbered {
             let chip = Rect::from_min_size(pos2(x, y + 1.0), vec2(17.0, 13.0));
-            g.rect_filled(chip, 1.5, theme::LCD_INK);
+            g.rect_filled(chip, 1.5, theme::LCD_INK());
             hw::text(
                 &g,
                 chip.center(),
@@ -374,11 +378,11 @@ pub fn lcd_block(ui: &mut Ui, label: &str, lines: &[String], numbered: bool) {
                 &(i + 1).to_string(),
                 Face::Lcd,
                 9.0,
-                theme::LCD,
+                theme::LCD(),
             );
         }
         let gh = gal.size().y;
-        g.galley(pos2(x + num_w, y), gal, theme::LCD_INK);
+        g.galley(pos2(x + num_w, y), gal, theme::LCD_INK());
         y += gh + 6.0;
     }
 }
@@ -401,7 +405,7 @@ pub fn row(ui: &mut Ui, label: &str, label_w: f32, h: f32) -> Rect {
         &shown,
         Face::Silk,
         size,
-        theme::INK2,
+        theme::INK2(),
     );
     Rect::from_min_max(
         pos2(r.left() + label_w + 12.0, r.center().y - h / 2.0),

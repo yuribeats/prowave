@@ -19,13 +19,19 @@
 //! after that while the list is in use. A kit picked is made from its kept listing, so neither
 //! the window nor the audio waits for a disk. A library folder that is not there (a drive that
 //! is not mounted) shows an unlit lamp in Folders, marked missing, and nothing else.
+//!
+//! With a kit list set (`kit_list` in the settings, `kits.list`) and on, the kits are the
+//! list's, in its order, and the left column holds its types instead of the sources;
+//! right-click that column (or the Kit List key in Folders) to turn the list off or on.
 use crate::channel_rack::{self, SampleDrag};
 use crate::gear::{self, LedAt};
 use crate::hw::{self, Cap};
 use crate::i18n::tr;
 use crate::kit_classify::{DrumClass, KIT_PADS};
 use crate::kit_files::Kit;
-use crate::kit_library::{self, Filter, Index, KitEntry, Opened, ScanJob, ScanMsg, Settings};
+use crate::kit_library::{
+    self, Filter, Index, KitEntry, KitList, Opened, ScanJob, ScanMsg, Settings,
+};
 use crate::midi_monitor::hw_utilities as hu;
 use crate::model::Project;
 use crate::theme::{self, Face};
@@ -98,6 +104,9 @@ pub struct KitBrowser {
     pub selected: Option<String>,
     kit: Option<Arc<Kit>>,
     kit_rx: Option<(String, Receiver<Opened>)>,
+    /// A kit load waiting for its samples to be copied here: the copies, then (kit name, the
+    /// channels' classes, the rack's track when there was one).
+    copying: Option<CopyJob>,
     kit_stop: Option<Arc<AtomicBool>>,
     class: Option<DrumClass>,
     /// The sample picked in the kit's list (an index into its samples).
@@ -120,6 +129,9 @@ pub struct KitBrowser {
     /// The kit whose audition waits for its files (Audition lit).
     kit_audition_due: bool,
     pub error: Option<String>,
+    /// The kit list read from `settings.kit_list`, or why it could not be.
+    pub list: Option<Result<Arc<KitList>, String>>,
+    list_rx: Option<Receiver<Result<KitList, String>>>,
 }
 
 impl KitBrowser {
@@ -161,6 +173,7 @@ impl KitBrowser {
     /// Scans the folders in the background; the kits' files are read again for every kit
     /// when `full`, else for the kits never read and those whose folder has changed.
     pub fn rescan_with(&mut self, full: bool) {
+        self.read_list();
         self.scanning = true;
         self.listing = None;
         self.scan = Some(kit_library::spawn_scan(
@@ -197,6 +210,11 @@ impl KitBrowser {
 
     fn take_index(&mut self, index: Index) {
         self.index = index;
+        let list = match &self.list {
+            Some(Ok(l)) => Some(l.clone()),
+            _ => None,
+        };
+        self.index.apply_list(list.as_deref());
         self.rev += 1;
         if self
             .filter
@@ -254,6 +272,13 @@ impl KitBrowser {
                 self.listing = None;
             } else {
                 self.scan = Some(job);
+            }
+        }
+        if let Some(rx) = self.list_rx.take() {
+            match rx.try_recv() {
+                Ok(list) => self.take_list(list),
+                Err(TryRecvError::Empty) => self.list_rx = Some(rx),
+                Err(TryRecvError::Disconnected) => {}
             }
         }
         if let Some((path, rx)) = self.kit_rx.take() {
@@ -428,12 +453,126 @@ impl KitBrowser {
 
     /// The kits the filter keeps, as indices into the index.
     pub fn results(&mut self) -> &[u32] {
+        self.filter.list = self.list_active();
         let key = (self.filter.clone(), self.rev);
         if self.results_for.as_ref() != Some(&key) {
-            self.results = kit_library::search(&self.index, &self.filter, &self.settings.favorites);
+            self.results = kit_library::search_keeping(
+                &self.index,
+                &self.filter,
+                &self.settings.favorites,
+                &self.settings.default_kit,
+            );
             self.results_for = Some(key);
         }
         &self.results
+    }
+
+    /// How many kits the kit list shows with no search, type or other filter.
+    pub fn results_all(&self) -> usize {
+        let f = Filter {
+            list: self.list_active(),
+            ..Filter::default()
+        };
+        kit_library::search_keeping(
+            &self.index,
+            &f,
+            &self.settings.favorites,
+            &self.settings.default_kit,
+        )
+        .len()
+    }
+
+    /// The kit list read, when there is one.
+    pub fn list_now(&self) -> Option<&KitList> {
+        match &self.list {
+            Some(Ok(l)) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// The kit list is set, read, and on: the browser shows its kits only.
+    pub fn list_active(&self) -> bool {
+        self.settings.kit_list_on
+            && !self.settings.kit_list.is_empty()
+            && self.list_now().is_some_and(|l| !l.rows.is_empty())
+    }
+
+    /// Reads the kit list the settings name, on another thread (it may be on a share).
+    fn read_list(&mut self) {
+        let setting = self.settings.kit_list.clone();
+        if setting.is_empty() {
+            self.list_rx = None;
+            if self.list.take().is_some() {
+                self.reapply_list();
+            }
+            return;
+        }
+        let folders = self.settings.folders.clone();
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("kit-list".into())
+            .spawn(move || {
+                let _ = tx.send(kit_library::load_list(&setting, &folders));
+            });
+        if spawned.is_ok() {
+            self.list_rx = Some(rx);
+        }
+    }
+
+    /// Reads the kit list the settings name now, on this thread (the control interface).
+    pub fn read_list_now(&mut self) {
+        self.list_rx = None;
+        if self.settings.kit_list.is_empty() {
+            self.list = None;
+            self.reapply_list();
+            return;
+        }
+        let list = kit_library::load_list(&self.settings.kit_list, &self.settings.folders);
+        self.take_list(list);
+    }
+
+    fn take_list(&mut self, list: Result<KitList, String>) {
+        if let Err(e) = &list {
+            tracing::warn!("kit list: {e}");
+        }
+        self.list = Some(list.map(Arc::new));
+        self.reapply_list();
+    }
+
+    fn reapply_list(&mut self) {
+        let list = match &self.list {
+            Some(Ok(l)) => Some(l.clone()),
+            _ => None,
+        };
+        self.index.apply_list(list.as_deref());
+        if self
+            .filter
+            .kind
+            .as_ref()
+            .is_some_and(|t| !self.index.types.iter().any(|(n, _)| n == t))
+        {
+            self.filter.kind = None;
+        }
+        self.rev += 1;
+    }
+
+    /// Sets the kit list (a TSV's path; empty: none), turns it on, saves and reads it.
+    pub fn set_kit_list(&mut self, path: &str) {
+        self.start();
+        self.settings.kit_list = path.trim().to_string();
+        self.settings.kit_list_on = true;
+        self.save_settings();
+        self.read_list();
+    }
+
+    /// Turns the kit list on or off (kept with the settings).
+    pub fn set_list_on(&mut self, on: bool) {
+        self.start();
+        if self.settings.kit_list_on != on {
+            self.settings.kit_list_on = on;
+            self.rev += 1;
+            self.save_settings();
+        }
     }
 
     fn save_settings(&self) {
@@ -473,6 +612,75 @@ impl KitBrowser {
             self.rev += 1;
             self.save_settings();
         }
+    }
+
+    /// Sets the kit new Channel Racks start with (empty: none) and saves it.
+    pub fn set_default_kit(&mut self, path: &str) {
+        self.start();
+        if self.settings.default_kit != path {
+            self.settings.default_kit = path.to_string();
+            self.rev += 1;
+            self.save_settings();
+        }
+    }
+
+    /// Sets when loaded kits are copied to this computer, and saves it.
+    pub fn set_copy_mode(&mut self, mode: crate::kit_copy::CopyMode) {
+        self.start();
+        if self.settings.copy_kits != mode {
+            self.settings.copy_kits = mode;
+            self.save_settings();
+        }
+    }
+
+    /// Where loaded kits are copied (`None`: nowhere, as in tests).
+    pub fn local_dir(&self) -> Option<PathBuf> {
+        self.data.as_ref().map(|d| d.join("local"))
+    }
+
+    /// The kit of the index whose folder holds `file` (the innermost), as (folder, source,
+    /// name).
+    fn kit_holding(&self, file: &Path) -> Option<(PathBuf, String, String)> {
+        self.index
+            .kits
+            .iter()
+            .filter(|k| !k.path.is_empty() && file.starts_with(&k.path))
+            .max_by_key(|k| k.path.len())
+            .map(|k| (PathBuf::from(&k.path), k.source.clone(), k.name.clone()))
+    }
+
+    /// Where the rack plays `file` from: a copy on this computer when the setting says so
+    /// (see [`crate::kit_copy`]), else `file`.
+    pub fn localize(&self, file: &Path) -> PathBuf {
+        let kit = self.kit_holding(file);
+        crate::kit_copy::localize(
+            self.local_dir().as_deref(),
+            self.settings.copy_kits,
+            kit.as_ref()
+                .map(|(p, s, n)| (p.as_path(), s.as_str(), n.as_str())),
+            file,
+        )
+    }
+
+    /// [`Self::localize`] for the channels of a kit load from kit folder `kit`.
+    pub fn localize_pads(&self, kit: &str, pads: &[Option<PathBuf>]) -> Vec<Option<PathBuf>> {
+        let e = self.entry(kit);
+        let root = PathBuf::from(&e.path);
+        let source = if e.source.is_empty() {
+            Path::new(kit)
+                .parent()
+                .and_then(Path::file_name)
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            e.source.clone()
+        };
+        crate::kit_copy::localize_pads(
+            self.local_dir().as_deref(),
+            self.settings.copy_kits,
+            Some((root.as_path(), source.as_str(), e.name.as_str())),
+            pads,
+        )
     }
 
     pub fn is_favorite(&self, path: &str) -> bool {
@@ -540,6 +748,7 @@ impl KitBrowser {
         self.scanning
             || self.scan.is_some()
             || self.kit_rx.is_some()
+            || self.copying.is_some()
             || self.want.is_some()
             || self.send.is_some()
             || self.playing.is_some()
@@ -547,9 +756,33 @@ impl KitBrowser {
     }
 }
 
+/// A kit load whose samples are being copied to this computer on another thread.
+pub struct CopyJob {
+    rx: Receiver<Vec<Option<PathBuf>>>,
+    name: String,
+    classes: Vec<crate::kit_classify::DrumClass>,
+    track: Option<usize>,
+}
+
 /// The channels a kit load fills, as files.
 pub fn pad_paths(kit: &Kit) -> Vec<Option<PathBuf>> {
     kit.pads.iter().map(|p| p.map(|i| kit.path_of(i))).collect()
+}
+
+/// The class of each channel a kit load fills: its sample's, or for an empty channel the
+/// class the layout gives it.
+pub fn pad_classes(kit: &Kit) -> Vec<crate::kit_classify::DrumClass> {
+    kit.pads
+        .iter()
+        .enumerate()
+        .map(|(k, p)| match p {
+            Some(i) => kit.samples[*i].class,
+            None => crate::kit_classify::PAD_LAYOUT
+                .get(k)
+                .copied()
+                .unwrap_or(crate::kit_classify::DrumClass::Other),
+        })
+        .collect()
 }
 
 /// Loads the kit picked into the rack of the selected track (a new rack track when the
@@ -560,14 +793,96 @@ pub fn load_selected(v: &mut KitBrowser, p: &mut Project) -> Option<usize> {
     let name = v.selected_name();
     if kit.pads.is_empty() {
         let sf = kit.soundfonts().first().map(|i| kit.path_of(*i))?;
-        return Some(load_soundfont(p, &name, &sf));
+        return Some(load_soundfont(p, &name, &v.localize(&sf)));
     }
-    Some(channel_rack::load_kit(
-        p,
-        channel_rack::rack_track(p),
-        &name,
-        &pad_paths(&kit),
-    ))
+    let folder = v
+        .selected
+        .clone()
+        .unwrap_or_else(|| kit.root.to_string_lossy().into_owned());
+    let pads = pad_paths(&kit);
+    let classes = pad_classes(&kit);
+    let track = channel_rack::rack_track(p);
+    // Files to be copied from a network share are copied on another thread (a share can take
+    // seconds a file); the kit goes on the rack when they are here (see `finish_copy`).
+    let needs_copy = v.local_dir().is_some()
+        && pads.iter().flatten().any(|f| {
+            v.settings.copy_kits == crate::kit_copy::CopyMode::Always
+                || crate::kit_copy::is_remote(f)
+        });
+    if needs_copy {
+        let local = v.local_dir();
+        let mode = v.settings.copy_kits;
+        let e = v.entry(&folder);
+        let source = if e.source.is_empty() {
+            Path::new(&folder)
+                .parent()
+                .and_then(Path::file_name)
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            e.source.clone()
+        };
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("kit-copy".into())
+            .spawn(move || {
+                let root = PathBuf::from(&e.path);
+                let got = crate::kit_copy::localize_pads(
+                    local.as_deref(),
+                    mode,
+                    Some((root.as_path(), source.as_str(), e.name.as_str())),
+                    &pads,
+                );
+                let _ = tx.send(got);
+            });
+        match spawned {
+            Ok(_) => {
+                v.copying = Some(CopyJob {
+                    rx,
+                    name,
+                    classes,
+                    track,
+                });
+                return None;
+            }
+            Err(e) => tracing::warn!("could not start copying the kit: {e}"),
+        }
+        return None;
+    }
+    let pads = v.localize_pads(&folder, &pads);
+    let ti = channel_rack::load_kit(p, track, &name, &pads, &classes);
+    channel_rack::set_kit_dir(p, ti, Path::new(&folder));
+    Some(ti)
+}
+
+/// Puts a kit on the rack once its samples have been copied here; true while a copy is still
+/// running (the caller asks for another frame). Returns the rack's track when it loaded.
+pub fn finish_copy(v: &mut KitBrowser, p: &mut Project) -> (bool, Option<usize>) {
+    let Some(job) = &v.copying else {
+        return (false, None);
+    };
+    match job.rx.try_recv() {
+        Ok(pads) => {
+            let job = v.copying.take();
+            let ti = job.map(|j| {
+                let track = j
+                    .track
+                    .filter(|t| channel_rack::rack_state(p, *t).is_some());
+                channel_rack::load_kit(p, track, &j.name, &pads, &j.classes)
+            });
+            (false, ti)
+        }
+        Err(mpsc::TryRecvError::Empty) => (true, None),
+        Err(mpsc::TryRecvError::Disconnected) => {
+            v.copying = None;
+            (false, None)
+        }
+    }
+}
+
+/// Whether a kit's samples are being copied here.
+pub fn copying(v: &KitBrowser) -> bool {
+    v.copying.is_some()
 }
 
 /// A new instrument track named `name` playing the SoundFont `path`: its first drum preset
@@ -603,13 +918,13 @@ pub fn load_soundfont(p: &mut Project, name: &str, path: &Path) -> usize {
 }
 
 /// Puts `path` on channel `channel` of the selected track's rack (a new rack track when the
-/// selected track has none).
-pub fn assign(p: &mut Project, channel: usize, path: &Path) -> bool {
+/// selected track has none), from a copy on this computer when the setting says so.
+pub fn assign(v: &KitBrowser, p: &mut Project, channel: usize, path: &Path) -> bool {
     let ti = match channel_rack::rack_track(p) {
         Some(i) => i,
-        None => channel_rack::load_kit(p, None, "", &[]),
+        None => channel_rack::load_kit(p, None, "", &[], &[]),
     };
-    channel_rack::assign_sample(p, ti, channel, path)
+    channel_rack::assign_sample(p, ti, channel, &v.localize(path))
 }
 
 // ------------------------------------------------------------------------------- audition
@@ -865,15 +1180,15 @@ fn floor(g: &egui::Painter, rect: Rect, label: &str) -> Rect {
         Align2::LEFT_CENTER,
         label,
         10.5,
-        theme::INK2,
+        theme::INK2(),
     );
     let r = Rect::from_min_max(pos2(rect.left(), rect.top() + 16.0), rect.max);
-    g.rect_filled(r, 3.0, theme::BONE2);
+    g.rect_filled(r, 3.0, theme::BONE2());
     hw::inner_shadow(g, r, 3.0, 0.18);
     g.rect_stroke(
         r,
         3.0,
-        Stroke::new(1.0, theme::SEAM),
+        Stroke::new(1.0, theme::SEAM()),
         egui::StrokeKind::Inside,
     );
     r.shrink(2.0)
@@ -882,13 +1197,13 @@ fn floor(g: &egui::Painter, rect: Rect, label: &str) -> Rect {
 /// The colours of a list row: the picked one is a black bar with bone print.
 fn row_look(g: &egui::Painter, r: Rect, selected: bool, hovered: bool) -> (Color32, Color32) {
     if selected {
-        g.rect_filled(r.shrink2(vec2(2.0, 1.0)), 3.0, theme::CAP);
-        (theme::ON_DARK, theme::ON_DARK_DIM)
+        g.rect_filled(r.shrink2(vec2(2.0, 1.0)), 3.0, theme::CAP());
+        (theme::ON_DARK(), theme::ON_DARK_DIM())
     } else {
         if hovered {
-            g.rect_filled(r.shrink2(vec2(2.0, 1.0)), 3.0, theme::BONE_HI);
+            g.rect_filled(r.shrink2(vec2(2.0, 1.0)), 3.0, theme::BONE_HI());
         }
-        (theme::INK, theme::PRINT)
+        (theme::INK(), theme::PRINT())
     }
 }
 
@@ -933,6 +1248,9 @@ fn window_id() -> Id {
 /// The Kit Browser's window.
 pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut crate::UiState) {
     let v = &mut s.kits;
+    if finish_copy(v, p).0 {
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
     if !v.open {
         if v.audition_key().is_some() {
             v.stop_audition();
@@ -975,7 +1293,7 @@ pub fn show(ctx: &egui::Context, p: &mut Project, s: &mut crate::UiState) {
         load_selected(v, p);
     }
     if let Some((channel, path)) = act.assign {
-        assign(p, channel, &path);
+        assign(v, p, channel, &path);
     }
     if let Some(path) = act.soundfont {
         let name = path
@@ -1138,7 +1456,7 @@ fn body(ui: &mut Ui, id: Id, v: &mut KitBrowser, pads: &[(String, bool)], act: &
         Align2::LEFT_CENTER,
         label,
         10.5,
-        theme::INK2,
+        theme::INK2(),
     );
     let field = Rect::from_min_max(
         pos2(left + lw + 12.0, y + 2.0),
@@ -1152,7 +1470,7 @@ fn body(ui: &mut Ui, id: Id, v: &mut KitBrowser, pads: &[(String, bool)], act: &
                 .id(id.with("search"))
                 .frame(egui::Frame::NONE)
                 .font(theme::font(Face::Bold, 12.0))
-                .text_color(theme::ON_DARK)
+                .text_color(theme::ON_DARK())
                 .desired_width(field.width() - 12.0),
         )
     });
@@ -1257,7 +1575,7 @@ fn body(ui: &mut Ui, id: Id, v: &mut KitBrowser, pads: &[(String, bool)], act: &
             g.rect_stroke(
                 r,
                 4.0,
-                Stroke::new(2.0, theme::ORANGE),
+                Stroke::new(2.0, theme::ORANGE()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1348,12 +1666,42 @@ fn body(ui: &mut Ui, id: Id, v: &mut KitBrowser, pads: &[(String, bool)], act: &
     }
 }
 
+/// The left column: the sources, or with the kit list on its types. Right-click turns the kit
+/// list off or on (when one is set).
 fn source_list(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect) {
     let g = ui.painter().clone();
-    let inner = floor(&g, rect, tr("Source"));
-    let all: usize = v.index.sources.iter().map(|s| s.1).sum();
-    let n = v.index.sources.len() + 1;
+    let by_type = v.list_active();
+    let inner = floor(&g, rect, if by_type { tr("Type") } else { tr("Source") });
+    // (name, kits): the column's rows after All.
+    let rows: Vec<(String, usize)> = if by_type {
+        v.index.types.clone()
+    } else {
+        v.index.sources.clone()
+    };
+    let all: usize = if by_type {
+        v.results_all()
+    } else {
+        rows.iter().map(|s| s.1).sum()
+    };
+    let shown_pick = if by_type {
+        v.filter.kind.clone()
+    } else {
+        v.filter.source.clone()
+    };
+    let n = rows.len() + 1;
     let mut pick: Option<Option<String>> = None;
+    let mut list_on: Option<bool> = None;
+    let has_list = !v.settings.kit_list.is_empty() && v.list_now().is_some();
+    let column = ui.interact(rect, id.with("source_column"), Sense::click());
+    if has_list {
+        let on = v.settings.kit_list_on;
+        column.context_menu(|ui| {
+            if ui.selectable_label(on, tr("Kit List")).clicked() {
+                list_on = Some(!on);
+                ui.close();
+            }
+        });
+    }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
     child.set_clip_rect(inner.intersect(ui.clip_rect()));
     child.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -1366,10 +1714,10 @@ fn source_list(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect) {
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
                 let g = ui.painter();
                 let (name, count, selected) = if i == 0 {
-                    (tr("All").to_uppercase(), all, v.filter.source.is_none())
+                    (tr("All").to_uppercase(), all, shown_pick.is_none())
                 } else {
-                    let (s, c) = &v.index.sources[i - 1];
-                    (s.clone(), *c, v.filter.source.as_ref() == Some(s))
+                    let (s, c) = &rows[i - 1];
+                    (s.clone(), *c, shown_pick.as_ref() == Some(s))
                 };
                 let (ink, dim) = row_look(g, r, selected, resp.hovered());
                 let num = number(count);
@@ -1396,13 +1744,29 @@ fn source_list(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect) {
                     pick = Some(if i == 0 {
                         None
                     } else {
-                        Some(v.index.sources[i - 1].0.clone())
+                        Some(rows[i - 1].0.clone())
+                    });
+                }
+                if has_list {
+                    let on = v.settings.kit_list_on;
+                    resp.context_menu(|ui| {
+                        if ui.selectable_label(on, tr("Kit List")).clicked() {
+                            list_on = Some(!on);
+                            ui.close();
+                        }
                     });
                 }
             }
         });
-    if let Some(source) = pick {
-        v.filter.source = source;
+    if let Some(choice) = pick {
+        if by_type {
+            v.filter.kind = choice;
+        } else {
+            v.filter.source = choice;
+        }
+    }
+    if let Some(on) = list_on {
+        v.set_list_on(on);
     }
 }
 
@@ -1412,6 +1776,7 @@ fn kit_list(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect, act: &mut Act) 
     let results: Vec<u32> = v.results().to_vec();
     let mut pick: Option<String> = None;
     let mut fav: Option<(String, bool)> = None;
+    let mut default: Option<String> = None;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
     child.set_clip_rect(inner.intersect(ui.clip_rect()));
     child.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -1437,7 +1802,7 @@ fn kit_list(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect, act: &mut Act) 
                 star_r.center(),
                 6.0,
                 is_fav,
-                if is_fav { theme::ORANGE } else { dim },
+                if is_fav { theme::ORANGE() } else { dim },
             );
             let mut text_right = r.right() - 10.0;
             if let Some(n) = k.files {
@@ -1468,6 +1833,24 @@ fn kit_list(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect, act: &mut Act) 
                 11.0,
                 ink,
             );
+            // The kit new racks start with: lit on its row's right edge.
+            let is_default = v.settings.default_kit == k.path;
+            if is_default {
+                hw::led_sized(g, pos2(r.right() - 4.0, r.center().y), 2.5, true);
+            }
+            resp.context_menu(|ui| {
+                if ui
+                    .selectable_label(is_default, tr("Use for New Racks"))
+                    .clicked()
+                {
+                    default = Some(if is_default {
+                        String::new()
+                    } else {
+                        k.path.clone()
+                    });
+                    ui.close();
+                }
+            });
             if star_resp.clicked() {
                 fav = Some((k.path.clone(), !is_fav));
             } else if resp.double_clicked() {
@@ -1480,6 +1863,9 @@ fn kit_list(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect, act: &mut Act) 
     });
     if let Some((path, on)) = fav {
         v.set_favorite(&path, on);
+    }
+    if let Some(path) = default {
+        v.set_default_kit(&path);
     }
     if let Some(path) = pick {
         v.column = Column::Kits;
@@ -1517,7 +1903,7 @@ fn kit_pane(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect, act: &mut Act) 
                 pos2(glass.right() - 8.0 - w, glass.top() + 8.0),
                 &text,
                 h,
-                theme::LCD_INK,
+                theme::LCD_INK(),
                 false,
             );
             name_right -= w + 10.0;
@@ -1621,7 +2007,7 @@ fn kit_pane(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect, act: &mut Act) 
                 g.rect_stroke(
                     r.shrink2(vec2(2.0, 1.0)),
                     3.0,
-                    Stroke::new(1.5, theme::ORANGE),
+                    Stroke::new(1.5, theme::ORANGE()),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1633,7 +2019,7 @@ fn kit_pane(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect, act: &mut Act) 
                     g,
                     well.center(),
                     playing.as_deref() == Some(key.as_str()),
-                    theme::INK,
+                    theme::INK(),
                 );
             }
             let tag = hu::tag(
@@ -1732,7 +2118,11 @@ fn folders(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect) {
             &shown,
             Face::Bold,
             11.5,
-            if present { theme::INK } else { theme::PRINT },
+            if present {
+                theme::INK()
+            } else {
+                theme::PRINT()
+            },
         );
         if gear::key(
             ui,
@@ -1807,6 +2197,51 @@ fn folders(ui: &mut Ui, id: Id, v: &mut KitBrowser, rect: Rect) {
             "",
             &text,
         );
+    }
+    // The kit list, when one is set: its file and the kits of it found, and its key.
+    if !v.settings.kit_list.is_empty() {
+        let r = Rect::from_min_size(
+            pos2(inner.left() + 6.0, y + 40.0),
+            vec2(inner.width() - 12.0, 28.0),
+        );
+        let key = Rect::from_min_max(pos2(r.right() - 130.0, r.top()), r.max);
+        let read = v.list_now().is_some();
+        hw::led_sized(&g, pos2(r.left() + 10.0, r.center().y), 3.5, read);
+        let text = match &v.list {
+            Some(Ok(l)) => format!(
+                "{} · {} / {}",
+                l.file,
+                number(v.index.list_matched()),
+                number(l.rows.len())
+            ),
+            Some(Err(e)) => e.clone(),
+            None => v.settings.kit_list.clone(),
+        };
+        let shown = hw::fit(&g, &text, Face::Bold, 11.5, key.left() - r.left() - 34.0);
+        hw::text(
+            &g,
+            pos2(r.left() + 24.0, r.center().y),
+            Align2::LEFT_CENTER,
+            &shown,
+            Face::Bold,
+            11.5,
+            if read { theme::INK() } else { theme::PRINT() },
+        );
+        let on = v.settings.kit_list_on;
+        if gear::key(
+            ui,
+            key,
+            id.with("kit_list"),
+            tr("Kit List"),
+            Cap::Bone,
+            LedAt::Left,
+            on,
+            on,
+        )
+        .clicked()
+        {
+            v.set_list_on(!on);
+        }
     }
     if let Some(i) = remove {
         let mut list = v.settings.folders.clone();
@@ -1883,7 +2318,7 @@ mod tests {
     fn wait(v: &mut KitBrowser) {
         for _ in 0..2000 {
             v.poll();
-            if !v.scanning && !v.indexing() && v.kit_rx.is_none() {
+            if !v.scanning && !v.indexing() && v.kit_rx.is_none() && v.list_rx.is_none() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -1933,11 +2368,48 @@ mod tests {
         // The count learnt by opening the kit is in the index.
         assert_eq!(v.index.kits[hits[0] as usize].files, Some(18));
         // One sample onto a channel past the kit's.
-        assert!(assign(&mut p, 16, &kit.path_of(0)));
+        assert!(assign(&v, &mut p, 16, &kit.path_of(0)));
         assert_eq!(
             channel_rack::decode(&p.tracks[ti].au_instrument.as_ref().unwrap().state).len(),
             17
         );
+        // Copying set to always: the kit loaded is copied into kit-library/local/<source>/<kit>
+        // and the rack plays the copies; a sample put on a channel too.
+        v.settings.copy_kits = crate::kit_copy::CopyMode::Always;
+        assert_eq!(
+            load_selected(&mut v, &mut p),
+            None,
+            "copied on another thread first"
+        );
+        assert!(copying(&v));
+        let ti = loop {
+            match finish_copy(&mut v, &mut p) {
+                (_, Some(ti)) => break ti,
+                (true, None) => std::thread::sleep(Duration::from_millis(5)),
+                (false, None) => panic!("the copy ended without a load"),
+            }
+        };
+        assert!(!copying(&v));
+        let specs = channel_rack::specs(p.tracks[ti].au_instrument.as_ref().unwrap());
+        let e = v.index.kits[hits[0] as usize].clone();
+        let local = crate::kit_copy::kit_dir(&data.join("local"), &e.source, &e.name);
+        assert!(
+            specs[0].path.starts_with(&*local.to_string_lossy()),
+            "{}",
+            specs[0].path
+        );
+        assert!(
+            specs
+                .iter()
+                .filter(|s| !s.path.is_empty())
+                .all(|s| Path::new(&s.path).is_file()
+                    && s.path.starts_with(&*local.to_string_lossy()))
+        );
+        let (_, errors) = prowave_engine::SampleRack::new(&specs, 48_000);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(assign(&v, &mut p, 17, &kit.path_of(1)));
+        let ch = channel_rack::decode(&p.tracks[ti].au_instrument.as_ref().unwrap().state);
+        assert!(ch[17].path.starts_with(&*local.to_string_lossy()));
         let _ = std::fs::remove_dir_all(lib);
         let _ = std::fs::remove_dir_all(data);
     }
@@ -1970,6 +2442,90 @@ mod tests {
         v.set_folders(vec!["/Volumes/NOT-MOUNTED-HERE/KITS".into()]);
         wait(&mut v);
         assert!(v.index.kits.is_empty() && v.show_folders && v.error.is_none());
+        let _ = std::fs::remove_dir_all(lib);
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn a_kit_list_shows_only_its_kits_until_it_is_turned_off() {
+        let lib = library("list");
+        std::fs::write(
+            lib.join("BEST-PROWAVE.tsv"),
+            "rank\tsource\tkit\tpath\ttype\tfile_count\tscore\treason\n\
+             1\tMachines\tRoland TR-808\tMachines/Roland TR-808\tHip-hop\t18\t90\t808\n\
+             2\tMachines\tLinnDrum\tMachines/LinnDrum\tDrum machines\t3\t80\tlinn\n",
+        )
+        .unwrap();
+        let data = temp("list-data");
+        let root = lib.to_string_lossy().into_owned();
+        let mut v = KitBrowser::with(Some(data.clone()), vec![root.clone()]);
+        v.rescan();
+        wait(&mut v);
+        let names = |v: &mut KitBrowser| -> Vec<String> {
+            v.results()
+                .to_vec()
+                .iter()
+                .map(|i| v.index.kits[*i as usize].name.clone())
+                .collect()
+        };
+        assert_eq!(names(&mut v).len(), 3, "no list: every kit");
+        assert!(!v.list_active());
+        // Named by its file name alone: found in the library folder.
+        v.set_kit_list("BEST-PROWAVE.tsv");
+        wait(&mut v);
+        assert!(v.list_active());
+        assert_eq!(names(&mut v), ["Roland TR-808", "LinnDrum"]);
+        assert_eq!(v.results_all(), 2);
+        assert_eq!(
+            v.index.types,
+            [("Hip-hop".to_string(), 1), ("Drum machines".to_string(), 1)]
+        );
+        // A favourite is always there, first.
+        let other = v
+            .index
+            .kits
+            .iter()
+            .find(|k| !k.path.contains("/Machines/"))
+            .unwrap()
+            .clone();
+        v.set_favorite(&other.path, true);
+        assert_eq!(
+            names(&mut v),
+            [other.name.as_str(), "Roland TR-808", "LinnDrum"]
+        );
+        v.set_favorite(&other.path, false);
+        // The kit of new racks too (a folder inside it).
+        v.set_default_kit(&format!("{}/Kicks", other.path));
+        assert_eq!(names(&mut v).len(), 3);
+        v.set_default_kit("");
+        // One type.
+        v.filter.kind = Some("Drum machines".into());
+        assert_eq!(names(&mut v), ["LinnDrum"]);
+        v.filter.kind = None;
+        // Off: every kit again, and it stays off.
+        v.set_list_on(false);
+        assert!(!v.list_active());
+        assert_eq!(names(&mut v).len(), 3);
+        let saved = Settings::load(&data);
+        assert_eq!(saved.kit_list, "BEST-PROWAVE.tsv");
+        assert!(!saved.kit_list_on);
+        v.set_list_on(true);
+        assert_eq!(names(&mut v).len(), 2);
+        // A rescan keeps it.
+        v.rescan();
+        wait(&mut v);
+        assert_eq!(names(&mut v).len(), 2);
+        // A list that is not there: every kit, and why.
+        v.set_kit_list("/nowhere/NOPE.tsv");
+        wait(&mut v);
+        assert!(!v.list_active());
+        assert!(matches!(v.list, Some(Err(_))));
+        assert_eq!(names(&mut v).len(), 3);
+        // Cleared: as before.
+        v.set_kit_list("");
+        wait(&mut v);
+        assert!(v.list.is_none() && v.index.types.is_empty());
+        assert_eq!(names(&mut v).len(), 3);
         let _ = std::fs::remove_dir_all(lib);
         let _ = std::fs::remove_dir_all(data);
     }
@@ -2415,7 +2971,7 @@ mod tests {
                 980.0,
                 760.0,
                 2.0,
-                crate::theme::BONE3,
+                crate::theme::BONE3(),
                 |ui| {
                     crate::theme::apply(ui.ctx());
                     show(ui.ctx(), p, s)
@@ -2434,7 +2990,7 @@ mod tests {
             1200.0,
             640.0,
             2.0,
-            crate::theme::BONE,
+            crate::theme::BONE(),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 channel_rack::show(ui, &mut p, &mut s)

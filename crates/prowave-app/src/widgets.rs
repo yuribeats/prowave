@@ -2,8 +2,10 @@
 //! painters behind them are in `hw.rs`).
 use crate::i18n::tr;
 use egui::{pos2, vec2, Align2, Color32, Id, Painter, Rect, Response, Sense, Ui};
-
-pub const TEXT: Color32 = crate::theme::TEXT;
+#[allow(non_snake_case)]
+pub fn TEXT() -> Color32 {
+    crate::theme::TEXT()
+}
 
 /// Whether `resp` asks for its right-click menu this frame: a right-click (or long touch), and
 /// on macOS also a Control-click, as with a one-button mouse or a trackpad.
@@ -66,7 +68,7 @@ pub fn menu_title(
     use crate::theme::Face;
     let label = tr(label).to_uppercase();
     let size = 12.0;
-    let tw = crate::hw::galley(g, &label, Face::Bold, size, TEXT)
+    let tw = crate::hw::galley(g, &label, Face::Bold, size, TEXT())
         .size()
         .x;
     let w = tw + 24.0;
@@ -82,9 +84,9 @@ pub fn menu_title(
         &label,
         Face::Bold,
         size,
-        TEXT,
+        TEXT(),
     );
-    crate::hw::tri_down(g, pos2(r.right() - 9.0, cy + 0.5), crate::theme::INK2);
+    crate::hw::tri_down(g, pos2(r.right() - 9.0, cy + 0.5), crate::theme::INK2());
     (resp, w)
 }
 

@@ -1293,7 +1293,7 @@ mod tests {
             500.0,
             660.0,
             2.0,
-            crate::theme::BONE3,
+            crate::theme::BONE3(),
             |ui| {
                 crate::theme::apply(ui.ctx());
                 show_window(ui.ctx(), &mut p, &mut s)

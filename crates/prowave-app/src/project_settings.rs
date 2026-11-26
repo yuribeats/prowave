@@ -90,7 +90,7 @@ const TAB_H: f32 = 46.0;
 
 /// A settings row: the label in silkscreen, right-aligned in its column, then `add`.
 fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    row_ink(ui, label, theme::INK2, add)
+    row_ink(ui, label, theme::INK2(), add)
 }
 
 /// [`row`] with the label printed in `ink`.
@@ -263,8 +263,8 @@ fn general(ui: &mut egui::Ui, p: &mut Project) {
                 egui::TextEdit::singleline(&mut name)
                     .char_limit(MAX_NAME_CHARS)
                     .font(theme::font(Face::Bold, 12.0))
-                    .text_color(theme::ON_DARK)
-                    .background_color(theme::CAP)
+                    .text_color(theme::ON_DARK())
+                    .background_color(theme::CAP())
                     .margin(vec2(10.0, 6.0))
                     .desired_width(360.0),
             )
@@ -475,7 +475,11 @@ fn recording(ui: &mut egui::Ui, p: &mut Project) {
         }
     });
     let enabled = p.count_in;
-    let ink = if enabled { theme::INK2 } else { theme::PRINT };
+    let ink = if enabled {
+        theme::INK2()
+    } else {
+        theme::PRINT()
+    };
     row_ink(ui, tr("Count-in Bars"), ink, |ui| {
         let id = egui::Id::unique("count_in_bars");
         let (r, _) = ui.allocate_exact_size(vec2(36.0, CTRL_H), Sense::hover());
@@ -635,7 +639,7 @@ mod tests {
                 960.0,
                 500.0,
                 2.0,
-                crate::theme::BONE3,
+                crate::theme::BONE3(),
                 |ui| {
                     crate::theme::apply(ui.ctx());
                     show(ui.ctx(), &mut p, &mut s)

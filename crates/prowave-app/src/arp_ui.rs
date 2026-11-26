@@ -35,7 +35,7 @@ pub fn mode_name(m: ArpMode) -> &'static str {
 
 /// LCD ink.
 fn ink(a: f32) -> Color32 {
-    gear::alpha(gear::LCD_INK, a)
+    gear::alpha(gear::LCD_INK(), a)
 }
 
 /// Where the pattern is drawn: the columns of the steps and the lanes, top to bottom.
@@ -180,7 +180,7 @@ fn paint_pattern(
                 Align2::CENTER_CENTER,
                 &format!("{}", i + 1),
                 gear::mono_font(8.5),
-                if playing { gear::LCD } else { ink(0.75 * a) },
+                if playing { gear::LCD() } else { ink(0.75 * a) },
                 0.0,
             );
         }
@@ -320,7 +320,7 @@ pub fn show(
             Align2::CENTER_CENTER,
             tr("Randomize"),
             11.0,
-            gear::alpha(gear::INK, 0.35),
+            gear::alpha(gear::INK(), 0.35),
         );
     }
     let latch = Rect::from_min_size(pos2(right - 104.0, bar_y), vec2(104.0, 28.0));
@@ -354,7 +354,7 @@ pub fn show(
             Align2::CENTER_CENTER,
             tr("Latch"),
             11.0,
-            gear::alpha(gear::INK, 0.35),
+            gear::alpha(gear::INK(), 0.35),
         );
     }
 
@@ -383,7 +383,7 @@ pub fn show(
         Align2::RIGHT_CENTER,
         "ON",
         10.5,
-        gear::PRINT,
+        gear::PRINT(),
     );
     for i in 0..ARP_STEPS {
         let r = Rect::from_min_max(
@@ -399,7 +399,7 @@ pub fn show(
         let face = gear::paint_key(&p, r, Cap::Bone, lit || resp.is_pointer_button_down_on());
         gear::led(&p, face.center(), 3.0, lit && on);
         if i >= len {
-            p.rect_filled(r.expand(1.0), 3.0, gear::alpha(gear::BONE, 0.55));
+            p.rect_filled(r.expand(1.0), 3.0, gear::alpha(gear::BONE(), 0.55));
         }
         if on && resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
             arp.steps[i].on = !lit;

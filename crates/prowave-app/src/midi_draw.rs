@@ -434,7 +434,10 @@ pub fn draw(
     if lane == Lane::PitchBend {
         g.line_segment(
             [pos2(r.left(), rest_y), pos2(r.right(), rest_y)],
-            Stroke::new(1.0, crate::hw::lerp(theme::METER_WELL, theme::ON_DARK, 0.3)),
+            Stroke::new(
+                1.0,
+                crate::hw::lerp(theme::METER_WELL(), theme::ON_DARK(), 0.3),
+            ),
         );
     }
     let pts = points(controls, num);
@@ -464,7 +467,7 @@ pub fn draw(
     let mut mesh = egui::epaint::Mesh::default();
     let fill_at = |y: f32| {
         let t = ((y - r.top()) / r.height().max(1.0)).clamp(0.0, 1.0);
-        theme::ORANGE.gamma_multiply(0.25 + (0.05 - 0.25) * t)
+        theme::ORANGE().gamma_multiply(0.25 + (0.05 - 0.25) * t)
     };
     for w in line.windows(2) {
         if w[1].x > w[0].x {
@@ -479,7 +482,7 @@ pub fn draw(
         }
     }
     g.add(egui::Shape::mesh(mesh));
-    g.add(egui::Shape::line(line, Stroke::new(2.0, theme::ORANGE)));
+    g.add(egui::Shape::line(line, Stroke::new(2.0, theme::ORANGE())));
     // Breakpoint handles (a bone ring round an orange core) where there is room for them;
     // a drawn ramp's dense points show only at its ends.
     let shown: Vec<usize> = pts
@@ -504,16 +507,16 @@ pub fn draw(
         last_x = px;
         let p = pos2(px, view.y_of(lane, val(&controls[i])));
         if selected == Some(i) {
-            g.circle_filled(p, 8.0, theme::ORANGE.gamma_multiply(0.3));
+            g.circle_filled(p, 8.0, theme::ORANGE().gamma_multiply(0.3));
         }
-        g.circle_filled(p, 4.5, theme::BONE_HI);
+        g.circle_filled(p, 4.5, theme::BONE_HI());
         g.circle_filled(
             p,
             3.0,
             if selected == Some(i) {
-                theme::ORANGE_HI
+                theme::ORANGE_HI()
             } else {
-                theme::ORANGE
+                theme::ORANGE()
             },
         );
     }

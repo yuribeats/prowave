@@ -326,8 +326,8 @@ fn number(text: &str) -> Option<f32> {
 /// The unit's LCD for `display`.
 fn draw_display(p: &egui::Painter, rect: Rect, display: Display, info: &NativeFxInfo, v: &[f32]) {
     let glass = gear::lcd(p, rect);
-    let ink = Stroke::new(2.2, gear::LCD_INK);
-    let faint = Stroke::new(1.0, gear::alpha(gear::LCD_INK, 0.12));
+    let ink = Stroke::new(2.2, gear::LCD_INK());
+    let faint = Stroke::new(1.0, gear::alpha(gear::LCD_INK(), 0.12));
     let text = |k: usize| info.value_text(k, v[k]);
     match display {
         Display::None => {}
@@ -374,7 +374,7 @@ fn draw_display(p: &egui::Painter, rect: Rect, display: Display, info: &NativeFx
                 glass.left_top() + vec2(8.0, 22.0),
                 &t,
                 26.0,
-                gear::LCD_INK,
+                gear::LCD_INK(),
                 true,
             );
             gear::lcd_label(
@@ -390,7 +390,7 @@ fn draw_display(p: &egui::Painter, rect: Rect, display: Display, info: &NativeFx
                 pos2(glass.right() - 8.0 - w, glass.top() + 22.0),
                 &t,
                 26.0,
-                gear::LCD_INK,
+                gear::LCD_INK(),
                 true,
             );
         }
@@ -482,7 +482,7 @@ fn draw_display(p: &egui::Painter, rect: Rect, display: Display, info: &NativeFx
                 glass.left_top() + vec2(8.0, 22.0),
                 &num,
                 26.0,
-                gear::LCD_INK,
+                gear::LCD_INK(),
                 true,
             );
         }

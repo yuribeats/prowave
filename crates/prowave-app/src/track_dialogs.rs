@@ -235,7 +235,7 @@ fn rename_body(
         egui::TextEdit::singleline(name)
             .char_limit(MAX_TRACK_NAME)
             .font(theme::font(Face::Bold, 13.0))
-            .text_color(theme::ON_DARK)
+            .text_color(theme::ON_DARK())
             .frame(egui::Frame::NONE)
             .margin(vec2(6.0, 6.0))
             .desired_width(r.width() - 8.0)
@@ -308,7 +308,7 @@ fn go_to_body(ui: &mut egui::Ui, p: &mut Project, text: &mut String, done: &mut 
         egui::TextEdit::singleline(text)
             .char_limit(16)
             .font(theme::font(Face::Bold, 13.0))
-            .text_color(theme::ON_DARK)
+            .text_color(theme::ON_DARK())
             .frame(egui::Frame::NONE)
             .margin(vec2(6.0, 6.0))
             .desired_width(r.width() - 8.0)
@@ -409,7 +409,7 @@ fn color_body(ui: &mut egui::Ui, p: &mut Project, track: usize, done: &mut bool)
             g.rect_stroke(
                 face.expand(3.0),
                 5.0,
-                Stroke::new(2.0, theme::INK),
+                Stroke::new(2.0, theme::INK()),
                 egui::StrokeKind::Middle,
             );
         }
@@ -464,7 +464,7 @@ fn icon_body(ui: &mut egui::Ui, p: &mut Project, track: usize, done: &mut bool) 
             g.rect_stroke(
                 r,
                 4.0,
-                Stroke::new(1.0, theme::SEAM_DK),
+                Stroke::new(1.0, theme::SEAM_DK()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -472,7 +472,7 @@ fn icon_body(ui: &mut egui::Ui, p: &mut Project, track: usize, done: &mut bool) 
             g.rect_stroke(
                 r.expand(1.5),
                 5.0,
-                Stroke::new(2.0, theme::ORANGE),
+                Stroke::new(2.0, theme::ORANGE()),
                 egui::StrokeKind::Middle,
             );
         }
@@ -492,7 +492,7 @@ fn header_body(ui: &mut egui::Ui, p: &mut Project) {
         let clicked = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                hwm::row_label(ui, 280.0, 28.0, part_label(part), theme::INK2);
+                hwm::row_label(ui, 280.0, 28.0, part_label(part), theme::INK2());
                 let (r, _) = ui.allocate_exact_size(vec2(64.0, 28.0), Sense::hover());
                 let g = ui.painter().clone();
                 hw::toggle(
@@ -702,7 +702,7 @@ mod tests {
                 560.0,
                 440.0,
                 2.0,
-                crate::theme::BONE3,
+                crate::theme::BONE3(),
                 |ui| {
                     crate::theme::apply(ui.ctx());
                     show(ui.ctx(), &mut p, &mut s)

@@ -52,24 +52,31 @@ const VEL_H: f32 = 76.0;
 
 /// The ink of the grid lines at `alpha` (bar lines .22, beats .07, as on the arrange floor).
 pub(crate) fn ink(alpha: f32) -> Color32 {
-    theme::INK.gamma_multiply(alpha)
+    theme::INK().gamma_multiply(alpha)
 }
 
 /// The note grid's rows: white keys on the recess, black keys a shade deeper.
-const ROW_WHITE: Color32 = theme::BONE2;
+#[allow(non_snake_case)]
+fn ROW_WHITE() -> Color32 {
+    theme::BONE2()
+}
 fn row_black() -> Color32 {
-    hw::lerp(theme::BONE2, theme::BONE3, 0.62)
+    hw::lerp(theme::BONE2(), theme::BONE3(), 0.62)
 }
 /// Rows of pitches outside the scale, when the scale is highlighted: the deeper lane tone.
 fn row_out() -> Color32 {
-    hw::lerp(theme::BONE3, theme::SEAM, 0.3)
+    hw::lerp(theme::BONE3(), theme::SEAM(), 0.3)
 }
 
 /// A note's velocity as the depth of its black: soft notes print grey, hard ones black (the
 /// Hardware look tells values apart by material, not by hue).
 pub(crate) fn velocity_color(vel: u8) -> Color32 {
     let t = (vel as f32 / 127.0).clamp(0.0, 1.0).powf(0.8);
-    hw::lerp(theme::SEAM_DK, theme::CAP, t)
+    match theme::current() {
+        theme::Theme::Bone => hw::lerp(theme::SEAM_DK(), theme::CAP(), t),
+        // Graphite Amber: amber notes on the dark grid, deeper the softer they are played.
+        theme::Theme::Graphite => hw::lerp(Color32::from_rgb(0x8a, 0x62, 0x10), theme::ORANGE(), t),
+    }
 }
 
 /// A strip of the chassis (the tab row, a menu row) with a seam along its bottom.
@@ -94,7 +101,7 @@ pub(crate) fn mode_keys(
     let widths: Vec<f32> = tabs
         .iter()
         .map(|(_, t)| {
-            hw::galley(g, &t.to_uppercase(), Face::Bold, size, theme::INK)
+            hw::galley(g, &t.to_uppercase(), Face::Bold, size, theme::INK())
                 .size()
                 .x
                 + 34.0
@@ -166,24 +173,24 @@ pub(crate) fn icon_key(
 
 /// A scroll bar: a recessed track and a black thumb with a grip line.
 pub(crate) fn paint_scrollbar(g: &Painter, track: Rect, thumb: Rect, hot: bool) {
-    g.rect_filled(track, 0.0, theme::BONE);
+    g.rect_filled(track, 0.0, theme::BONE());
     let slot = track.shrink(2.0);
     hw::recess(g, slot, 3.0);
     let top = if hot {
-        hw::lerp(theme::CAP_TOP, theme::BONE, 0.18)
+        hw::lerp(theme::CAP_TOP(), theme::BONE(), 0.18)
     } else {
-        theme::CAP_TOP
+        theme::CAP_TOP()
     };
     g.rect_filled(thumb.translate(vec2(0.0, 1.0)), 3.0, ink(0.35));
-    hw::gradient(g, thumb, 3.0, top, theme::CAP);
+    hw::gradient(g, thumb, 3.0, top, theme::CAP());
     g.rect_stroke(
         thumb,
         3.0,
-        Stroke::new(1.0, theme::CAP_EDGE),
+        Stroke::new(1.0, theme::CAP_EDGE()),
         egui::StrokeKind::Inside,
     );
     let c = thumb.center();
-    let grip = Stroke::new(1.0, theme::BONE_HI.gamma_multiply(0.45));
+    let grip = Stroke::new(1.0, theme::BONE_HI().gamma_multiply(0.45));
     if thumb.width() >= thumb.height() {
         for dx in [-3.0, 0.0, 3.0] {
             g.vline(c.x + dx, c.y - 2.5..=c.y + 2.5, grip);
@@ -205,7 +212,7 @@ pub(crate) fn lcd_value(g: &Painter, r: Rect, value: &str) {
         pos2(r.right() - 6.0 - w, r.center().y - h / 2.0),
         value,
         h,
-        theme::LCD_INK,
+        theme::LCD_INK(),
         true,
     );
 }
@@ -245,8 +252,8 @@ pub(crate) fn region_header(g: &Painter, r: Rect, look: &theme::RegionLook, tag:
         12.0,
         look.header_ink,
     );
-    let outline = if look.outline == theme::ORANGE {
-        Stroke::new(1.5, theme::INK)
+    let outline = if look.outline == theme::ORANGE() {
+        Stroke::new(1.5, theme::INK())
     } else {
         Stroke::new(1.0, ink(0.75))
     };
@@ -257,7 +264,7 @@ pub(crate) fn region_header(g: &Painter, r: Rect, look: &theme::RegionLook, tag:
 /// orange pentagon with an ink edge, hanging from `flag_top`.
 pub(crate) fn playhead(g: &Painter, flag: &Painter, x: f32, area: Rect, flag_top: f32) {
     g.vline(x, area.y_range(), Stroke::new(3.0, ink(0.55)));
-    g.vline(x, area.y_range(), Stroke::new(2.0, theme::ORANGE));
+    g.vline(x, area.y_range(), Stroke::new(2.0, theme::ORANGE()));
     let pts = vec![
         pos2(x - 6.0, flag_top),
         pos2(x + 6.0, flag_top),
@@ -267,8 +274,8 @@ pub(crate) fn playhead(g: &Painter, flag: &Painter, x: f32, area: Rect, flag_top
     ];
     flag.add(Shape::convex_polygon(
         pts,
-        theme::ORANGE,
-        Stroke::new(1.0, theme::INK),
+        theme::ORANGE(),
+        Stroke::new(1.0, theme::INK()),
     ));
 }
 
@@ -309,7 +316,7 @@ pub(crate) fn gradient_h(g: &Painter, r: Rect, left: Color32, right: Color32) {
 pub(crate) fn paint_piano_key(g: &Painter, r: Rect, black: bool, held: bool, seam_below: bool) {
     let lit = |c: Color32| {
         if held {
-            hw::lerp(c, theme::ORANGE, 0.6)
+            hw::lerp(c, theme::ORANGE(), 0.6)
         } else {
             c
         }
@@ -317,8 +324,9 @@ pub(crate) fn paint_piano_key(g: &Painter, r: Rect, black: bool, held: bool, sea
     gradient_h(
         g,
         r,
+        // The keys are ivory in every look, as a keyboard's are.
         lit(Color32::from_rgb(0xdc, 0xd7, 0xcb)),
-        lit(theme::BONE_TOP),
+        lit(Color32::from_rgb(0xfb, 0xf9, 0xf4)),
     );
     // The white key's front edge, at the grid.
     g.vline(
@@ -326,7 +334,7 @@ pub(crate) fn paint_piano_key(g: &Painter, r: Rect, black: bool, held: bool, sea
         r.y_range(),
         Stroke::new(1.0, Color32::from_black_alpha(22)),
     );
-    let seam = Stroke::new(1.0, theme::SEAM);
+    let seam = Stroke::new(1.0, Color32::from_rgb(0xaf, 0xa7, 0x96));
     if black {
         let b = Rect::from_min_size(r.min, vec2(r.width() * 0.6, r.height()));
         let cr = egui::CornerRadius {
@@ -342,11 +350,11 @@ pub(crate) fn paint_piano_key(g: &Painter, r: Rect, black: bool, held: bool, sea
         let face = Rect::from_min_max(b.min, pos2(b.right(), b.bottom() - 1.0));
         let (top, bottom) = if held {
             (
-                hw::lerp(theme::CAP_TOP, theme::ORANGE, 0.6),
-                theme::ORANGE_DK,
+                hw::lerp(theme::CAP_TOP(), theme::ORANGE(), 0.6),
+                theme::ORANGE_DK(),
             )
         } else {
-            (theme::CAP_TOP, Color32::from_rgb(0x15, 0x14, 0x13))
+            (theme::CAP_TOP(), Color32::from_rgb(0x15, 0x14, 0x13))
         };
         hw::gradient(g, face, 2.0, top, bottom);
         g.hline(
@@ -364,7 +372,7 @@ pub(crate) fn paint_piano_key(g: &Painter, r: Rect, black: bool, held: bool, sea
         g.hline(
             r.left()..=r.right() - 1.0,
             r.bottom() + 0.5,
-            Stroke::new(1.0, theme::BONE_HI),
+            Stroke::new(1.0, Color32::from_rgb(0xf4, 0xf1, 0xea)),
         );
     }
 }
@@ -383,35 +391,53 @@ pub(crate) fn paint_note(
 ) -> Color32 {
     let radius = 2.0;
     if muted {
-        g.rect_filled(r, radius, theme::BONE_HI.gamma_multiply(0.55));
+        g.rect_filled(r, radius, theme::BONE_HI().gamma_multiply(0.55));
         let edge = if selected {
-            Stroke::new(1.5, theme::ORANGE)
+            Stroke::new(1.5, theme::ORANGE())
         } else {
-            Stroke::new(1.0, theme::PRINT)
+            Stroke::new(1.0, theme::PRINT())
         };
         g.rect_stroke(r, radius, edge, egui::StrokeKind::Inside);
-        return theme::PRINT;
+        return theme::PRINT();
     }
-    let (top, bottom, edge, lip, hi, line, print) = if selected {
+    let (top, bottom, edge, lip, hi, line, print) = if selected && theme::is_dark() {
+        // Graphite Amber: the notes are amber, so a selected one turns cream.
         (
-            theme::ORANGE_HI,
-            Color32::from_rgb(0xee, 0x4e, 0x0c),
-            Color32::from_rgb(0xb2, 0x3a, 0x06),
-            Color32::from_rgb(0xa8, 0x36, 0x05),
+            Color32::from_rgb(0xfb, 0xf6, 0xea),
+            Color32::from_rgb(0xe2, 0xda, 0xc6),
+            theme::ORANGE(),
+            Color32::from_rgb(0x6b, 0x4a, 0x00),
             Color32::from_white_alpha(110),
-            theme::INK.gamma_multiply(0.6),
-            theme::INK,
+            theme::ON_ACCENT().gamma_multiply(0.6),
+            theme::ON_ACCENT(),
+        )
+    } else if selected {
+        (
+            theme::ORANGE_HI(),
+            theme::pick(
+                Color32::from_rgb(0xee, 0x4e, 0x0c),
+                Color32::from_rgb(0xea, 0x9c, 0x00),
+            ),
+            theme::ORANGE_DK(),
+            theme::pick(
+                Color32::from_rgb(0xa8, 0x36, 0x05),
+                Color32::from_rgb(0x8a, 0x5c, 0x00),
+            ),
+            Color32::from_white_alpha(110),
+            theme::ON_ACCENT().gamma_multiply(0.6),
+            theme::ON_ACCENT(),
         )
     } else {
         let c = velocity_color(vel);
+        let print = theme::text_on(c);
         (
-            hw::lerp(c, theme::BONE, 0.16),
+            hw::lerp(c, theme::pick(theme::BONE(), Color32::WHITE), 0.16),
             c,
-            theme::CAP_EDGE,
+            theme::CAP_EDGE(),
             Color32::from_rgb(5, 5, 5),
             Color32::from_white_alpha(36),
-            theme::ON_DARK.gamma_multiply(0.5),
-            theme::ON_DARK,
+            print.gamma_multiply(0.5),
+            print,
         )
     };
     let lift = if r.height() >= 8.0 { 1.5 } else { 1.0 };
@@ -464,24 +490,24 @@ pub(crate) fn dark_fields(ui: &mut Ui) {
     let v = ui.visuals_mut();
     let r = egui::CornerRadius::same(3);
     for (w, face) in [
-        (&mut v.widgets.inactive, theme::CAP),
-        (&mut v.widgets.hovered, theme::CAP_TOP),
-        (&mut v.widgets.active, theme::CAP_TOP),
-        (&mut v.widgets.open, theme::CAP_TOP),
+        (&mut v.widgets.inactive, theme::CAP()),
+        (&mut v.widgets.hovered, theme::CAP_TOP()),
+        (&mut v.widgets.active, theme::CAP_TOP()),
+        (&mut v.widgets.open, theme::CAP_TOP()),
     ] {
         w.bg_fill = face;
         w.weak_bg_fill = face;
-        w.bg_stroke = Stroke::new(1.0, theme::CAP_EDGE);
-        w.fg_stroke = Stroke::new(1.0, theme::ON_DARK);
+        w.bg_stroke = Stroke::new(1.0, theme::CAP_EDGE());
+        w.fg_stroke = Stroke::new(1.0, theme::ON_DARK());
         w.corner_radius = r;
         w.expansion = 0.0;
     }
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, theme::INK2);
-    v.extreme_bg_color = theme::METER_WELL;
-    v.override_text_color = Some(theme::ON_DARK);
-    v.selection.bg_fill = theme::ORANGE;
-    v.selection.stroke = Stroke::new(1.0, theme::INK);
-    v.text_cursor.stroke = Stroke::new(2.0, theme::ORANGE);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, theme::INK2());
+    v.extreme_bg_color = theme::METER_WELL();
+    v.override_text_color = Some(theme::ON_DARK());
+    v.selection.bg_fill = theme::ORANGE();
+    v.selection.stroke = Stroke::new(1.0, theme::INK());
+    v.text_cursor.stroke = Stroke::new(2.0, theme::ORANGE());
     ui.spacing_mut().interact_size.y = 24.0;
     ui.spacing_mut().button_padding = vec2(8.0, 4.0);
 }
@@ -503,7 +529,7 @@ pub(crate) fn silk_label(ui: &mut Ui, text: &str) {
         Align2::LEFT_CENTER,
         text,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
 }
 
@@ -511,7 +537,10 @@ pub(crate) fn silk_label(ui: &mut Ui, text: &str) {
 pub(crate) fn key_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     let g = ui.painter().clone();
     let text = label.to_uppercase();
-    let w = hw::galley(&g, &text, Face::Bold, 11.0, theme::INK).size().x + 24.0;
+    let w = hw::galley(&g, &text, Face::Bold, 11.0, theme::INK())
+        .size()
+        .x
+        + 24.0;
     let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
     if !enabled {
         let face = hw::paint_key(&g, r, Cap::Bone, false, false);
@@ -522,7 +551,7 @@ pub(crate) fn key_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Respo
             &text,
             Face::Bold,
             11.0,
-            theme::SEAM_DK,
+            theme::SEAM_DK(),
         );
         return resp;
     }
@@ -550,7 +579,7 @@ pub(crate) fn empty_well(g: &Painter, body: Rect, msg: &str) {
         msg,
         Face::Body,
         13.0,
-        theme::TEXT_DIM,
+        theme::TEXT_DIM(),
     );
 }
 
@@ -966,12 +995,12 @@ fn tool_popup(ui: &Ui, g: &Painter, r: Rect, key: &str, tool: &mut Tool, cmd: bo
         g,
         pos2(body.left() + 17.0, body.center().y),
         *tool,
-        theme::INK,
+        theme::INK(),
     );
     hw::tri_down(
         g,
         pos2(body.right() - 11.0, body.center().y + 0.5),
-        theme::INK2,
+        theme::INK2(),
     );
     let tip = if cmd {
         tr("Command-click Tool")
@@ -1197,7 +1226,7 @@ fn toolbar(
             }
         }
         ui.separator();
-        ui.label(egui::RichText::new(tr("Note Events")).color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new(tr("Note Events")).color(theme::TEXT_DIM()));
         if item(ui, true, tr("Set Note Length to Grid"), "") {
             act.ops.push(Op::LengthToGrid);
         }
@@ -1261,7 +1290,7 @@ fn toolbar(
         ui.checkbox(&mut v.show_others, tr("Other Regions of the Track"));
         ui.checkbox(&mut v.show_lane, tr("Automation/MIDI"));
         ui.separator();
-        ui.label(egui::RichText::new(tr("Scale")).color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new(tr("Scale")).color(theme::TEXT_DIM()));
         let has_scale = v.scale_root.is_some();
         for (mode, label) in [
             (ScaleView::Off, tr("Off")),
@@ -1279,7 +1308,8 @@ fn toolbar(
         }
         if !has_scale {
             ui.label(
-                egui::RichText::new(tr("Pick a root under Scale Quantize")).color(theme::TEXT_DIM),
+                egui::RichText::new(tr("Pick a root under Scale Quantize"))
+                    .color(theme::TEXT_DIM()),
             );
         }
     });
@@ -1336,7 +1366,7 @@ fn toolbar(
     // The chord the selected notes make (Logic shows it in the editor's header), on a small
     // LCD.
     if let Some(chord) = &v.chord {
-        let gal = hw::galley(&g, chord, Face::Lcd, 13.0, theme::LCD_INK);
+        let gal = hw::galley(&g, chord, Face::Lcd, 13.0, theme::LCD_INK());
         let chip = Rect::from_min_size(pos2(x, ky), vec2(gal.size().x + 20.0, kh));
         hw::bracket(
             &g,
@@ -1353,7 +1383,7 @@ fn toolbar(
             chord,
             Face::Lcd,
             13.0,
-            theme::LCD_INK,
+            theme::LCD_INK(),
         );
         x = chip.right() + 10.0;
     }
@@ -1405,7 +1435,7 @@ fn toolbar(
 
 /// The arrow in front of a zoom slider: ↔ for time, ↕ for pitch.
 fn zoom_arrow(g: &Painter, c: Pos2, horizontal: bool) {
-    let st = Stroke::new(1.6, theme::INK2);
+    let st = Stroke::new(1.6, theme::INK2());
     let (a, b) = if horizontal {
         (c - vec2(7.0, 0.0), c + vec2(7.0, 0.0))
     } else {
@@ -1417,7 +1447,7 @@ fn zoom_arrow(g: &Painter, c: Pos2, horizontal: bool) {
     for (tip, dir) in [(a, d), (b, -d)] {
         g.add(Shape::convex_polygon(
             vec![tip, tip + dir * 4.0 + n * 3.5, tip + dir * 4.0 - n * 3.5],
-            theme::INK2,
+            theme::INK2(),
             Stroke::NONE,
         ));
     }
@@ -1434,7 +1464,7 @@ fn small_q(ui: &Ui, g: &Painter, r: Rect, key: &str, enabled: bool) -> bool {
             "Q",
             Face::Bold,
             12.0,
-            theme::SEAM_DK,
+            theme::SEAM_DK(),
         );
         return false;
     }
@@ -1495,7 +1525,7 @@ fn insp_slider_row(
         Align2::RIGHT_CENTER,
         label,
         11.0,
-        theme::INK2,
+        theme::INK2(),
     );
     let shown = format!("{}", (*value * 100.0).round() as i32);
     insp_slider(ui, g, x + col, w - col, y, key, value, &shown);
@@ -1839,8 +1869,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let content_w = ((span_hi - span_lo + 2.0) * v.beat_px).max(grid.width());
     {
         let gs = ui.painter_at(Rect::from_min_max(hbar.min, vbar.max));
-        let tw = hbar.width() - 4.0;
-        let thumb_w = (tw * grid.width() / content_w).clamp(24.0, tw);
+        // (Never below zero: a pane dragged short leaves the bars no room.)
+        let tw = (hbar.width() - 4.0).max(0.0);
+        let thumb_w = (tw * grid.width() / content_w).clamp(24.0_f32.min(tw), tw);
         let max_x = (content_w - grid.width()).max(1.0);
         let thumb_x =
             hbar.left() + 2.0 + (tw - thumb_w) * ((v.scroll_x - min_x) / max_x).clamp(0.0, 1.0);
@@ -1854,8 +1885,8 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         }
         paint_scrollbar(&gs, hbar, thumb, r.hovered() || r.dragged());
 
-        let th = vbar.height() - 4.0;
-        let thumb_h = (th * grid.height() / content_h).clamp(24.0, th);
+        let th = (vbar.height() - 4.0).max(0.0);
+        let thumb_h = (th * grid.height() / content_h).clamp(24.0_f32.min(th), th);
         let max_y = (content_h - grid.height()).max(1.0);
         let thumb_y = vbar.top() + 2.0 + (th - thumb_h) * (v.scroll_y / max_y).clamp(0.0, 1.0);
         let thumb = Rect::from_min_size(
@@ -1893,7 +1924,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
 
     // ---- Grid background: the key rows on the recess, ink lines for bars and beats.
     let gg = ui.painter_at(grid);
-    gg.rect_filled(grid, 0.0, ROW_WHITE);
+    gg.rect_filled(grid, 0.0, ROW_WHITE());
     let top_row = ((scroll_y / key_h).floor() as i32).max(0);
     let bottom_row =
         (((scroll_y + grid.height()) / key_h).ceil() as i32).min(rows.len() as i32 - 1);
@@ -1906,16 +1937,16 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         // are a shade deeper.
         let fill = match scale {
             Some((root, offs)) if !note_edit::in_scale(pitch as u8, root, offs) => row_out(),
-            Some(_) => ROW_WHITE,
+            Some(_) => ROW_WHITE(),
             None if is_black(pitch) => row_black(),
-            None => ROW_WHITE,
+            None => ROW_WHITE(),
         };
         gg.rect_filled(r, 0.0, fill);
         if scale.is_some_and(|(root, _)| pitch.rem_euclid(12) == root as i32) {
             gg.rect_filled(
                 Rect::from_min_size(r.min, vec2(3.0, key_h)),
                 0.0,
-                theme::ORANGE.gamma_multiply(0.6),
+                theme::ORANGE().gamma_multiply(0.6),
             );
         }
         if pitch % 12 == 0 || rows.0.is_some() {
@@ -2673,7 +2704,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     // ---- Inspector (left): quantize, scale quantize, velocity, on a faceplate with a seam
     // between it and the editor.
     let gi = ui.painter_at(insp);
-    gi.rect_filled(insp, 0.0, theme::BONE);
+    gi.rect_filled(insp, 0.0, theme::BONE());
     let plate = Rect::from_min_max(insp.min + vec2(6.0, 6.0), insp.max - vec2(9.0, 6.0));
     hw::faceplate(&gi, plate, 4.0, false);
     for c in [
@@ -2690,7 +2721,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     let mut y = plate.top() + 26.0;
     let n_sel = v.selected.len();
     // Region header, two-tone as in the main inspector: "▼ REGION" then the name in print.
-    hw::tri_down(&gi, pos2(ix + 4.0, y + 1.0), theme::INK);
+    hw::tri_down(&gi, pos2(ix + 4.0, y + 1.0), theme::INK());
     let head = hw::text(
         &gi,
         pos2(ix + 14.0, y),
@@ -2698,7 +2729,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         &caption(tr("Region:")).to_uppercase(),
         Face::Silk,
         14.0,
-        theme::INK,
+        theme::INK(),
     );
     let room = ix + iw - head.right() - 14.0;
     let name = hw::fit(&gi, &region_name.to_uppercase(), Face::Silk, 14.0, room);
@@ -2709,7 +2740,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         &name,
         Face::Silk,
         14.0,
-        theme::PRINT,
+        theme::PRINT(),
     );
     // The editor's mouse and key commands, on hover over the header.
     let head_r = Rect::from_min_max(pos2(ix, y - 10.0), pos2(ix + iw, y + 10.0));
@@ -2874,7 +2905,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     // ---- Draw keys, notes, ruler, playhead (after edits so they show immediately)
     let notes = &p.tracks[ti].regions[ri].notes;
     let gk = ui.painter_at(keys);
-    gk.rect_filled(keys, 0.0, theme::SEAM);
+    gk.rect_filled(keys, 0.0, theme::SEAM());
     for row in top_row..=bottom_row {
         let pitch = rows.pitch(row);
         let y = grid.top() + row as f32 * key_h - scroll_y;
@@ -2901,9 +2932,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 Face::Bold,
                 (key_h * 0.75).clamp(7.5, 9.5),
                 if on_black && !held {
-                    theme::ON_DARK
+                    theme::ON_DARK()
                 } else {
-                    theme::INK2
+                    theme::INK2()
                 },
             );
         }
@@ -2993,11 +3024,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
     if let Drag::Marquee { from } = &v.drag {
         if let Some(now) = ui.input(|i| i.pointer.hover_pos()) {
             let r = Rect::from_two_pos(*from, now);
-            gg.rect_filled(r, 0.0, theme::ORANGE.gamma_multiply(0.08));
+            gg.rect_filled(r, 0.0, theme::ORANGE().gamma_multiply(0.08));
             gg.rect_stroke(
                 r,
                 0.0,
-                Stroke::new(1.0, theme::ORANGE),
+                Stroke::new(1.0, theme::ORANGE()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -3010,7 +3041,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         gv.rect_filled(
             Rect::from_min_max(vel_label.min - vec2(0.0, 4.0), vel_rect.max),
             0.0,
-            theme::BONE,
+            theme::BONE(),
         );
         let marks: &[(f32, &str)] = match v.lane {
             _ if tune_on => &[],
@@ -3024,9 +3055,9 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         hw::scale_v(&gv, scale_r, marks, false);
         hw::seam_v(&gv, vel_label.right() - 2.0, vel_label.y_range());
     }
-    gv.rect_filled(vel_rect.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI);
-    gv.rect_filled(vel_rect, 3.0, theme::METER_WELL);
-    let lane_line = hw::lerp(theme::METER_WELL, theme::ON_DARK, 0.09);
+    gv.rect_filled(vel_rect.translate(vec2(0.0, 1.0)), 3.0, theme::BONE_HI());
+    gv.rect_filled(vel_rect, 3.0, theme::METER_WELL());
+    let lane_line = hw::lerp(theme::METER_WELL(), theme::ON_DARK(), 0.09);
     for f in [0.25f32, 0.5, 0.75] {
         let y = vel_rect.bottom() - f * vel_rect.height();
         gv.hline(vel_rect.x_range(), y, Stroke::new(1.0, lane_line));
@@ -3037,7 +3068,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             gv.vline(
                 bx,
                 vel_rect.y_range(),
-                Stroke::new(1.0, hw::lerp(theme::METER_WELL, theme::ON_DARK, 0.2)),
+                Stroke::new(1.0, hw::lerp(theme::METER_WELL(), theme::ON_DARK(), 0.2)),
             );
         }
     }
@@ -3055,7 +3086,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
             Align2::LEFT_CENTER,
             &name,
             10.0,
-            theme::ON_DARK_DIM,
+            theme::ON_DARK_DIM(),
         );
     }
     if v.lane != Lane::Velocity && v.show_lane && !tune_on {
@@ -3080,14 +3111,18 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         let sel = v.selected.contains(&i);
         // Each note's velocity: a stem up from the floor with a head, and a line along the
         // note (lit like a meter's segments; orange for the selection).
-        let col = if sel { theme::ORANGE } else { theme::BONE_HI };
+        let col = if sel {
+            theme::ORANGE()
+        } else {
+            theme::pick(theme::BONE_HI(), theme::ON_DARK())
+        };
         if sel {
             gv.vline(
                 x,
                 top..=vel_rect.bottom() - 2.0,
-                Stroke::new(6.0, theme::ORANGE.gamma_multiply(0.25)),
+                Stroke::new(6.0, theme::ORANGE().gamma_multiply(0.25)),
             );
-            gv.circle_filled(pos2(x, top), 6.0, theme::ORANGE.gamma_multiply(0.3));
+            gv.circle_filled(pos2(x, top), 6.0, theme::ORANGE().gamma_multiply(0.3));
         }
         gv.vline(
             x,
@@ -3113,11 +3148,11 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         pos2(rx1.min(grid.right()), ruler.bottom()),
     );
     if span.width() > 0.0 {
-        gr.rect_filled(span, 0.0, theme::BONE_HI);
+        gr.rect_filled(span, 0.0, theme::BONE_HI());
         gr.hline(
             span.x_range(),
             span.bottom() - 1.0,
-            Stroke::new(2.0, theme::INK2),
+            Stroke::new(2.0, theme::INK2()),
         );
     }
     let label_every = [1i32, 2, 4, 8, 16]
@@ -3142,7 +3177,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
         gr.vline(
             x,
             ruler.top() + 4.0..=ruler.bottom(),
-            Stroke::new(1.0, theme::INK2),
+            Stroke::new(1.0, theme::INK2()),
         );
         if (bar0 as i32 - (start_bar as i32 - 1)).rem_euclid(label_every) == 0 {
             hw::text(
@@ -3152,7 +3187,7 @@ pub fn show(ui: &mut Ui, p: &mut Project, s: &mut UiState) {
                 &bar_label(bar0 + 1),
                 Face::Lcd,
                 11.0,
-                theme::INK,
+                theme::INK(),
             );
         }
     }
@@ -3306,7 +3341,7 @@ pub fn show_window(ctx: &egui::Context, p: &mut Project, s: &mut UiState) {
                 && vctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::BG))
+            .frame(egui::Frame::new().fill(theme::BG()))
             .show(ui, |ui| {
                 ui.push_id("piano_roll_window", |ui| show(ui, p, s));
             });
@@ -4053,7 +4088,7 @@ mod tests {
                 w,
                 h,
                 1.0,
-                crate::theme::BONE,
+                crate::theme::BONE(),
                 |ui| {
                     crate::theme::apply(ui.ctx());
                     f(ui, p, s);
